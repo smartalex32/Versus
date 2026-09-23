@@ -1,0 +1,18 @@
+# Local credentials; sample environment documentation may be shared.
+.env
+.env.*
+!.env.example
+
+# Codex runtime state.
+.codex/auth.json
+.codex/history.jsonl
+.codex/sessions/
+.codex/archived_sessions/
+.codex/log/
+.codex/tmp/
+.codex/*.sqlite*
+
+# Local OS metadata.
+.DS_Store
+Thumbs.db
+desktop.ini

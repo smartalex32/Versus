@@ -1,0 +1,13 @@
+# Primary session defaults; keep account, machine, and trust settings personal.
+model = "gpt-5.6-terra"
+model_reasoning_effort = "medium"
+plan_mode_reasoning_effort = "medium"
+
+# Roles are discovered from .codex/agents/*.toml.
+[agents]
+enabled = true
+# Three open subagents in addition to the primary session.
+max_concurrent_threads_per_session = 5
+default_subagent_model = "gpt-5.6-luna"
+default_subagent_reasoning_effort = "low"
+interrupt_message = true
