@@ -61,6 +61,7 @@ impl TextUndo {
 }
 
 pub struct VersusApp {
+    logo_texture: egui::TextureHandle,
     mode: Mode,
     left_path: String,
     right_path: String,
@@ -116,7 +117,12 @@ impl VersusApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let settings = load_settings();
         apply_theme(&cc.egui_ctx, settings.dark_mode);
+        let logo_image: egui::ColorImage = (&crate::logo::icon_data()).into();
+        let logo_texture =
+            cc.egui_ctx
+                .load_texture("versus-mark", logo_image, egui::TextureOptions::LINEAR);
         Self {
+            logo_texture,
             mode: Mode::Directory,
             left_path: String::new(),
             right_path: String::new(),
@@ -585,7 +591,7 @@ impl eframe::App for VersusApp {
 impl VersusApp {
     fn header(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.label(RichText::new("◀").size(25.0).color(accent(self.dark_mode)));
+            ui.image((self.logo_texture.id(), egui::vec2(30.0, 30.0)));
             ui.label(RichText::new("Versus").size(23.0).strong());
             ui.separator();
             let mode_name = match self.mode {
