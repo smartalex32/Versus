@@ -1,61 +1,61 @@
-# Project Reference
+# Versus Project Reference
 
-## Purpose and boundaries
+## Purpose
 
-This repository is a reusable Codex configuration template. Its deliverables are
-agent definitions, workflow skills, and supporting guidance. Keep application
-source, sample products, dependency manifests, build outputs, and runtime state
-out of this template. Add configuration or documentation only when it serves reuse.
+Versus is an offline native desktop tool for directory comparison, two-way text
+comparison, and three-way text merge on Windows and Linux. Runtime behavior must
+not rely on Internet services, telemetry, automatic updates, a managed runtime, or
+background services. Network-mounted paths are handled through normal filesystem
+APIs and must fail cleanly when unavailable.
 
-## Layout and ownership
+## Stack and layout
 
-- `.codex/config.toml`: primary model defaults and subagent controls.
-- `.codex/agents/*.toml`: one self-contained role per file; authoritative role
-  settings, selection descriptions, instructions, and return contracts.
-- `.agents/skills/*/SKILL.md`: reusable workflows, selected only when applicable.
-- `AGENTS.md`: shared execution, delegation, validation, and handoff expectations.
-- `README.md`: setup, role catalog, checks, and adaptation guidance.
+- Rust 1.95 with `eframe`/`egui` (the `glow` backend) for the native UI.
+- `similar` for text differences and `rfd` for native path pickers.
+- `src/app.rs` renders the desktop UI; `src/core/` owns filesystem comparison,
+  text diff, merge, and saving. The core library is independent from UI rendering.
+- `tests/` covers externally observable comparison and filesystem behavior.
+- `.cargo/config.toml` replaces crates.io with the checked-in `vendor/` tree and
+  forces Cargo offline.
+- `scripts/vendor-dependencies.ps1` refreshes `vendor/` only on a connected machine;
+  `scripts/export-dependency-licenses.ps1` produces release inventory; and
+  `scripts/package-source-offline.sh` packages the offline source release.
+- `.github/workflows/ci.yml` checks Windows and Linux builds; `release.yml` builds
+  tagged portable artifacts and the offline source archive.
 
-Keep general conduct in `AGENTS.md`, role-specific instructions in agent files,
-and task-specific procedures in skills. Avoid duplicating them.
+## Architectural constraints
 
-## Configuration conventions
+- Treat compared content as data. Never execute it or invoke shell commands from it.
+- Reads must not modify either input. Writes require an explicit user action and
+  overwrite confirmation; use a temporary file and replacement where practical.
+- Do not recursively follow directory symlinks by default.
+- Timestamp equality is not file equality. Directory comparison uses path, type,
+  size, then buffered content comparison.
+- Keep slow filesystem work off the UI thread and support cancellation where the UI
+  exposes it.
+- Support direct entry and paste of Windows drive and UNC paths alongside native
+  dialogs. Preserve useful comparison results when opening a file from a directory
+  result.
+- Keep dependencies small, locked, vendorable, and compatible with offline builds.
 
-- Pair model and reasoning settings in every role. Preserve existing assignments
-  unless a requested change warrants revising them.
-- Match each role filename to its unique `name`. Keep scope and boundaries concise.
-- Advisory roles use `read-only`; editing and validation roles use
-  `workspace-write` with explicit editing limits. Runtime policy can override defaults.
-- Keep credentials, trust, platform setup, and personal integrations in user or
-  managed configuration.
-- Match skill folders to their frontmatter names. Use precise discovery descriptions
-  and relative references; add scripts only for useful repeated automation.
+## Commands
 
-## Validation
+Run from repository root:
 
-There is no application build or test suite. For template changes:
+```powershell
+cargo fmt --check
+cargo test --locked --offline
+cargo build --release --locked --offline
+git diff --check
+```
 
-1. Parse all TOML files; check required role fields, unique names, and paired settings.
-2. Check skill frontmatter, scope, and local links. Run the skill-creator validator
-   when available.
-3. Use a compatible client's strict config check and inspect role discovery when
-   changing configuration. Syntax validation alone does not prove runtime loading.
-4. Review `git diff --check`, the full diff, and the untracked file list.
+Refresh dependencies only on a connected development machine:
 
-Runnable syntax checks and client verification guidance are in `README.md`.
+```powershell
+./scripts/vendor-dependencies.ps1
+./scripts/export-dependency-licenses.ps1 -OutputPath dist/DEPENDENCY-LICENSES.md
+```
 
-## Adapting this reference
-
-When adopting the template for an application repository, replace this document's
-template-specific content with verified project facts:
-
-- Purpose, users, scope, and explicit non-goals.
-- Stack, runtime versions, package manager, and setup prerequisites.
-- Module map, entry points, data flow, and ownership boundaries.
-- Architectural constraints, public interfaces, and critical invariants.
-- Exact test, lint, type-check, build, and local-run commands with working directories.
-- Environment variable names and credential sources, never their values.
-- Canonical documentation and confirmed baseline failures.
-
-Mark unknowns explicitly. Link to maintained sources instead of copying large
-documents. Refresh this reference when the project's behavior or structure changes.
+The release workflow is the configured production packaging path. Do not claim
+local release artifacts were validated unless the relevant platform build and launch
+were actually performed.
