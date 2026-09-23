@@ -10,9 +10,11 @@ authentication or make outbound network requests at runtime.
 
 Open Versus and choose **Directory** or **2-Way**. Enter, paste, drop,
 or browse for local paths, mapped drives, UNC shares, or mounted Linux paths.
-Directory comparison starts with the **Diffs** filter; use **All**, **Diffs**, or
-**Same** to change the visible results, and double-click a changed file to inspect
-it and return to the directory results afterward. File comparison has the same
+Directory comparison starts with **All** and shows aligned folder trees. Expand a
+folder to inspect its indented contents; color markers identify matching, changed,
+and one-sided items. Use **All**, **Diffs**, or **Same** to change the visible
+results, and double-click a changed file to inspect it and return to the directory
+results afterward. File comparison has the same
 view controls and shows aligned line numbers, highlighted changes, and difference
 navigation. Choose
 **Edit buffers** to edit either side, then **Recalculate edited diff** to update

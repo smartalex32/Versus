@@ -342,7 +342,7 @@ Right Only
 
 Default:
 
-Different
+All
 
 The user should be able to quickly answer:
 

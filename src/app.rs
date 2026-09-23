@@ -1,5 +1,6 @@
 use eframe::egui::{self, Color32, RichText, TextEdit};
 use std::{
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{Arc, atomic::AtomicBool, mpsc},
     thread,
@@ -24,6 +25,13 @@ enum DirectoryFilter {
     Same,
     LeftOnly,
     RightOnly,
+}
+#[derive(Clone, Debug)]
+struct DirectoryTreeRow {
+    entry_index: usize,
+    depth: usize,
+    has_children: bool,
+    display_state: DirectoryEntryState,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FileViewFilter {
@@ -88,6 +96,9 @@ pub struct VersusApp {
     three_loaded_left_path: String,
     three_loaded_right_path: String,
     directory: Option<DirectoryDiff>,
+    directory_tree: Vec<DirectoryTreeRow>,
+    collapsed_directories: HashSet<PathBuf>,
+    root_collapsed: bool,
     directory_job: Option<DirectoryJob>,
     file_job: Option<FileJob>,
     directory_filter: DirectoryFilter,
@@ -151,9 +162,12 @@ impl VersusApp {
             three_loaded_left_path: String::new(),
             three_loaded_right_path: String::new(),
             directory: None,
+            directory_tree: Vec::new(),
+            collapsed_directories: HashSet::new(),
+            root_collapsed: false,
             directory_job: None,
             file_job: None,
-            directory_filter: DirectoryFilter::Different,
+            directory_filter: DirectoryFilter::All,
             file_filter: FileViewFilter::All,
             two_rows: Vec::new(),
             two_diff: None,
@@ -312,6 +326,14 @@ impl VersusApp {
                     } else {
                         format!("Compared {} entries.", result.entries.len())
                     };
+                    self.directory_tree = build_directory_tree(&result.entries);
+                    self.collapsed_directories = result
+                        .entries
+                        .iter()
+                        .filter(|entry| matches!(entry.kind, DirectoryEntryKind::Directory))
+                        .map(|entry| entry.relative_path.clone())
+                        .collect();
+                    self.root_collapsed = false;
                     self.directory = Some(result);
                     self.compared_directory_left = job.left_root.clone();
                     self.compared_directory_right = job.right_root.clone();
@@ -743,8 +765,8 @@ impl VersusApp {
         let mut left_only = 0;
         let mut right_only = 0;
         let mut issues = 0;
-        for entry in &directory.entries {
-            match entry.state {
+        for row in &self.directory_tree {
+            match row.display_state {
                 DirectoryEntryState::Same => same += 1,
                 DirectoryEntryState::Different => different += 1,
                 DirectoryEntryState::LeftOnly => left_only += 1,
@@ -955,7 +977,7 @@ impl VersusApp {
                 true,
             );
         });
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui.small_button("Swap sides").clicked() {
                 std::mem::swap(
                     &mut self.directory_left_path,
@@ -984,46 +1006,46 @@ impl VersusApp {
                     }
                 }
             });
+            ui.separator();
+            ui.colored_label(
+                state_color(&DirectoryEntryState::Different, self.dark_mode),
+                "● Different",
+            );
+            ui.colored_label(
+                state_color(&DirectoryEntryState::Same, self.dark_mode),
+                "● Same",
+            );
+            ui.colored_label(
+                state_color(&DirectoryEntryState::LeftOnly, self.dark_mode),
+                "● One side",
+            );
             if self.directory_job.is_some() {
                 ui.spinner();
             }
         });
         ui.add_space(4.0);
-        let entries: Vec<DirectoryEntry> = self
-            .directory
-            .as_ref()
-            .map(|d| {
-                d.entries
-                    .iter()
-                    .filter(|e| match self.directory_filter {
-                        DirectoryFilter::All => true,
-                        DirectoryFilter::Different => matches!(
-                            e.state,
-                            DirectoryEntryState::Different
-                                | DirectoryEntryState::LeftOnly
-                                | DirectoryEntryState::RightOnly
-                                | DirectoryEntryState::TypeMismatch
-                                | DirectoryEntryState::Error(_)
-                        ),
-                        DirectoryFilter::Same => matches!(e.state, DirectoryEntryState::Same),
-                        DirectoryFilter::LeftOnly => {
-                            matches!(e.state, DirectoryEntryState::LeftOnly)
-                        }
-                        DirectoryFilter::RightOnly => {
-                            matches!(e.state, DirectoryEntryState::RightOnly)
-                        }
-                    })
-                    .cloned()
-                    .collect()
+        let visible_rows = if self.root_collapsed {
+            Vec::new()
+        } else {
+            self.directory.as_ref().map_or_else(Vec::new, |directory| {
+                visible_directory_rows(
+                    &directory.entries,
+                    &self.directory_tree,
+                    self.directory_filter,
+                    &self.collapsed_directories,
+                )
             })
-            .unwrap_or_default();
+        };
         let table_height = (ui.available_height() - 165.0).max(160.0);
-        let side_width = ((ui.available_width() - 190.0) / 2.0).max(80.0);
+        let side_width = ((ui.available_width() - 34.0) / 2.0).max(100.0);
         ui.label(format!(
             "{} of {} items shown",
-            entries.len(),
+            visible_rows.len(),
             self.directory.as_ref().map_or(0, |d| d.entries.len())
         ));
+        let mut toggled_folder = None;
+        let mut toggled_root = false;
+        let mut opened_file = None;
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.set_min_height(table_height);
             ui.horizontal(|ui| {
@@ -1032,16 +1054,12 @@ impl VersusApp {
                     egui::Label::new(RichText::new("LEFT  •  Name").strong()),
                 );
                 ui.add_sized(
-                    [145.0, 20.0],
-                    egui::Label::new(RichText::new("RESULT").strong()),
-                );
-                ui.add_sized(
                     [side_width, 20.0],
                     egui::Label::new(RichText::new("RIGHT  •  Name").strong()),
                 );
             });
             ui.separator();
-            if entries.is_empty() {
+            if visible_rows.is_empty() && !self.root_collapsed {
                 ui.label(if self.directory.is_some() {
                     "No items match this view. Choose another filter to see more."
                 } else {
@@ -1053,76 +1071,98 @@ impl VersusApp {
                 .show(ui, |ui| {
                     egui::Grid::new("directory-results")
                         .striped(true)
-                        .num_columns(3)
+                        .num_columns(2)
                         .min_col_width(0.0)
                         .show(ui, |ui| {
-                            for entry in entries {
-                                let name = entry.relative_path.display().to_string();
-                                let icon = if matches!(entry.kind, DirectoryEntryKind::Directory) {
-                                    "Folder"
-                                } else {
-                                    "File"
-                                };
-                                let left_visible =
-                                    !matches!(entry.state, DirectoryEntryState::RightOnly);
-                                let right_visible =
-                                    !matches!(entry.state, DirectoryEntryState::LeftOnly);
-                                let left_response = ui.add_sized(
-                                    [side_width, 22.0],
-                                    egui::Label::new(if left_visible {
-                                        format!("{icon}  {name}")
-                                    } else {
-                                        String::new()
-                                    })
-                                    .truncate()
-                                    .sense(egui::Sense::click()),
-                                );
-                                let color = state_color(&entry.state, self.dark_mode);
-                                ui.add_sized(
-                                    [145.0, 22.0],
-                                    egui::Label::new(
-                                        RichText::new(format!(
-                                            "●  {}",
-                                            directory_state(&entry.state)
-                                        ))
-                                        .color(color),
-                                    )
-                                    .truncate(),
-                                );
-                                let right_response = ui.add_sized(
-                                    [side_width, 22.0],
-                                    egui::Label::new(if right_visible {
-                                        format!("{icon}  {name}")
-                                    } else {
-                                        String::new()
-                                    })
-                                    .truncate()
-                                    .sense(egui::Sense::click()),
-                                );
-                                if (left_response.double_clicked()
-                                    || right_response.double_clicked())
-                                    && matches!(entry.kind, DirectoryEntryKind::File)
-                                    && matches!(
-                                        entry.state,
-                                        DirectoryEntryState::Different | DirectoryEntryState::Same
-                                    )
+                            if let Some(directory) = &self.directory {
+                                let root_state = if self
+                                    .directory_tree
+                                    .iter()
+                                    .any(|row| row.display_state != DirectoryEntryState::Same)
                                 {
-                                    self.left_path = Path::new(&self.compared_directory_left)
-                                        .join(&entry.relative_path)
-                                        .display()
-                                        .to_string();
-                                    self.right_path = Path::new(&self.compared_directory_right)
-                                        .join(&entry.relative_path)
-                                        .display()
-                                        .to_string();
-                                    self.mode = Mode::TwoWay;
-                                    self.compare_two_paths();
-                                }
+                                    DirectoryEntryState::Different
+                                } else {
+                                    DirectoryEntryState::Same
+                                };
+                                toggled_root |= directory_root_cell(
+                                    ui,
+                                    &self.compared_directory_left,
+                                    &root_state,
+                                    self.root_collapsed,
+                                    side_width,
+                                    self.dark_mode,
+                                );
+                                toggled_root |= directory_root_cell(
+                                    ui,
+                                    &self.compared_directory_right,
+                                    &root_state,
+                                    self.root_collapsed,
+                                    side_width,
+                                    self.dark_mode,
+                                );
                                 ui.end_row();
+                                for row_index in &visible_rows {
+                                    let row = &self.directory_tree[*row_index];
+                                    let entry = &directory.entries[row.entry_index];
+                                    let collapsed =
+                                        self.collapsed_directories.contains(&entry.relative_path);
+                                    let (left_toggle, left_open) = directory_tree_cell(
+                                        ui,
+                                        entry,
+                                        row,
+                                        true,
+                                        collapsed,
+                                        side_width,
+                                        self.dark_mode,
+                                    );
+                                    let (right_toggle, right_open) = directory_tree_cell(
+                                        ui,
+                                        entry,
+                                        row,
+                                        false,
+                                        collapsed,
+                                        side_width,
+                                        self.dark_mode,
+                                    );
+                                    if left_toggle || right_toggle {
+                                        toggled_folder = Some(entry.relative_path.clone());
+                                    }
+                                    if (left_open || right_open)
+                                        && matches!(entry.kind, DirectoryEntryKind::File)
+                                        && matches!(
+                                            entry.state,
+                                            DirectoryEntryState::Different
+                                                | DirectoryEntryState::Same
+                                        )
+                                    {
+                                        opened_file = Some(entry.relative_path.clone());
+                                    }
+                                    ui.end_row();
+                                }
                             }
                         });
                 });
         });
+        if toggled_root {
+            self.root_collapsed = !self.root_collapsed;
+        }
+        if let Some(path) = toggled_folder {
+            if !self.collapsed_directories.insert(path.clone()) {
+                self.collapsed_directories.remove(&path);
+            }
+        }
+        if let Some(path) = opened_file {
+            self.left_path = Path::new(&self.compared_directory_left)
+                .join(&path)
+                .display()
+                .to_string();
+            self.right_path = Path::new(&self.compared_directory_right)
+                .join(&path)
+                .display()
+                .to_string();
+            self.mode = Mode::TwoWay;
+            self.compare_two_paths();
+        }
         self.directory_summary(ui);
     }
     fn two_way_ui(&mut self, ui: &mut egui::Ui) {
@@ -1765,6 +1805,205 @@ fn readonly_lines(ui: &mut egui::Ui, title: &str, text: &str, height: f32) {
             });
     });
 }
+fn build_directory_tree(entries: &[DirectoryEntry]) -> Vec<DirectoryTreeRow> {
+    let positions: HashMap<PathBuf, usize> = entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| (entry.relative_path.clone(), index))
+        .collect();
+    let mut rows: Vec<DirectoryTreeRow> = entries
+        .iter()
+        .enumerate()
+        .map(|(entry_index, entry)| DirectoryTreeRow {
+            entry_index,
+            depth: entry.relative_path.components().count().saturating_sub(1),
+            has_children: false,
+            display_state: entry.state.clone(),
+        })
+        .collect();
+    for entry in entries {
+        if let Some(parent) = entry.relative_path.parent() {
+            if let Some(&parent_index) = positions.get(parent) {
+                rows[parent_index].has_children = true;
+            }
+        }
+    }
+    for entry in entries {
+        if entry.state != DirectoryEntryState::Same {
+            let mut parent = entry.relative_path.parent();
+            while let Some(path) = parent {
+                if let Some(&parent_index) = positions.get(path) {
+                    if rows[parent_index].display_state == DirectoryEntryState::Same {
+                        rows[parent_index].display_state = DirectoryEntryState::Different;
+                    }
+                }
+                parent = path.parent();
+            }
+        }
+    }
+    rows
+}
+
+fn directory_filter_matches(state: &DirectoryEntryState, filter: DirectoryFilter) -> bool {
+    match filter {
+        DirectoryFilter::All => true,
+        DirectoryFilter::Different => !matches!(state, DirectoryEntryState::Same),
+        DirectoryFilter::Same => matches!(state, DirectoryEntryState::Same),
+        DirectoryFilter::LeftOnly => matches!(state, DirectoryEntryState::LeftOnly),
+        DirectoryFilter::RightOnly => matches!(state, DirectoryEntryState::RightOnly),
+    }
+}
+
+fn visible_directory_rows(
+    entries: &[DirectoryEntry],
+    rows: &[DirectoryTreeRow],
+    filter: DirectoryFilter,
+    collapsed: &HashSet<PathBuf>,
+) -> Vec<usize> {
+    let positions: HashMap<&Path, usize> = entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| (entry.relative_path.as_path(), index))
+        .collect();
+    let mut matching = vec![false; rows.len()];
+    for (index, row) in rows.iter().enumerate() {
+        if directory_filter_matches(&row.display_state, filter) {
+            matching[index] = true;
+            let mut parent = entries[row.entry_index].relative_path.parent();
+            while let Some(path) = parent {
+                if let Some(&parent_index) = positions.get(path) {
+                    matching[parent_index] = true;
+                }
+                parent = path.parent();
+            }
+        }
+    }
+    rows.iter()
+        .enumerate()
+        .filter_map(|(index, row)| {
+            if !matching[index] {
+                return None;
+            }
+            let mut parent = entries[row.entry_index].relative_path.parent();
+            while let Some(path) = parent {
+                if collapsed.contains(path) {
+                    return None;
+                }
+                parent = path.parent();
+            }
+            Some(index)
+        })
+        .collect()
+}
+
+fn directory_root_cell(
+    ui: &mut egui::Ui,
+    path: &str,
+    state: &DirectoryEntryState,
+    collapsed: bool,
+    width: f32,
+    dark_mode: bool,
+) -> bool {
+    let mut toggle = false;
+    ui.allocate_ui_with_layout(
+        egui::vec2(width, 25.0),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            toggle = ui
+                .add_sized(
+                    [17.0, 20.0],
+                    egui::Button::new(if collapsed { "▸" } else { "▾" }).frame(false),
+                )
+                .clicked();
+            ui.colored_label(state_color(state, dark_mode), "●");
+            ui.colored_label(Color32::from_rgb(191, 142, 40), "▣");
+            let response = ui.add(
+                egui::Label::new(RichText::new(path).strong())
+                    .truncate()
+                    .sense(egui::Sense::click()),
+            );
+            toggle |= response.double_clicked();
+            response.on_hover_text(path);
+        },
+    );
+    toggle
+}
+
+fn directory_tree_cell(
+    ui: &mut egui::Ui,
+    entry: &DirectoryEntry,
+    row: &DirectoryTreeRow,
+    left: bool,
+    collapsed: bool,
+    width: f32,
+    dark_mode: bool,
+) -> (bool, bool) {
+    let present = if left {
+        !matches!(entry.state, DirectoryEntryState::RightOnly)
+    } else {
+        !matches!(entry.state, DirectoryEntryState::LeftOnly)
+    };
+    if !present {
+        ui.allocate_space(egui::vec2(width, 23.0));
+        return (false, false);
+    }
+    let mut toggle = false;
+    let mut open = false;
+    ui.allocate_ui_with_layout(
+        egui::vec2(width, 23.0),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            ui.add_space((row.depth + 1) as f32 * 16.0);
+            if row.has_children && matches!(entry.kind, DirectoryEntryKind::Directory) {
+                toggle = ui
+                    .add_sized(
+                        [17.0, 20.0],
+                        egui::Button::new(if collapsed { "▸" } else { "▾" }).frame(false),
+                    )
+                    .clicked();
+            } else {
+                ui.add_space(17.0);
+            }
+            ui.colored_label(state_color(&row.display_state, dark_mode), "●");
+            let icon = if matches!(entry.kind, DirectoryEntryKind::Directory) {
+                "▣"
+            } else {
+                "▤"
+            };
+            ui.colored_label(
+                if matches!(entry.kind, DirectoryEntryKind::Directory) {
+                    Color32::from_rgb(191, 142, 40)
+                } else {
+                    ui.visuals().text_color()
+                },
+                icon,
+            );
+            let name = entry
+                .relative_path
+                .file_name()
+                .unwrap_or(entry.relative_path.as_os_str())
+                .to_string_lossy();
+            let response = ui.add(
+                egui::Label::new(name.as_ref())
+                    .truncate()
+                    .sense(egui::Sense::click()),
+            );
+            if matches!(entry.kind, DirectoryEntryKind::Directory) {
+                toggle |= response.double_clicked() && row.has_children;
+            } else {
+                open = response.double_clicked();
+            }
+            response.on_hover_text(format!(
+                "{} • {}",
+                entry.relative_path.display(),
+                directory_state(&row.display_state)
+            ));
+        },
+    );
+    (toggle, open)
+}
 fn directory_state(state: &DirectoryEntryState) -> String {
     match state {
         DirectoryEntryState::Same => "Same".into(),
@@ -1967,6 +2206,73 @@ mod tests {
         );
         assert_eq!(aligned_rows(&diff, FileViewFilter::Differences).len(), 2);
         assert_eq!(aligned_rows(&diff, FileViewFilter::Same).len(), 2);
+    }
+
+    #[test]
+    fn directory_tree_keeps_ancestors_visible_and_marks_changed_folders() {
+        let entry = |path: &str, kind, state| DirectoryEntry {
+            relative_path: PathBuf::from(path),
+            kind,
+            state,
+        };
+        let entries = vec![
+            entry(
+                "src",
+                DirectoryEntryKind::Directory,
+                DirectoryEntryState::Same,
+            ),
+            entry(
+                "src/nested",
+                DirectoryEntryKind::Directory,
+                DirectoryEntryState::Same,
+            ),
+            entry(
+                "src/nested/changed.rs",
+                DirectoryEntryKind::File,
+                DirectoryEntryState::Different,
+            ),
+            entry(
+                "src/same.rs",
+                DirectoryEntryKind::File,
+                DirectoryEntryState::Same,
+            ),
+            entry(
+                "unique.txt",
+                DirectoryEntryKind::File,
+                DirectoryEntryState::LeftOnly,
+            ),
+        ];
+        let rows = build_directory_tree(&entries);
+        assert_eq!(rows[0].display_state, DirectoryEntryState::Different);
+        assert_eq!(rows[1].display_state, DirectoryEntryState::Different);
+        assert_eq!(rows[2].depth, 2);
+        assert!(rows[0].has_children && rows[1].has_children);
+        let expanded = HashSet::new();
+        assert_eq!(
+            visible_directory_rows(&entries, &rows, DirectoryFilter::All, &expanded),
+            vec![0, 1, 2, 3, 4]
+        );
+        assert_eq!(
+            visible_directory_rows(&entries, &rows, DirectoryFilter::Different, &expanded),
+            vec![0, 1, 2, 4]
+        );
+        assert_eq!(
+            visible_directory_rows(&entries, &rows, DirectoryFilter::Same, &expanded),
+            vec![0, 3]
+        );
+        assert_eq!(
+            visible_directory_rows(&entries, &rows, DirectoryFilter::LeftOnly, &expanded),
+            vec![4]
+        );
+        let collapsed = HashSet::from([PathBuf::from("src")]);
+        assert_eq!(
+            visible_directory_rows(&entries, &rows, DirectoryFilter::All, &collapsed),
+            vec![0, 4]
+        );
+        assert_eq!(
+            visible_directory_rows(&entries, &rows, DirectoryFilter::Different, &collapsed),
+            vec![0, 4]
+        );
     }
 
     fn conflict(left: &[&str], right: &[&str]) -> versus::MergeHunk {
