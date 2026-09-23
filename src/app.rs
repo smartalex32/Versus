@@ -25,6 +25,18 @@ enum DirectoryFilter {
     LeftOnly,
     RightOnly,
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FileViewFilter {
+    All,
+    Differences,
+    Same,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AlignedRow {
+    left: Option<usize>,
+    right: Option<usize>,
+    hunk: Option<usize>,
+}
 struct DirectoryJob {
     receiver: mpsc::Receiver<Result<DirectoryDiff, String>>,
     cancelled: Arc<AtomicBool>,
@@ -79,6 +91,8 @@ pub struct VersusApp {
     directory_job: Option<DirectoryJob>,
     file_job: Option<FileJob>,
     directory_filter: DirectoryFilter,
+    file_filter: FileViewFilter,
+    two_rows: Vec<AlignedRow>,
     two_diff: Option<TextDiff>,
     two_kind: Option<FileDiffKind>,
     two_equal: Option<bool>,
@@ -140,6 +154,8 @@ impl VersusApp {
             directory_job: None,
             file_job: None,
             directory_filter: DirectoryFilter::Different,
+            file_filter: FileViewFilter::All,
+            two_rows: Vec::new(),
             two_diff: None,
             two_kind: None,
             two_equal: None,
@@ -192,11 +208,19 @@ impl VersusApp {
         }
     }
     fn selected_hunk_scroll(&mut self) {
-        if let Some(diff) = &self.two_diff {
-            if let Some(hunk) = diff.hunks.get(self.two_selected) {
-                self.two_scroll = hunk.left_range.start.min(hunk.right_range.start) as f32 * 18.0;
-            }
+        if let Some(index) = self
+            .two_rows
+            .iter()
+            .position(|row| row.hunk == Some(self.two_selected))
+        {
+            self.two_scroll = index as f32 * 18.0;
         }
+    }
+    fn refresh_two_rows(&mut self) {
+        self.two_rows = self
+            .two_diff
+            .as_ref()
+            .map_or_else(Vec::new, |diff| aligned_rows(diff, self.file_filter));
     }
     fn poll_file_job(&mut self, ctx: &egui::Context) {
         if let Some(job) = &self.file_job {
@@ -205,6 +229,7 @@ impl VersusApp {
                     self.two_kind = Some(file.kind.clone());
                     self.two_equal = Some(file.equal);
                     self.two_diff = file.text;
+                    self.refresh_two_rows();
                     if file.kind == FileDiffKind::Text {
                         self.left_text = left;
                         self.right_text = right;
@@ -334,8 +359,10 @@ impl VersusApp {
     }
     fn compare_two_paths(&mut self) {
         self.two_diff = None;
+        self.two_rows.clear();
         self.two_kind = None;
         self.two_equal = None;
+        self.two_scroll = 0.0;
         self.two_loaded_left_path.clear();
         self.two_loaded_right_path.clear();
         let left = self.left_path.trim().to_owned();
@@ -386,6 +413,9 @@ impl VersusApp {
             &self.right_text,
             &self.options(),
         ));
+        let count = self.two_diff.as_ref().map_or(0, |diff| diff.hunks.len());
+        self.two_selected = self.two_selected.min(count.saturating_sub(1));
+        self.refresh_two_rows();
         self.two_diff_dirty = false;
     }
     fn compare_three_paths(&mut self) {
@@ -626,11 +656,7 @@ impl VersusApp {
             .inner_margin(egui::Margin::symmetric(8, 7))
             .show(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
-                    for (mode, label) in [
-                        (Mode::Directory, "Directory"),
-                        (Mode::TwoWay, "2-Way"),
-                        (Mode::ThreeWay, "3-Way"),
-                    ] {
+                    for (mode, label) in [(Mode::Directory, "Directory"), (Mode::TwoWay, "2-Way")] {
                         ui.selectable_value(&mut self.mode, mode, label);
                     }
                     ui.separator();
@@ -661,24 +687,6 @@ impl VersusApp {
                             Mode::TwoWay => self.compare_two_paths(),
                             Mode::ThreeWay => self.compare_three_paths(),
                         }
-                    }
-                    if self.mode == Mode::Directory {
-                        ui.menu_button("Filter", |ui| {
-                            for (filter, label) in [
-                                (DirectoryFilter::All, "All"),
-                                (DirectoryFilter::Different, "Different"),
-                                (DirectoryFilter::Same, "Same"),
-                                (DirectoryFilter::LeftOnly, "Left only"),
-                                (DirectoryFilter::RightOnly, "Right only"),
-                            ] {
-                                if ui
-                                    .selectable_value(&mut self.directory_filter, filter, label)
-                                    .clicked()
-                                {
-                                    ui.close();
-                                }
-                            }
-                        });
                     }
                     if self.mode == Mode::TwoWay {
                         self.two_way_actions(ui);
@@ -775,6 +783,8 @@ impl VersusApp {
             .clicked()
         {
             self.two_selected = (self.two_selected + count - 1) % count;
+            self.file_filter = FileViewFilter::Differences;
+            self.refresh_two_rows();
             self.selected_hunk_scroll();
         }
         if ui
@@ -782,6 +792,8 @@ impl VersusApp {
             .clicked()
         {
             self.two_selected = (self.two_selected + 1) % count;
+            self.file_filter = FileViewFilter::Differences;
+            self.refresh_two_rows();
             self.selected_hunk_scroll();
         }
         if ui
@@ -951,14 +963,27 @@ impl VersusApp {
                 );
             }
             ui.separator();
-            let filter_name = match self.directory_filter {
-                DirectoryFilter::All => "All",
-                DirectoryFilter::Different => "Different",
-                DirectoryFilter::Same => "Same",
-                DirectoryFilter::LeftOnly => "Left only",
-                DirectoryFilter::RightOnly => "Right only",
-            };
-            ui.label(format!("Showing: {filter_name}"));
+            ui.label("Show");
+            for (filter, label) in [
+                (DirectoryFilter::All, "All"),
+                (DirectoryFilter::Different, "Diffs"),
+                (DirectoryFilter::Same, "Same"),
+            ] {
+                ui.selectable_value(&mut self.directory_filter, filter, label);
+            }
+            ui.menu_button("More ▾", |ui| {
+                for (filter, label) in [
+                    (DirectoryFilter::LeftOnly, "Left only"),
+                    (DirectoryFilter::RightOnly, "Right only"),
+                ] {
+                    if ui
+                        .selectable_value(&mut self.directory_filter, filter, label)
+                        .clicked()
+                    {
+                        ui.close();
+                    }
+                }
+            });
             if self.directory_job.is_some() {
                 ui.spinner();
             }
@@ -993,22 +1018,43 @@ impl VersusApp {
             })
             .unwrap_or_default();
         let table_height = (ui.available_height() - 165.0).max(160.0);
+        let side_width = ((ui.available_width() - 190.0) / 2.0).max(80.0);
+        ui.label(format!(
+            "{} of {} items shown",
+            entries.len(),
+            self.directory.as_ref().map_or(0, |d| d.entries.len())
+        ));
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.set_min_height(table_height);
             ui.horizontal(|ui| {
-                ui.strong("LEFT  •  Name");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.strong("RIGHT  •  Name");
-                });
+                ui.add_sized(
+                    [side_width, 20.0],
+                    egui::Label::new(RichText::new("LEFT  •  Name").strong()),
+                );
+                ui.add_sized(
+                    [145.0, 20.0],
+                    egui::Label::new(RichText::new("RESULT").strong()),
+                );
+                ui.add_sized(
+                    [side_width, 20.0],
+                    egui::Label::new(RichText::new("RIGHT  •  Name").strong()),
+                );
             });
             ui.separator();
+            if entries.is_empty() {
+                ui.label(if self.directory.is_some() {
+                    "No items match this view. Choose another filter to see more."
+                } else {
+                    "Comparison results will appear here."
+                });
+            }
             egui::ScrollArea::vertical()
                 .max_height(table_height)
                 .show(ui, |ui| {
                     egui::Grid::new("directory-results")
                         .striped(true)
                         .num_columns(3)
-                        .min_col_width((ui.available_width() - 170.0) / 2.0)
+                        .min_col_width(0.0)
                         .show(ui, |ui| {
                             for entry in entries {
                                 let name = entry.relative_path.display().to_string();
@@ -1021,25 +1067,37 @@ impl VersusApp {
                                     !matches!(entry.state, DirectoryEntryState::RightOnly);
                                 let right_visible =
                                     !matches!(entry.state, DirectoryEntryState::LeftOnly);
-                                let left_response = ui.selectable_label(
-                                    false,
-                                    if left_visible {
+                                let left_response = ui.add_sized(
+                                    [side_width, 22.0],
+                                    egui::Label::new(if left_visible {
                                         format!("{icon}  {name}")
                                     } else {
                                         String::new()
-                                    },
+                                    })
+                                    .truncate()
+                                    .sense(egui::Sense::click()),
                                 );
-                                ui.colored_label(
-                                    state_color(&entry.state, self.dark_mode),
-                                    directory_state(&entry.state),
+                                let color = state_color(&entry.state, self.dark_mode);
+                                ui.add_sized(
+                                    [145.0, 22.0],
+                                    egui::Label::new(
+                                        RichText::new(format!(
+                                            "●  {}",
+                                            directory_state(&entry.state)
+                                        ))
+                                        .color(color),
+                                    )
+                                    .truncate(),
                                 );
-                                let right_response = ui.selectable_label(
-                                    false,
-                                    if right_visible {
+                                let right_response = ui.add_sized(
+                                    [side_width, 22.0],
+                                    egui::Label::new(if right_visible {
                                         format!("{icon}  {name}")
                                     } else {
                                         String::new()
-                                    },
+                                    })
+                                    .truncate()
+                                    .sense(egui::Sense::click()),
                                 );
                                 if (left_response.double_clicked()
                                     || right_response.double_clicked())
@@ -1085,6 +1143,26 @@ impl VersusApp {
                 ui.spinner();
             }
         });
+        ui.horizontal(|ui| {
+            ui.label("Show");
+            for (filter, label) in [
+                (FileViewFilter::All, "All"),
+                (FileViewFilter::Differences, "Diffs"),
+                (FileViewFilter::Same, "Same"),
+            ] {
+                if ui
+                    .selectable_value(&mut self.file_filter, filter, label)
+                    .clicked()
+                {
+                    self.two_scroll = 0.0;
+                    self.refresh_two_rows();
+                }
+            }
+            if let Some(diff) = &self.two_diff {
+                ui.separator();
+                ui.label(format!("{} differences", diff.hunks.len()));
+            }
+        });
         ui.add_space(7.0);
         if let Some(kind) = &self.two_kind {
             if !matches!(kind, FileDiffKind::Text) {
@@ -1106,7 +1184,7 @@ impl VersusApp {
                 return;
             }
         }
-        let pane_height = (ui.available_height() - 205.0).max(150.0);
+        let pane_height = (ui.available_height() - 235.0).max(150.0);
         if self.two_edit_open {
             let edited = ui.columns(2, |columns| {
                 let left_changed = text_editor(
@@ -1129,37 +1207,44 @@ impl VersusApp {
             if ui.button("Recalculate edited diff").clicked() {
                 self.refresh_two_diff();
             }
-        } else if let Some(diff) = self.two_diff.clone() {
-            ui.columns(2, |columns| {
-                let requested_offset = self.two_scroll;
-                let left_offset = diff_pane(
+        } else if let Some(diff) = self.two_diff.as_ref() {
+            let rows = &self.two_rows;
+            let requested_offset = self.two_scroll;
+            let selected = self.two_selected;
+            let (scroll, clicked) = ui.columns(2, |columns| {
+                let (left_offset, left_clicked) = diff_pane(
                     &mut columns[0],
                     "LEFT",
-                    &self.left_text,
-                    &diff,
+                    diff,
+                    &rows,
                     true,
-                    self.two_selected,
-                    self.two_scroll,
+                    selected,
+                    requested_offset,
                     pane_height,
                     self.dark_mode,
                 );
-                let right_offset = diff_pane(
+                let (right_offset, right_clicked) = diff_pane(
                     &mut columns[1],
                     "RIGHT",
-                    &self.right_text,
-                    &diff,
+                    diff,
+                    &rows,
                     false,
-                    self.two_selected,
+                    selected,
                     left_offset,
                     pane_height,
                     self.dark_mode,
                 );
-                self.two_scroll = if (left_offset - requested_offset).abs() > 0.1 {
+                let scroll = if (left_offset - requested_offset).abs() > 0.1 {
                     left_offset
                 } else {
                     right_offset
                 };
+                (scroll, left_clicked.or(right_clicked))
             });
+            self.two_scroll = scroll;
+            if let Some(index) = clicked {
+                self.two_selected = index;
+            }
         } else {
             egui::Frame::group(ui.style()).show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
@@ -1446,24 +1531,73 @@ fn text_editor_sized(
     }
     history_changed || response.changed()
 }
+fn aligned_rows(diff: &TextDiff, filter: FileViewFilter) -> Vec<AlignedRow> {
+    let mut rows = Vec::new();
+    let mut left = 0;
+    let mut right = 0;
+    for (index, hunk) in diff.hunks.iter().enumerate() {
+        while left < hunk.left_range.start && right < hunk.right_range.start {
+            if filter != FileViewFilter::Differences {
+                rows.push(AlignedRow {
+                    left: Some(left),
+                    right: Some(right),
+                    hunk: None,
+                });
+            }
+            left += 1;
+            right += 1;
+        }
+        let count = hunk.left_range.len().max(hunk.right_range.len());
+        if filter != FileViewFilter::Same {
+            for offset in 0..count {
+                rows.push(AlignedRow {
+                    left: (offset < hunk.left_range.len())
+                        .then_some(hunk.left_range.start + offset),
+                    right: (offset < hunk.right_range.len())
+                        .then_some(hunk.right_range.start + offset),
+                    hunk: Some(index),
+                });
+            }
+        }
+        left = hunk.left_range.end;
+        right = hunk.right_range.end;
+    }
+    while left < diff.left_lines.len() && right < diff.right_lines.len() {
+        if filter != FileViewFilter::Differences {
+            rows.push(AlignedRow {
+                left: Some(left),
+                right: Some(right),
+                hunk: None,
+            });
+        }
+        left += 1;
+        right += 1;
+    }
+    rows
+}
+
 fn diff_pane(
     ui: &mut egui::Ui,
     title: &str,
-    text: &str,
     diff: &TextDiff,
+    rows: &[AlignedRow],
     left: bool,
     selected: usize,
     offset: f32,
     max_height: f32,
     dark_mode: bool,
-) -> f32 {
-    let lines: Vec<&str> = text.lines().collect();
+) -> (f32, Option<usize>) {
+    let mut clicked_hunk = None;
     let output = egui::Frame::group(ui.style()).show(ui, |ui| {
         ui.set_min_width(ui.available_width());
         ui.set_min_height(max_height);
         ui.label(RichText::new(title).strong().color(accent(dark_mode)));
         ui.separator();
-        egui::ScrollArea::vertical()
+        if rows.is_empty() {
+            ui.label("No lines match this view.");
+        }
+        ui.spacing_mut().item_spacing.y = 0.0;
+        egui::ScrollArea::both()
             .id_salt(if left {
                 "two-left-diff"
             } else {
@@ -1474,19 +1608,23 @@ fn diff_pane(
             .show_rows(
                 ui,
                 ui.text_style_height(&egui::TextStyle::Monospace),
-                lines.len(),
-                |ui, rows| {
-                    for index in rows {
-                        let line = lines[index];
-                        let matching = diff.hunks.iter().enumerate().find(|(_, hunk)| {
-                            let range = if left {
-                                &hunk.left_range
+                rows.len(),
+                |ui, visible| {
+                    for index in visible {
+                        let row = rows[index];
+                        let line_index = if left { row.left } else { row.right };
+                        let line = line_index.and_then(|i| {
+                            if left {
+                                diff.left_lines.get(i)
                             } else {
-                                &hunk.right_range
-                            };
-                            range.contains(&index)
+                                diff.right_lines.get(i)
+                            }
                         });
-                        let color = match matching.map(|(_, hunk)| &hunk.kind) {
+                        let kind = row
+                            .hunk
+                            .and_then(|i| diff.hunks.get(i))
+                            .map(|hunk| &hunk.kind);
+                        let color = match kind {
                             Some(versus::HunkKind::Added) if dark_mode => {
                                 Color32::from_rgb(38, 80, 62)
                             }
@@ -1507,21 +1645,36 @@ fn diff_pane(
                             Some(versus::HunkKind::Changed) => Color32::from_rgb(222, 247, 230),
                             None => Color32::TRANSPARENT,
                         };
+                        let color = if line_index.is_none() {
+                            Color32::TRANSPARENT
+                        } else {
+                            color
+                        };
                         egui::Frame::default().fill(color).show(ui, |ui| {
-                            let marker =
-                                matching.is_some_and(|(hunk_index, _)| hunk_index == selected);
-                            ui.monospace(format!(
-                                "{} {:>5} | {}",
-                                if marker { ">" } else { " " },
-                                index + 1,
-                                line
-                            ));
+                            let marker = row.hunk == Some(selected);
+                            let label = match (line_index, line) {
+                                (Some(number), Some(line)) => format!(
+                                    "{} {:>5} │ {}",
+                                    if marker { "▸" } else { " " },
+                                    number + 1,
+                                    line
+                                ),
+                                _ => "        │".to_owned(),
+                            };
+                            let response = ui.add(
+                                egui::Label::new(RichText::new(label).monospace())
+                                    .wrap_mode(egui::TextWrapMode::Extend)
+                                    .sense(egui::Sense::click()),
+                            );
+                            if response.clicked() {
+                                clicked_hunk = row.hunk;
+                            }
                         });
                     }
                 },
             )
     });
-    output.inner.state.offset.y
+    (output.inner.state.offset.y, clicked_hunk)
 }
 fn detected_line_ending(text: &str) -> LineEnding {
     if text.matches("\r\n").count() * 2 >= text.matches('\n').count() {
@@ -1634,16 +1787,16 @@ fn state_color(state: &DirectoryEntryState, dark_mode: bool) -> Color32 {
         }
         DirectoryEntryState::LeftOnly => {
             if dark_mode {
-                Color32::LIGHT_RED
+                Color32::from_rgb(202, 157, 239)
             } else {
-                Color32::from_rgb(30, 95, 180)
+                Color32::from_rgb(123, 72, 164)
             }
         }
         DirectoryEntryState::RightOnly => {
             if dark_mode {
-                Color32::LIGHT_GREEN
+                Color32::from_rgb(202, 157, 239)
             } else {
-                Color32::from_rgb(30, 130, 65)
+                Color32::from_rgb(123, 72, 164)
             }
         }
         DirectoryEntryState::Error(_) => Color32::RED,
@@ -1772,6 +1925,48 @@ mod tests {
         assert!(parse_settings("dark_mode=true\nignore_whitespace=true\n").dark_mode);
         assert!(parse_settings("dark_mode=true\nignore_whitespace=true\n").ignore_whitespace);
         assert!(!parse_settings("ignore_whitespace=true\n").dark_mode);
+    }
+
+    #[test]
+    fn file_view_filters_keep_two_sides_aligned_across_uneven_hunks() {
+        let diff = TextDiff {
+            left_lines: ["same", "old one", "old two", "end"]
+                .map(str::to_owned)
+                .to_vec(),
+            right_lines: ["same", "new", "end"].map(str::to_owned).to_vec(),
+            hunks: vec![versus::DiffHunk {
+                left_range: 1..3,
+                right_range: 1..2,
+                kind: versus::HunkKind::Changed,
+            }],
+        };
+        assert_eq!(
+            aligned_rows(&diff, FileViewFilter::All),
+            vec![
+                AlignedRow {
+                    left: Some(0),
+                    right: Some(0),
+                    hunk: None
+                },
+                AlignedRow {
+                    left: Some(1),
+                    right: Some(1),
+                    hunk: Some(0)
+                },
+                AlignedRow {
+                    left: Some(2),
+                    right: None,
+                    hunk: Some(0)
+                },
+                AlignedRow {
+                    left: Some(3),
+                    right: Some(2),
+                    hunk: None
+                },
+            ]
+        );
+        assert_eq!(aligned_rows(&diff, FileViewFilter::Differences).len(), 2);
+        assert_eq!(aligned_rows(&diff, FileViewFilter::Same).len(), 2);
     }
 
     fn conflict(left: &[&str], right: &[&str]) -> versus::MergeHunk {
