@@ -1,0 +1,84 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - name: Build the portable executable from vendored dependencies
+        run: cargo build --release --locked --offline
+      - name: Assemble Windows artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/windows | Out-Null
+          Copy-Item target/release/versus.exe dist/windows/Versus.exe
+          Copy-Item README.md dist/windows/README.md
+          Copy-Item LICENSE dist/windows/LICENSE
+          Compress-Archive -Path dist/windows/Versus.exe,dist/windows/README.md,dist/windows/LICENSE -DestinationPath dist/Versus-windows-x86_64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-release
+          path: |
+            dist/windows/Versus.exe
+            dist/Versus-windows-x86_64.zip
+
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - name: Install Linux build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libfontconfig1-dev libgl1-mesa-dev libgtk-3-dev libx11-dev libxrandr-dev libxi-dev libxcursor-dev libxkbcommon-dev libwayland-dev
+      - name: Build from vendored dependencies
+        run: cargo build --release --locked --offline
+      - name: Create AppImage
+        shell: bash
+        run: bash scripts/package-linux.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-release
+          path: |
+            dist/Versus.AppImage
+            dist/versus-linux-x86_64.tar.gz
+
+  source:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - name: Generate dependency and license inventory from vendor
+        shell: pwsh
+        run: ./scripts/export-dependency-licenses.ps1 -OutputPath dist/DEPENDENCY-LICENSES.md
+      - name: Create offline source bundle
+        run: bash scripts/package-source-offline.sh dist/versus-source-offline.tar.gz dist/DEPENDENCY-LICENSES.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: source-release
+          path: |
+            dist/versus-source-offline.tar.gz
+            dist/DEPENDENCY-LICENSES.md
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, linux, source]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: release-assets/**

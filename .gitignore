@@ -16,3 +16,10 @@
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Rust and release outputs.
+/target/
+/dist/
+/AppDir/
+/portable-linux/
+/linuxdeploy.AppImage

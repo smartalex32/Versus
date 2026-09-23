@@ -1,0 +1,17 @@
+[package]
+name = "versus"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Offline file and directory comparison desktop utility"
+license = "MIT"
+
+[dependencies]
+eframe = { version = "=0.36.2", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
+rfd = "=0.17.2"
+similar = "=3.2.0"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = true

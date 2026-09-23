@@ -1,0 +1,7 @@
+*.sh text eol=lf
+*.rs text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
+
+# Cargo vendor checksums require the original crate bytes on every platform.
+/vendor/** -text -eol -diff linguist-vendored
