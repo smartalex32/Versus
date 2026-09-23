@@ -12,10 +12,13 @@ Open Versus and choose **Directory**, **2-Way**, or **3-Way**. Enter, paste, dro
 or browse for local paths, mapped drives, UNC shares, or mounted Linux paths.
 Directory comparison starts with the **Different** filter; double-click a changed
 file to inspect it and return to the directory results afterward. File comparison
-shows line numbers, highlighted changes, difference navigation, and editable
-buffers. Copying a selected difference changes only the working buffer until you
-choose **Save** or **Save As**. Three-way merge uses base, left, and right files;
-resolve conflicts into the editable result before saving.
+shows line numbers, highlighted changes, and difference navigation. Choose
+**Edit buffers** to edit either side, then **Recalculate edited diff** to update
+the highlighting. Copying a selected difference changes only the working buffer
+until you choose **Save** or **Save As**. Three-way merge uses base, left, and
+right files; resolve conflicts into the editable result before saving. Use the
+**Dark mode** or **Light mode** button in the header to switch appearance; the
+choice is saved with the other local settings.
 
 Versus never writes compared files during opening or comparison. It requests
 confirmation before replacing an existing destination. Settings are stored locally

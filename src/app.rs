@@ -100,6 +100,7 @@ pub struct VersusApp {
     ignore_line_endings: bool,
     ignore_whitespace: bool,
     confirm_overwrite: bool,
+    dark_mode: bool,
     status: String,
     save_as_open: bool,
     save_as_path: String,
@@ -107,11 +108,14 @@ pub struct VersusApp {
     save_as_line_ending: LineEnding,
     pending_overwrite: Option<(PathBuf, String, LineEnding)>,
     two_scroll: f32,
+    two_edit_open: bool,
+    two_diff_dirty: bool,
 }
 
 impl VersusApp {
-    pub fn new(_: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let settings = load_settings();
+        apply_theme(&cc.egui_ctx, settings.dark_mode);
         Self {
             mode: Mode::Directory,
             left_path: String::new(),
@@ -152,6 +156,7 @@ impl VersusApp {
             ignore_line_endings: settings.ignore_line_endings,
             ignore_whitespace: settings.ignore_whitespace,
             confirm_overwrite: settings.confirm_overwrite,
+            dark_mode: settings.dark_mode,
             status: "Choose paths and compare.".into(),
             save_as_open: false,
             save_as_path: String::new(),
@@ -159,6 +164,8 @@ impl VersusApp {
             save_as_line_ending: LineEnding::Lf,
             pending_overwrite: None,
             two_scroll: 0.0,
+            two_edit_open: false,
+            two_diff_dirty: false,
         }
     }
     fn options(&self) -> FileCompareOptions {
@@ -173,6 +180,7 @@ impl VersusApp {
             ignore_line_endings: self.ignore_line_endings,
             ignore_whitespace: self.ignore_whitespace,
             confirm_overwrite: self.confirm_overwrite,
+            dark_mode: self.dark_mode,
         }) {
             self.status = format!("Unable to save settings: {error}");
         }
@@ -199,6 +207,14 @@ impl VersusApp {
                         self.left_undo = TextUndo::default();
                         self.right_undo = TextUndo::default();
                         self.two_selected = 0;
+                        self.two_diff_dirty = false;
+                    } else {
+                        self.left_text.clear();
+                        self.right_text.clear();
+                        self.left_undo = TextUndo::default();
+                        self.right_undo = TextUndo::default();
+                        self.two_diff_dirty = false;
+                        self.two_edit_open = false;
                     }
                     self.two_loaded_left_path = left_path;
                     self.two_loaded_right_path = right_path;
@@ -230,7 +246,15 @@ impl VersusApp {
                     self.resolved_merge_hunks =
                         vec![false; self.three_diff.as_ref().map_or(0, |diff| diff.hunks.len())];
                     self.merged_undo = TextUndo::default();
-                    self.three_selected = 0;
+                    self.three_selected = self
+                        .three_diff
+                        .as_ref()
+                        .and_then(|diff| {
+                            diff.hunks
+                                .iter()
+                                .position(|h| h.kind == MergeHunkKind::Conflict)
+                        })
+                        .unwrap_or(0);
                     self.status = "Three-way merge ready.".into();
                     self.file_job = None;
                 }
@@ -356,6 +380,7 @@ impl VersusApp {
             &self.right_text,
             &self.options(),
         ));
+        self.two_diff_dirty = false;
     }
     fn compare_three_paths(&mut self) {
         self.three_diff = None;
@@ -482,10 +507,20 @@ impl VersusApp {
         self.status = "Copied selected difference. Save explicitly to write the file.".into();
     }
     fn path_field(ui: &mut egui::Ui, label: &str, path: &mut String, directory: bool) {
-        ui.label(label);
+        ui.label(RichText::new(label).strong());
         ui.horizontal(|ui| {
-            ui.add(TextEdit::singleline(path).desired_width(ui.available_width() - 72.0));
-            if ui.button("Browse").clicked() {
+            let width = (ui.available_width() - 60.0).max(80.0);
+            ui.add(
+                TextEdit::singleline(path)
+                    .desired_width(width)
+                    .background_color(if ui.visuals().dark_mode {
+                        Color32::from_rgb(37, 43, 52)
+                    } else {
+                        Color32::WHITE
+                    })
+                    .frame(egui::Frame::group(ui.style())),
+            );
+            if ui.button("…").on_hover_text("Browse for a path").clicked() {
                 let pick = if directory {
                     rfd::FileDialog::new().pick_folder()
                 } else {
@@ -516,81 +551,413 @@ impl VersusApp {
 }
 
 impl eframe::App for VersusApp {
+    fn clear_color(&self, _: &egui::Visuals) -> [f32; 4] {
+        let fill = if self.dark_mode {
+            Color32::from_rgb(24, 28, 35)
+        } else {
+            Color32::from_rgb(249, 251, 254)
+        };
+        fill.to_normalized_gamma_f32()
+    }
     fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         self.accept_drops(ctx);
         self.poll_directory_job(ctx);
         self.poll_file_job(ctx);
     }
     fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
-        ui.horizontal(|ui| {
-            ui.heading("Versus");
-            ui.separator();
-            for (mode, label) in [
-                (Mode::Directory, "Directory"),
-                (Mode::TwoWay, "2-Way"),
-                (Mode::ThreeWay, "3-Way"),
-            ] {
-                if ui.selectable_label(self.mode == mode, label).clicked() {
-                    self.mode = mode;
-                }
-            }
-            ui.separator();
-            ui.menu_button("Settings", |ui| {
-                let mut changed = ui
-                    .checkbox(
-                        &mut self.ignore_line_endings,
-                        "Ignore line-ending differences",
-                    )
-                    .changed();
-                changed |= ui
-                    .checkbox(&mut self.ignore_whitespace, "Ignore whitespace")
-                    .changed();
-                changed |= ui
-                    .checkbox(&mut self.confirm_overwrite, "Confirm before overwrite")
-                    .changed();
-                if changed {
-                    self.persist_settings();
-                }
+        egui::Frame::default()
+            .inner_margin(egui::Margin::same(10))
+            .show(ui, |ui| {
+                self.header(ui);
+                self.toolbar(ui);
+                ui.add_space(8.0);
+                match self.mode {
+                    Mode::Directory => self.directory_ui(ui),
+                    Mode::TwoWay => self.two_way_ui(ui),
+                    Mode::ThreeWay => self.three_way_ui(ui),
+                };
+                self.status_bar(ui);
             });
-        });
-        ui.separator();
-        match self.mode {
-            Mode::Directory => self.directory_ui(ui),
-            Mode::TwoWay => self.two_way_ui(ui),
-            Mode::ThreeWay => self.three_way_ui(ui),
-        };
-        ui.separator();
-        ui.label(&self.status);
         self.save_dialog(ui.ctx());
     }
 }
 
 impl VersusApp {
-    fn directory_ui(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Directory comparison");
-        Self::path_field(ui, "Left directory", &mut self.directory_left_path, true);
-        Self::path_field(ui, "Right directory", &mut self.directory_right_path, true);
+    fn header(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            if self.directory_job.is_some() {
-                if ui.button("Cancel").clicked() {
-                    if let Some(job) = &self.directory_job {
-                        job.cancelled
-                            .store(true, std::sync::atomic::Ordering::Relaxed);
-                    }
+            ui.label(RichText::new("◀").size(25.0).color(accent(self.dark_mode)));
+            ui.label(RichText::new("Versus").size(23.0).strong());
+            ui.separator();
+            let mode_name = match self.mode {
+                Mode::Directory => "Directory Compare",
+                Mode::TwoWay => "Text Compare",
+                Mode::ThreeWay => "3-Way Merge",
+            };
+            ui.label(RichText::new(mode_name).size(17.0).strong());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let label = if self.dark_mode {
+                    "Light mode"
+                } else {
+                    "Dark mode"
+                };
+                if ui
+                    .button(label)
+                    .on_hover_text("Switch appearance")
+                    .clicked()
+                {
+                    self.dark_mode = !self.dark_mode;
+                    apply_theme(ui.ctx(), self.dark_mode);
+                    self.persist_settings();
                 }
-            } else if ui.button("Compare directories").clicked() {
-                self.start_directory_compare();
+            });
+        });
+        ui.add_space(5.0);
+    }
+
+    fn toolbar(&mut self, ui: &mut egui::Ui) {
+        egui::Frame::default()
+            .fill(toolbar_fill(self.dark_mode))
+            .inner_margin(egui::Margin::symmetric(8, 7))
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    for (mode, label) in [
+                        (Mode::Directory, "Directory"),
+                        (Mode::TwoWay, "2-Way"),
+                        (Mode::ThreeWay, "3-Way"),
+                    ] {
+                        ui.selectable_value(&mut self.mode, mode, label);
+                    }
+                    ui.separator();
+                    let busy = self.directory_job.is_some() || self.file_job.is_some();
+                    if self.mode == Mode::Directory && self.directory_job.is_some() {
+                        if ui.button("Cancel").clicked() {
+                            if let Some(job) = &self.directory_job {
+                                job.cancelled
+                                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                            }
+                        }
+                    } else if ui
+                        .add_enabled(!busy, egui::Button::new("Compare"))
+                        .clicked()
+                    {
+                        match self.mode {
+                            Mode::Directory => self.start_directory_compare(),
+                            Mode::TwoWay => self.compare_two_paths(),
+                            Mode::ThreeWay => self.compare_three_paths(),
+                        }
+                    }
+                    if ui
+                        .add_enabled(!busy, egui::Button::new("Refresh"))
+                        .clicked()
+                    {
+                        match self.mode {
+                            Mode::Directory => self.start_directory_compare(),
+                            Mode::TwoWay => self.compare_two_paths(),
+                            Mode::ThreeWay => self.compare_three_paths(),
+                        }
+                    }
+                    if self.mode == Mode::Directory {
+                        ui.menu_button("Filter", |ui| {
+                            for (filter, label) in [
+                                (DirectoryFilter::All, "All"),
+                                (DirectoryFilter::Different, "Different"),
+                                (DirectoryFilter::Same, "Same"),
+                                (DirectoryFilter::LeftOnly, "Left only"),
+                                (DirectoryFilter::RightOnly, "Right only"),
+                            ] {
+                                if ui
+                                    .selectable_value(&mut self.directory_filter, filter, label)
+                                    .clicked()
+                                {
+                                    ui.close();
+                                }
+                            }
+                        });
+                    }
+                    if self.mode == Mode::TwoWay {
+                        self.two_way_actions(ui);
+                    }
+                    if self.mode == Mode::ThreeWay {
+                        self.three_way_actions(ui);
+                    }
+                    ui.separator();
+                    ui.menu_button("Settings", |ui| {
+                        let mut changed = ui
+                            .checkbox(
+                                &mut self.ignore_line_endings,
+                                "Ignore line-ending differences",
+                            )
+                            .changed();
+                        changed |= ui
+                            .checkbox(&mut self.ignore_whitespace, "Ignore whitespace")
+                            .changed();
+                        changed |= ui
+                            .checkbox(&mut self.confirm_overwrite, "Confirm before overwrite")
+                            .changed();
+                        if changed {
+                            self.persist_settings();
+                        }
+                    });
+                });
+            });
+    }
+
+    fn status_bar(&self, ui: &mut egui::Ui) {
+        ui.add_space(5.0);
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.colored_label(accent(self.dark_mode), "●");
+            ui.label(&self.status);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(if self.directory_job.is_some() || self.file_job.is_some() {
+                    "Working…"
+                } else {
+                    "Ready"
+                });
+            });
+        });
+    }
+
+    fn directory_summary(&self, ui: &mut egui::Ui) {
+        let Some(directory) = &self.directory else {
+            ui.add_space(10.0);
+            ui.label("Choose two folders, then select Compare. Double-click a changed file to inspect it.");
+            return;
+        };
+        let mut same = 0;
+        let mut different = 0;
+        let mut left_only = 0;
+        let mut right_only = 0;
+        let mut issues = 0;
+        for entry in &directory.entries {
+            match entry.state {
+                DirectoryEntryState::Same => same += 1,
+                DirectoryEntryState::Different => different += 1,
+                DirectoryEntryState::LeftOnly => left_only += 1,
+                DirectoryEntryState::RightOnly => right_only += 1,
+                DirectoryEntryState::TypeMismatch | DirectoryEntryState::Error(_) => issues += 1,
             }
-            for (filter, label) in [
-                (DirectoryFilter::All, "All"),
-                (DirectoryFilter::Different, "Different"),
-                (DirectoryFilter::Same, "Same"),
-                (DirectoryFilter::LeftOnly, "Left Only"),
-                (DirectoryFilter::RightOnly, "Right Only"),
-            ] {
-                ui.selectable_value(&mut self.directory_filter, filter, label);
+        }
+        ui.add_space(7.0);
+        ui.label(
+            RichText::new("Comparison Summary")
+                .strong()
+                .color(accent(self.dark_mode)),
+        );
+        ui.separator();
+        ui.horizontal_wrapped(|ui| {
+            ui.strong(format!("{} items compared", directory.entries.len()));
+            ui.separator();
+            ui.label(format!("{different} different"));
+            ui.label(format!("{left_only} left only"));
+            ui.label(format!("{right_only} right only"));
+            ui.label(format!("{same} same"));
+            if issues > 0 {
+                ui.colored_label(Color32::RED, format!("{issues} issues"));
             }
         });
+    }
+
+    fn two_way_actions(&mut self, ui: &mut egui::Ui) {
+        let text_ready = self.two_kind == Some(FileDiffKind::Text)
+            && self.two_diff.is_some()
+            && self.file_job.is_none();
+        let diff_ready = text_ready && !self.two_diff_dirty;
+        let count = self.two_diff.as_ref().map_or(0, |diff| diff.hunks.len());
+        if ui
+            .add_enabled(diff_ready && count > 0, egui::Button::new("Previous"))
+            .clicked()
+        {
+            self.two_selected = (self.two_selected + count - 1) % count;
+            self.selected_hunk_scroll();
+        }
+        if ui
+            .add_enabled(diff_ready && count > 0, egui::Button::new("Next"))
+            .clicked()
+        {
+            self.two_selected = (self.two_selected + 1) % count;
+            self.selected_hunk_scroll();
+        }
+        if ui
+            .add_enabled(diff_ready && count > 0, egui::Button::new("Copy left"))
+            .clicked()
+        {
+            self.copy_hunk(false);
+        }
+        if ui
+            .add_enabled(diff_ready && count > 0, egui::Button::new("Copy right"))
+            .clicked()
+        {
+            self.copy_hunk(true);
+        }
+        if ui
+            .add_enabled(
+                diff_ready,
+                egui::Button::new(if self.two_edit_open {
+                    "View diff"
+                } else {
+                    "Edit buffers"
+                }),
+            )
+            .clicked()
+        {
+            self.two_edit_open = !self.two_edit_open;
+        }
+        ui.menu_button("Save", |ui| {
+            if ui
+                .add_enabled(
+                    text_ready && !self.two_loaded_left_path.is_empty(),
+                    egui::Button::new("Save left"),
+                )
+                .clicked()
+            {
+                self.save(
+                    &self.two_loaded_left_path.clone(),
+                    &self.left_text.clone(),
+                    self.two_left_ending,
+                );
+                ui.close();
+            }
+            if ui
+                .add_enabled(
+                    text_ready && !self.two_loaded_right_path.is_empty(),
+                    egui::Button::new("Save right"),
+                )
+                .clicked()
+            {
+                self.save(
+                    &self.two_loaded_right_path.clone(),
+                    &self.right_text.clone(),
+                    self.two_right_ending,
+                );
+                ui.close();
+            }
+            if ui
+                .add_enabled(
+                    text_ready && !self.two_loaded_right_path.is_empty(),
+                    egui::Button::new("Save right as…"),
+                )
+                .clicked()
+            {
+                self.open_save_as(self.right_text.clone(), self.two_right_ending);
+                ui.close();
+            }
+        });
+    }
+
+    fn three_way_actions(&mut self, ui: &mut egui::Ui) {
+        let conflicts: Vec<usize> = self
+            .three_diff
+            .as_ref()
+            .map(|diff| {
+                diff.hunks
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, h)| {
+                        (h.kind == MergeHunkKind::Conflict
+                            && !self.resolved_merge_hunks.get(i).copied().unwrap_or(false))
+                        .then_some(i)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if ui
+            .add_enabled(!conflicts.is_empty(), egui::Button::new("Previous"))
+            .clicked()
+        {
+            if let Some(&index) = conflicts
+                .iter()
+                .rev()
+                .find(|&&i| i < self.three_selected)
+                .or_else(|| conflicts.last())
+            {
+                self.three_selected = index;
+            }
+        }
+        if ui
+            .add_enabled(!conflicts.is_empty(), egui::Button::new("Next"))
+            .clicked()
+        {
+            if let Some(&index) = conflicts
+                .iter()
+                .find(|&&i| i > self.three_selected)
+                .or_else(|| conflicts.first())
+            {
+                self.three_selected = index;
+            }
+        }
+        if ui
+            .add_enabled(!conflicts.is_empty(), egui::Button::new("Use left"))
+            .clicked()
+        {
+            self.apply_merge_choice(MergeChoice::Left);
+        }
+        if ui
+            .add_enabled(!conflicts.is_empty(), egui::Button::new("Use right"))
+            .clicked()
+        {
+            self.apply_merge_choice(MergeChoice::Right);
+        }
+        ui.menu_button("Save result", |ui| {
+            if ui
+                .add_enabled(self.three_diff.is_some(), egui::Button::new("Save as…"))
+                .clicked()
+            {
+                self.open_save_as(self.merged_text.clone(), self.three_result_ending);
+                ui.close();
+            }
+            if ui
+                .add_enabled(
+                    !self.three_loaded_right_path.is_empty(),
+                    egui::Button::new("Save to right file"),
+                )
+                .clicked()
+            {
+                self.save(
+                    &self.three_loaded_right_path.clone(),
+                    &self.merged_text.clone(),
+                    self.three_result_ending,
+                );
+                ui.close();
+            }
+        });
+    }
+    fn directory_ui(&mut self, ui: &mut egui::Ui) {
+        ui.columns(2, |columns| {
+            Self::path_field(
+                &mut columns[0],
+                "LEFT  •  Folder",
+                &mut self.directory_left_path,
+                true,
+            );
+            Self::path_field(
+                &mut columns[1],
+                "RIGHT  •  Folder",
+                &mut self.directory_right_path,
+                true,
+            );
+        });
+        ui.horizontal(|ui| {
+            if ui.small_button("Swap sides").clicked() {
+                std::mem::swap(
+                    &mut self.directory_left_path,
+                    &mut self.directory_right_path,
+                );
+            }
+            ui.separator();
+            let filter_name = match self.directory_filter {
+                DirectoryFilter::All => "All",
+                DirectoryFilter::Different => "Different",
+                DirectoryFilter::Same => "Same",
+                DirectoryFilter::LeftOnly => "Left only",
+                DirectoryFilter::RightOnly => "Right only",
+            };
+            ui.label(format!("Showing: {filter_name}"));
+            if self.directory_job.is_some() {
+                ui.spinner();
+            }
+        });
+        ui.add_space(4.0);
         let entries: Vec<DirectoryEntry> = self
             .directory
             .as_ref()
@@ -619,81 +986,104 @@ impl VersusApp {
                     .collect()
             })
             .unwrap_or_default();
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            egui::Grid::new("directory-results")
-                .striped(true)
-                .min_col_width(150.0)
+        let table_height = (ui.available_height() - 165.0).max(160.0);
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_min_height(table_height);
+            ui.horizontal(|ui| {
+                ui.strong("LEFT  •  Name");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.strong("RIGHT  •  Name");
+                });
+            });
+            ui.separator();
+            egui::ScrollArea::vertical()
+                .max_height(table_height)
                 .show(ui, |ui| {
-                    ui.strong("Status");
-                    ui.strong("Type");
-                    ui.strong("Path");
-                    ui.end_row();
-                    for entry in entries {
-                        let state = directory_state(&entry.state);
-                        let color = state_color(&entry.state);
-                        ui.colored_label(color, state);
-                        ui.label(format!("{:?}", entry.kind));
-                        let response =
-                            ui.selectable_label(false, entry.relative_path.display().to_string());
-                        if response.double_clicked()
-                            && matches!(entry.kind, DirectoryEntryKind::File)
-                            && matches!(
-                                entry.state,
-                                DirectoryEntryState::Different | DirectoryEntryState::Same
-                            )
-                        {
-                            self.left_path = Path::new(&self.compared_directory_left)
-                                .join(&entry.relative_path)
-                                .display()
-                                .to_string();
-                            self.right_path = Path::new(&self.compared_directory_right)
-                                .join(&entry.relative_path)
-                                .display()
-                                .to_string();
-                            self.mode = Mode::TwoWay;
-                            self.compare_two_paths();
-                        }
-                        ui.end_row();
-                    }
+                    egui::Grid::new("directory-results")
+                        .striped(true)
+                        .num_columns(3)
+                        .min_col_width((ui.available_width() - 170.0) / 2.0)
+                        .show(ui, |ui| {
+                            for entry in entries {
+                                let name = entry.relative_path.display().to_string();
+                                let icon = if matches!(entry.kind, DirectoryEntryKind::Directory) {
+                                    "Folder"
+                                } else {
+                                    "File"
+                                };
+                                let left_visible =
+                                    !matches!(entry.state, DirectoryEntryState::RightOnly);
+                                let right_visible =
+                                    !matches!(entry.state, DirectoryEntryState::LeftOnly);
+                                let left_response = ui.selectable_label(
+                                    false,
+                                    if left_visible {
+                                        format!("{icon}  {name}")
+                                    } else {
+                                        String::new()
+                                    },
+                                );
+                                ui.colored_label(
+                                    state_color(&entry.state, self.dark_mode),
+                                    directory_state(&entry.state),
+                                );
+                                let right_response = ui.selectable_label(
+                                    false,
+                                    if right_visible {
+                                        format!("{icon}  {name}")
+                                    } else {
+                                        String::new()
+                                    },
+                                );
+                                if (left_response.double_clicked()
+                                    || right_response.double_clicked())
+                                    && matches!(entry.kind, DirectoryEntryKind::File)
+                                    && matches!(
+                                        entry.state,
+                                        DirectoryEntryState::Different | DirectoryEntryState::Same
+                                    )
+                                {
+                                    self.left_path = Path::new(&self.compared_directory_left)
+                                        .join(&entry.relative_path)
+                                        .display()
+                                        .to_string();
+                                    self.right_path = Path::new(&self.compared_directory_right)
+                                        .join(&entry.relative_path)
+                                        .display()
+                                        .to_string();
+                                    self.mode = Mode::TwoWay;
+                                    self.compare_two_paths();
+                                }
+                                ui.end_row();
+                            }
+                        });
                 });
         });
+        self.directory_summary(ui);
     }
     fn two_way_ui(&mut self, ui: &mut egui::Ui) {
-        ui.heading("2-Way file comparison");
-        Self::path_field(ui, "Left file", &mut self.left_path, false);
-        Self::path_field(ui, "Right file", &mut self.right_path, false);
+        ui.columns(2, |columns| {
+            Self::path_field(&mut columns[0], "LEFT  •  File", &mut self.left_path, false);
+            Self::path_field(
+                &mut columns[1],
+                "RIGHT  •  File",
+                &mut self.right_path,
+                false,
+            );
+        });
         ui.horizontal(|ui| {
-            if ui.button("Compare / Reload").clicked() {
-                self.compare_two_paths();
-            }
-            if let Some(diff) = &self.two_diff {
-                let count = diff.hunks.len();
-                ui.label(format!(
-                    "Difference {} of {}",
-                    if count == 0 { 0 } else { self.two_selected + 1 },
-                    count
-                ));
-                if ui.button("Previous").clicked() && count > 0 {
-                    self.two_selected = (self.two_selected + count - 1) % count;
-                    self.selected_hunk_scroll();
-                }
-                if ui.button("Next").clicked() && count > 0 {
-                    self.two_selected = (self.two_selected + 1) % count;
-                    self.selected_hunk_scroll();
-                }
-                if ui.button("← Copy").clicked() {
-                    self.copy_hunk(false);
-                }
-                if ui.button("Copy →").clicked() {
-                    self.copy_hunk(true);
-                }
+            ui.label(format!("{} bytes  •  UTF-8", self.left_text.len()));
+            ui.separator();
+            ui.label(format!("{} bytes  •  UTF-8", self.right_text.len()));
+            if self.file_job.is_some() {
+                ui.spinner();
             }
         });
+        ui.add_space(7.0);
         if let Some(kind) = &self.two_kind {
             if !matches!(kind, FileDiffKind::Text) {
-                ui.colored_label(
-                    Color32::YELLOW,
-                    match kind {
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.label(match kind {
                         FileDiffKind::Binary if self.two_equal == Some(true) => {
                             "Binary files match; text display is unavailable."
                         }
@@ -705,178 +1095,211 @@ impl VersusApp {
                             "Large files differ; text display is unavailable."
                         }
                         FileDiffKind::Text => "",
-                    },
-                );
+                    });
+                });
                 return;
             }
         }
-        let diff = self.two_diff.clone();
-        ui.columns(2, |columns| {
-            let Some(diff) = diff.as_ref() else { return };
-            let requested_offset = self.two_scroll;
-            let left_offset = diff_pane(
-                &mut columns[0],
-                "LEFT",
-                &self.left_text,
-                diff,
-                true,
-                self.two_selected,
-                self.two_scroll,
-            );
-            let right_offset = diff_pane(
-                &mut columns[1],
-                "RIGHT",
-                &self.right_text,
-                diff,
-                false,
-                self.two_selected,
-                left_offset,
-            );
-            self.two_scroll = if (left_offset - requested_offset).abs() > 0.1 {
-                left_offset
-            } else {
-                right_offset
-            };
-        });
-        ui.separator();
-        ui.label("Edit buffers");
-        ui.columns(2, |columns| {
-            text_editor(
-                &mut columns[0],
-                "LEFT",
-                &mut self.left_text,
-                &mut self.left_undo,
-            );
-            text_editor(
-                &mut columns[1],
-                "RIGHT",
-                &mut self.right_text,
-                &mut self.right_undo,
-            );
-        });
-        if ui.button("Recalculate edited diff").clicked() {
-            self.refresh_two_diff();
+        let pane_height = (ui.available_height() - 205.0).max(150.0);
+        if self.two_edit_open {
+            let edited = ui.columns(2, |columns| {
+                let left_changed = text_editor(
+                    &mut columns[0],
+                    "LEFT  •  Editable buffer",
+                    &mut self.left_text,
+                    &mut self.left_undo,
+                );
+                let right_changed = text_editor(
+                    &mut columns[1],
+                    "RIGHT  •  Editable buffer",
+                    &mut self.right_text,
+                    &mut self.right_undo,
+                );
+                left_changed || right_changed
+            });
+            if edited {
+                self.two_diff_dirty = true;
+            }
+            if ui.button("Recalculate edited diff").clicked() {
+                self.refresh_two_diff();
+            }
+        } else if let Some(diff) = self.two_diff.clone() {
+            ui.columns(2, |columns| {
+                let requested_offset = self.two_scroll;
+                let left_offset = diff_pane(
+                    &mut columns[0],
+                    "LEFT",
+                    &self.left_text,
+                    &diff,
+                    true,
+                    self.two_selected,
+                    self.two_scroll,
+                    pane_height,
+                    self.dark_mode,
+                );
+                let right_offset = diff_pane(
+                    &mut columns[1],
+                    "RIGHT",
+                    &self.right_text,
+                    &diff,
+                    false,
+                    self.two_selected,
+                    left_offset,
+                    pane_height,
+                    self.dark_mode,
+                );
+                self.two_scroll = if (left_offset - requested_offset).abs() > 0.1 {
+                    left_offset
+                } else {
+                    right_offset
+                };
+            });
+        } else {
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.set_min_height(pane_height);
+                ui.add_space(20.0);
+                ui.label("Choose two files, then select Compare.");
+            });
         }
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(
-                    !self.two_loaded_left_path.is_empty(),
-                    egui::Button::new("Save left"),
-                )
-                .clicked()
-            {
-                let path = self.two_loaded_left_path.clone();
-                let content = self.left_text.clone();
-                self.save(&path, &content, self.two_left_ending);
-            }
-            if ui
-                .add_enabled(
-                    !self.two_loaded_right_path.is_empty(),
-                    egui::Button::new("Save right"),
-                )
-                .clicked()
-            {
-                let path = self.two_loaded_right_path.clone();
-                let content = self.right_text.clone();
-                self.save(&path, &content, self.two_right_ending);
-            }
-            if ui
-                .add_enabled(
-                    !self.two_loaded_right_path.is_empty(),
-                    egui::Button::new("Save right as…"),
-                )
-                .clicked()
-            {
-                self.open_save_as(self.right_text.clone(), self.two_right_ending);
-            }
+        ui.add_space(7.0);
+        ui.label(
+            RichText::new("Difference Summary")
+                .strong()
+                .color(accent(self.dark_mode)),
+        );
+        ui.separator();
+        ui.horizontal_wrapped(|ui| {
+            let count = self.two_diff.as_ref().map_or(0, |diff| diff.hunks.len());
+            ui.strong(format!("{count} differences"));
+            ui.separator();
+            ui.label(format!(
+                "Difference {} of {count}",
+                if count == 0 { 0 } else { self.two_selected + 1 }
+            ));
+            ui.separator();
+            ui.label(if self.two_diff_dirty {
+                "Recalculate the diff before copying changes."
+            } else {
+                "Changes stay in editable buffers until you save."
+            });
         });
     }
     fn three_way_ui(&mut self, ui: &mut egui::Ui) {
-        ui.heading("3-Way merge");
-        Self::path_field(ui, "Base file", &mut self.base_path, false);
-        Self::path_field(ui, "Left file", &mut self.left_path, false);
-        Self::path_field(ui, "Right file", &mut self.right_path, false);
-        ui.horizontal(|ui| {
-            if ui.button("Compare / Reload").clicked() {
-                self.compare_three_paths();
-            }
-            if let Some(diff) = &self.three_diff {
-                let conflicts: Vec<usize> = diff
-                    .hunks
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, h)| (h.kind == MergeHunkKind::Conflict).then_some(i))
-                    .collect();
-                ui.label(format!(
-                    "Conflict {} of {}",
-                    conflicts
-                        .iter()
-                        .position(|&i| i == self.three_selected)
-                        .map(|i| i + 1)
-                        .unwrap_or(0),
-                    conflicts.len()
-                ));
-                if ui.button("Previous conflict").clicked() {
-                    if let Some(&index) = conflicts
-                        .iter()
-                        .rev()
-                        .find(|&&i| i < self.three_selected)
-                        .or_else(|| conflicts.last())
-                    {
-                        self.three_selected = index;
-                    }
-                }
-                if ui.button("Next conflict").clicked() {
-                    if let Some(&index) = conflicts
-                        .iter()
-                        .find(|&&i| i > self.three_selected)
-                        .or_else(|| conflicts.first())
-                    {
-                        self.three_selected = index;
-                    }
-                }
-                if ui.button("Use Left").clicked() {
-                    self.apply_merge_choice(MergeChoice::Left);
-                }
-                if ui.button("Use Right").clicked() {
-                    self.apply_merge_choice(MergeChoice::Right);
-                }
-            }
-        });
         ui.columns(3, |columns| {
-            readonly_lines(&mut columns[0], "BASE", &self.base_text);
-            readonly_lines(&mut columns[1], "LEFT", &self.merge_left);
-            readonly_lines(&mut columns[2], "RIGHT", &self.merge_right);
+            Self::path_field(
+                &mut columns[0],
+                "BASE  •  Common ancestor",
+                &mut self.base_path,
+                false,
+            );
+            Self::path_field(
+                &mut columns[1],
+                "LEFT  •  Branch A",
+                &mut self.left_path,
+                false,
+            );
+            Self::path_field(
+                &mut columns[2],
+                "RIGHT  •  Branch B",
+                &mut self.right_path,
+                false,
+            );
         });
-        ui.separator();
-        text_editor(
-            ui,
-            "MERGED RESULT",
-            &mut self.merged_text,
-            &mut self.merged_undo,
-        );
+        let source_height = (ui.available_height() * 0.35).clamp(125.0, 280.0);
+        ui.add_space(6.0);
+        ui.columns(3, |columns| {
+            readonly_lines(&mut columns[0], "Base", &self.base_text, source_height);
+            readonly_lines(
+                &mut columns[1],
+                "Left (Branch A)",
+                &self.merge_left,
+                source_height,
+            );
+            readonly_lines(
+                &mut columns[2],
+                "Right (Branch B)",
+                &self.merge_right,
+                source_height,
+            );
+        });
+        ui.add_space(8.0);
+        let remaining = (ui.available_height() - 110.0).max(150.0);
+        let result_width = (ui.available_width() * 0.73).max(250.0);
         ui.horizontal(|ui| {
-            if ui
-                .add_enabled(
-                    self.three_diff.is_some(),
-                    egui::Button::new("Save result as…"),
-                )
-                .clicked()
-            {
-                self.open_save_as(self.merged_text.clone(), self.three_result_ending);
-            }
-            if ui
-                .add_enabled(
-                    !self.three_loaded_right_path.is_empty(),
-                    egui::Button::new("Save result to right"),
-                )
-                .clicked()
-            {
-                let path = self.three_loaded_right_path.clone();
-                let content = self.merged_text.clone();
-                self.save(&path, &content, self.three_result_ending);
-            }
+            ui.vertical(|ui| {
+                ui.set_width(result_width);
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.set_min_height(remaining);
+                    ui.label(
+                        RichText::new("Merged Result  •  Editable")
+                            .strong()
+                            .color(accent(self.dark_mode)),
+                    );
+                    let rows = ((remaining - 55.0) / 18.0).max(5.0) as usize;
+                    text_editor_sized(ui, &mut self.merged_text, &mut self.merged_undo, rows);
+                });
+            });
+            ui.vertical(|ui| {
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.set_min_height(remaining);
+                    ui.strong("Conflicts");
+                    ui.separator();
+                    if let Some(diff) = &self.three_diff {
+                        let unresolved = diff
+                            .hunks
+                            .iter()
+                            .enumerate()
+                            .filter(|(i, h)| {
+                                h.kind == MergeHunkKind::Conflict
+                                    && !self.resolved_merge_hunks.get(*i).copied().unwrap_or(false)
+                            })
+                            .count();
+                        ui.label(format!("{unresolved} remaining"));
+                        if let Some(hunk) = diff.hunks.get(self.three_selected) {
+                            if hunk.kind == MergeHunkKind::Conflict {
+                                ui.add_space(8.0);
+                                ui.label(format!(
+                                    "Conflict at base line {}",
+                                    hunk.base_range.start + 1
+                                ));
+                                ui.label(format!("Left: {} line(s)", hunk.left.len()));
+                                ui.label(format!("Right: {} line(s)", hunk.right.len()));
+                                ui.add_space(8.0);
+                                let selected_unresolved = !self
+                                    .resolved_merge_hunks
+                                    .get(self.three_selected)
+                                    .copied()
+                                    .unwrap_or(false);
+                                if ui
+                                    .add_enabled(selected_unresolved, egui::Button::new("Use Left"))
+                                    .clicked()
+                                {
+                                    self.apply_merge_choice(MergeChoice::Left);
+                                }
+                                if ui
+                                    .add_enabled(
+                                        selected_unresolved,
+                                        egui::Button::new("Use Right"),
+                                    )
+                                    .clicked()
+                                {
+                                    self.apply_merge_choice(MergeChoice::Right);
+                                }
+                            }
+                        }
+                    } else {
+                        ui.label("Compare three files to inspect conflicts.");
+                    }
+                });
+            });
         });
+        ui.add_space(5.0);
+        ui.label(
+            RichText::new("Merge Output")
+                .strong()
+                .color(accent(self.dark_mode)),
+        );
     }
     fn apply_merge_choice(&mut self, choice: MergeChoice) {
         let Some(diff) = &self.three_diff else { return };
@@ -904,6 +1327,29 @@ impl VersusApp {
         self.merged_text = resolve_current_conflict(&self.merged_text, hunk, choice, occurrence);
         if let Some(resolved) = self.resolved_merge_hunks.get_mut(self.three_selected) {
             *resolved = true;
+        }
+        if let Some(next) = diff
+            .hunks
+            .iter()
+            .enumerate()
+            .filter(|(i, h)| {
+                h.kind == MergeHunkKind::Conflict
+                    && !self.resolved_merge_hunks.get(*i).copied().unwrap_or(false)
+            })
+            .map(|(i, _)| i)
+            .find(|&i| i > self.three_selected)
+            .or_else(|| {
+                diff.hunks
+                    .iter()
+                    .enumerate()
+                    .find(|(i, h)| {
+                        h.kind == MergeHunkKind::Conflict
+                            && !self.resolved_merge_hunks.get(*i).copied().unwrap_or(false)
+                    })
+                    .map(|(i, _)| i)
+            })
+        {
+            self.three_selected = next;
         }
         self.merged_undo.changed(before);
         self.status = "Applied conflict choice; save explicitly to write the result.".into();
@@ -961,13 +1407,24 @@ impl VersusApp {
         }
     }
 }
-fn text_editor(ui: &mut egui::Ui, title: &str, text: &mut String, undo: &mut TextUndo) {
+fn text_editor(ui: &mut egui::Ui, title: &str, text: &mut String, undo: &mut TextUndo) -> bool {
     ui.label(RichText::new(title).strong());
+    text_editor_sized(ui, text, undo, 22)
+}
+fn text_editor_sized(
+    ui: &mut egui::Ui,
+    text: &mut String,
+    undo: &mut TextUndo,
+    rows: usize,
+) -> bool {
+    let mut history_changed = false;
     ui.horizontal(|ui| {
         if ui.button("Undo").clicked() {
+            history_changed = !undo.undo.is_empty();
             undo.undo(text);
         }
         if ui.button("Redo").clicked() {
+            history_changed |= !undo.redo.is_empty();
             undo.redo(text);
         }
     });
@@ -975,12 +1432,13 @@ fn text_editor(ui: &mut egui::Ui, title: &str, text: &mut String, undo: &mut Tex
     let response = ui.add(
         TextEdit::multiline(text)
             .code_editor()
-            .desired_rows(22)
+            .desired_rows(rows)
             .desired_width(f32::INFINITY),
     );
     if response.changed() {
         undo.changed(before);
     }
+    history_changed || response.changed()
 }
 fn diff_pane(
     ui: &mut egui::Ui,
@@ -990,51 +1448,74 @@ fn diff_pane(
     left: bool,
     selected: usize,
     offset: f32,
+    max_height: f32,
+    dark_mode: bool,
 ) -> f32 {
-    ui.label(RichText::new(title).strong());
     let lines: Vec<&str> = text.lines().collect();
-    let output = egui::ScrollArea::vertical()
-        .id_salt(if left {
-            "two-left-diff"
-        } else {
-            "two-right-diff"
-        })
-        .max_height(260.0)
-        .vertical_scroll_offset(offset)
-        .show_rows(
-            ui,
-            ui.text_style_height(&egui::TextStyle::Monospace),
-            lines.len(),
-            |ui, rows| {
-                for index in rows {
-                    let line = lines[index];
-                    let matching = diff.hunks.iter().enumerate().find(|(_, hunk)| {
-                        let range = if left {
-                            &hunk.left_range
-                        } else {
-                            &hunk.right_range
+    let output = egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.set_min_width(ui.available_width());
+        ui.set_min_height(max_height);
+        ui.label(RichText::new(title).strong().color(accent(dark_mode)));
+        ui.separator();
+        egui::ScrollArea::vertical()
+            .id_salt(if left {
+                "two-left-diff"
+            } else {
+                "two-right-diff"
+            })
+            .max_height(max_height)
+            .vertical_scroll_offset(offset)
+            .show_rows(
+                ui,
+                ui.text_style_height(&egui::TextStyle::Monospace),
+                lines.len(),
+                |ui, rows| {
+                    for index in rows {
+                        let line = lines[index];
+                        let matching = diff.hunks.iter().enumerate().find(|(_, hunk)| {
+                            let range = if left {
+                                &hunk.left_range
+                            } else {
+                                &hunk.right_range
+                            };
+                            range.contains(&index)
+                        });
+                        let color = match matching.map(|(_, hunk)| &hunk.kind) {
+                            Some(versus::HunkKind::Added) if dark_mode => {
+                                Color32::from_rgb(38, 80, 62)
+                            }
+                            Some(versus::HunkKind::Removed) if dark_mode => {
+                                Color32::from_rgb(90, 42, 50)
+                            }
+                            Some(versus::HunkKind::Changed) if dark_mode && left => {
+                                Color32::from_rgb(90, 42, 50)
+                            }
+                            Some(versus::HunkKind::Changed) if dark_mode => {
+                                Color32::from_rgb(38, 80, 62)
+                            }
+                            Some(versus::HunkKind::Added) => Color32::from_rgb(222, 247, 230),
+                            Some(versus::HunkKind::Removed) => Color32::from_rgb(255, 228, 230),
+                            Some(versus::HunkKind::Changed) if left => {
+                                Color32::from_rgb(255, 228, 230)
+                            }
+                            Some(versus::HunkKind::Changed) => Color32::from_rgb(222, 247, 230),
+                            None => Color32::TRANSPARENT,
                         };
-                        range.contains(&index)
-                    });
-                    let color = match matching.map(|(_, hunk)| &hunk.kind) {
-                        Some(versus::HunkKind::Added) => Color32::from_rgb(38, 100, 62),
-                        Some(versus::HunkKind::Removed) => Color32::from_rgb(110, 46, 46),
-                        Some(versus::HunkKind::Changed) => Color32::from_rgb(105, 84, 35),
-                        None => Color32::TRANSPARENT,
-                    };
-                    egui::Frame::default().fill(color).show(ui, |ui| {
-                        let marker = matching.is_some_and(|(hunk_index, _)| hunk_index == selected);
-                        ui.monospace(format!(
-                            "{} {:>5} | {}",
-                            if marker { ">" } else { " " },
-                            index + 1,
-                            line
-                        ));
-                    });
-                }
-            },
-        );
-    output.state.offset.y
+                        egui::Frame::default().fill(color).show(ui, |ui| {
+                            let marker =
+                                matching.is_some_and(|(hunk_index, _)| hunk_index == selected);
+                            ui.monospace(format!(
+                                "{} {:>5} | {}",
+                                if marker { ">" } else { " " },
+                                index + 1,
+                                line
+                            ));
+                        });
+                    }
+                },
+            )
+    });
+    output.inner.state.offset.y
 }
 fn detected_line_ending(text: &str) -> LineEnding {
     if text.matches("\r\n").count() * 2 >= text.matches('\n').count() {
@@ -1110,15 +1591,20 @@ fn resolve_current_conflict(
     }
     current.to_owned()
 }
-fn readonly_lines(ui: &mut egui::Ui, title: &str, text: &str) {
-    ui.label(RichText::new(title).strong());
-    egui::ScrollArea::vertical()
-        .max_height(180.0)
-        .show(ui, |ui| {
-            for (number, line) in text.lines().enumerate() {
-                ui.monospace(format!("{:>5} | {}", number + 1, line));
-            }
-        });
+fn readonly_lines(ui: &mut egui::Ui, title: &str, text: &str, height: f32) {
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.strong(title);
+        ui.separator();
+        egui::ScrollArea::vertical()
+            .id_salt(title)
+            .max_height(height)
+            .show(ui, |ui| {
+                ui.set_min_height(height);
+                for (number, line) in text.lines().enumerate() {
+                    ui.monospace(format!("{:>4}  {}", number + 1, line));
+                }
+            });
+    });
 }
 fn directory_state(state: &DirectoryEntryState) -> String {
     match state {
@@ -1130,20 +1616,81 @@ fn directory_state(state: &DirectoryEntryState) -> String {
         DirectoryEntryState::Error(error) => format!("Error: {error}"),
     }
 }
-fn state_color(state: &DirectoryEntryState) -> Color32 {
+fn state_color(state: &DirectoryEntryState, dark_mode: bool) -> Color32 {
     match state {
         DirectoryEntryState::Same => Color32::GRAY,
-        DirectoryEntryState::Different | DirectoryEntryState::TypeMismatch => Color32::YELLOW,
-        DirectoryEntryState::LeftOnly => Color32::LIGHT_RED,
-        DirectoryEntryState::RightOnly => Color32::LIGHT_GREEN,
+        DirectoryEntryState::Different | DirectoryEntryState::TypeMismatch => {
+            if dark_mode {
+                Color32::YELLOW
+            } else {
+                Color32::from_rgb(190, 45, 48)
+            }
+        }
+        DirectoryEntryState::LeftOnly => {
+            if dark_mode {
+                Color32::LIGHT_RED
+            } else {
+                Color32::from_rgb(30, 95, 180)
+            }
+        }
+        DirectoryEntryState::RightOnly => {
+            if dark_mode {
+                Color32::LIGHT_GREEN
+            } else {
+                Color32::from_rgb(30, 130, 65)
+            }
+        }
         DirectoryEntryState::Error(_) => Color32::RED,
     }
+}
+fn accent(dark_mode: bool) -> Color32 {
+    if dark_mode {
+        Color32::from_rgb(115, 175, 245)
+    } else {
+        Color32::from_rgb(36, 101, 183)
+    }
+}
+fn toolbar_fill(dark_mode: bool) -> Color32 {
+    if dark_mode {
+        Color32::from_rgb(35, 40, 49)
+    } else {
+        Color32::from_rgb(242, 247, 253)
+    }
+}
+fn apply_theme(ctx: &egui::Context, dark_mode: bool) {
+    ctx.set_theme(if dark_mode {
+        egui::Theme::Dark
+    } else {
+        egui::Theme::Light
+    });
+    ctx.set_visuals(if dark_mode {
+        egui::Visuals::dark()
+    } else {
+        egui::Visuals::light()
+    });
+    ctx.all_styles_mut(|style| {
+        style
+            .text_styles
+            .insert(egui::TextStyle::Body, egui::FontId::proportional(15.0));
+        style
+            .text_styles
+            .insert(egui::TextStyle::Button, egui::FontId::proportional(15.0));
+        style
+            .text_styles
+            .insert(egui::TextStyle::Monospace, egui::FontId::monospace(14.0));
+        style
+            .text_styles
+            .insert(egui::TextStyle::Small, egui::FontId::proportional(13.0));
+        style.spacing.item_spacing = egui::vec2(10.0, 8.0);
+        style.spacing.interact_size.y = 29.0;
+    });
 }
 #[derive(Clone, Copy)]
 struct Settings {
     ignore_line_endings: bool,
     ignore_whitespace: bool,
     confirm_overwrite: bool,
+    dark_mode: bool,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -1151,6 +1698,7 @@ impl Default for Settings {
             ignore_line_endings: true,
             ignore_whitespace: false,
             confirm_overwrite: true,
+            dark_mode: false,
         }
     }
 }
@@ -1170,6 +1718,9 @@ fn load_settings() -> Settings {
     else {
         return Settings::default();
     };
+    parse_settings(&contents)
+}
+fn parse_settings(contents: &str) -> Settings {
     let mut settings = Settings::default();
     for line in contents.lines() {
         let Some((key, value)) = line.split_once('=') else {
@@ -1180,6 +1731,7 @@ fn load_settings() -> Settings {
             "ignore_line_endings" => settings.ignore_line_endings = value,
             "ignore_whitespace" => settings.ignore_whitespace = value,
             "confirm_overwrite" => settings.confirm_overwrite = value,
+            "dark_mode" => settings.dark_mode = value,
             _ => {}
         }
     }
@@ -1195,8 +1747,11 @@ fn save_settings(settings: Settings) -> Result<(), std::io::Error> {
     std::fs::write(
         path,
         format!(
-            "ignore_line_endings={}\nignore_whitespace={}\nconfirm_overwrite={}\n",
-            settings.ignore_line_endings, settings.ignore_whitespace, settings.confirm_overwrite
+            "ignore_line_endings={}\nignore_whitespace={}\nconfirm_overwrite={}\ndark_mode={}\n",
+            settings.ignore_line_endings,
+            settings.ignore_whitespace,
+            settings.confirm_overwrite,
+            settings.dark_mode
         ),
     )
 }
@@ -1205,6 +1760,13 @@ fn save_settings(settings: Settings) -> Result<(), std::io::Error> {
 mod tests {
     use super::*;
     use std::ops::Range;
+
+    #[test]
+    fn theme_setting_loads_and_old_settings_default_to_light() {
+        assert!(parse_settings("dark_mode=true\nignore_whitespace=true\n").dark_mode);
+        assert!(parse_settings("dark_mode=true\nignore_whitespace=true\n").ignore_whitespace);
+        assert!(!parse_settings("ignore_whitespace=true\n").dark_mode);
+    }
 
     fn conflict(left: &[&str], right: &[&str]) -> versus::MergeHunk {
         versus::MergeHunk {
