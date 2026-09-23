@@ -2,6 +2,10 @@ Versus
 
 Product Requirements Document
 
+Current implementation focus (September 2026): directory and two-way file
+comparison. The three-way compare and merge interface is deferred; its requirements
+below remain as historical scope for a later iteration.
+
 1. Summary
 
 Versus is a small, fast, offline desktop utility for comparing files and directories.
@@ -338,7 +342,7 @@ Right Only
 
 Default:
 
-Different
+All
 
 The user should be able to quickly answer:
 

@@ -1,22 +1,25 @@
 # Versus
 
-Versus is a fast, offline desktop utility for comparing directories, two files,
-and three versions of a text file. It uses operating-system filesystem paths, so
+Versus is a fast, offline desktop utility for comparing directories and two files.
+It uses operating-system filesystem paths, so
 mapped drives and UNC paths on Windows and mounted network filesystems on Linux
 work through the same local APIs as other paths. Versus does not implement network
 authentication or make outbound network requests at runtime.
 
 ## Use
 
-Open Versus and choose **Directory**, **2-Way**, or **3-Way**. Enter, paste, drop,
+Open Versus and choose **Directory** or **2-Way**. Enter, paste, drop,
 or browse for local paths, mapped drives, UNC shares, or mounted Linux paths.
-Directory comparison starts with the **Different** filter; double-click a changed
-file to inspect it and return to the directory results afterward. File comparison
-shows line numbers, highlighted changes, and difference navigation. Choose
+Directory comparison starts with **All** and shows aligned folder trees. Expand a
+folder to inspect its indented contents; color markers identify matching, changed,
+and one-sided items. Use **All**, **Diffs**, or **Same** to change the visible
+results, and double-click a changed file to inspect it and return to the directory
+results afterward. File comparison has the same
+view controls and shows aligned line numbers, highlighted changes, and difference
+navigation. Choose
 **Edit buffers** to edit either side, then **Recalculate edited diff** to update
 the highlighting. Copying a selected difference changes only the working buffer
-until you choose **Save** or **Save As**. Three-way merge uses base, left, and
-right files; resolve conflicts into the editable result before saving. Use the
+until you choose **Save** or **Save As**. Use the
 **Dark mode** or **Light mode** button in the header to switch appearance; the
 choice is saved with the other local settings.
 

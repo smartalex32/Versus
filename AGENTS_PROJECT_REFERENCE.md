@@ -2,8 +2,9 @@
 
 ## Purpose
 
-Versus is an offline native desktop tool for directory comparison, two-way text
-comparison, and three-way text merge on Windows and Linux. Runtime behavior must
+Versus is an offline native desktop tool for directory comparison and two-way text
+comparison on Windows and Linux. The core retains three-way merge primitives, but
+the current UI exposes only the two-way workflows. Runtime behavior must
 not rely on Internet services, telemetry, automatic updates, a managed runtime, or
 background services. Network-mounted paths are handled through normal filesystem
 APIs and must fail cleanly when unavailable.
