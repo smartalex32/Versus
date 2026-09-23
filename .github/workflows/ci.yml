@@ -31,3 +31,10 @@ jobs:
       - run: cargo fmt --check
       - run: cargo test --locked --offline
       - run: cargo build --release --locked --offline
+      - run: bash scripts/package-linux.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-pr-artifacts
+          path: |
+            dist/Versus.AppImage
+            dist/versus-linux-x86_64.tar.gz
