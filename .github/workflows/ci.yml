@@ -17,7 +17,7 @@ jobs:
         with:
           node-version: '22'
           cache: npm
-      - run: npm ci --offline --cache npm-cache
+      - run: npm ci --offline --cache npm-cache --include=dev
       - run: cargo fmt --check
       - run: cargo test --locked --offline
       - run: cargo test -p versus-desktop --locked --offline
@@ -39,7 +39,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf
-      - run: npm ci --offline --cache npm-cache
+      - run: npm ci --offline --cache npm-cache --include=dev
       - run: cargo fmt --check
       - run: cargo test --locked --offline
       - run: cargo test -p versus-desktop --locked --offline

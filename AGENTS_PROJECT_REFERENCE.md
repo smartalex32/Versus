@@ -44,7 +44,7 @@ Network-mounted paths use normal filesystem APIs and must fail cleanly.
 Run from repository root:
 
 ```powershell
-npm ci --offline --cache npm-cache
+npm ci --offline --cache npm-cache --include=dev
 cargo fmt --check
 cargo test --locked --offline
 cargo test -p versus-desktop --locked --offline

@@ -19,13 +19,18 @@ not stored in preferences.
 
 ## Development
 
-Install Node.js, Rust, and the [Tauri 2 platform prerequisites](https://v2.tauri.app/start/prerequisites/).
+Install Node.js 22.12+ (22 LTS or 24 LTS), Rust, and the
+[Tauri 2 platform prerequisites](https://v2.tauri.app/start/prerequisites/).
 Then run:
 
 ```powershell
-npm ci --offline --cache npm-cache
+npm ci --offline --cache npm-cache --include=dev
 npm run tauri -- dev
 ```
+
+Run `npm ci` from the repository root before starting the app. It installs the
+project-local `vite` command; if Windows says `vite` is not recognized, rerun
+the command above to restore the development dependencies.
 
 The root Rust crate is the UI-independent comparison core. `src-tauri/` contains
 the desktop shell and narrow native commands; `src-ui/` contains the TypeScript UI.
