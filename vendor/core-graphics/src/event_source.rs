@@ -1,5 +1,5 @@
 use core_foundation::base::{CFRelease, CFRetain, CFTypeID};
-use foreign_types::ForeignType;
+use foreign_types::{foreign_type, ForeignType};
 
 /// Possible source states of an event source.
 #[repr(C)]
@@ -38,7 +38,9 @@ impl CGEventSource {
 
 #[cfg_attr(feature = "link", link(name = "CoreGraphics", kind = "framework"))]
 extern "C" {
-    /// Return the type identifier for the opaque type `CGEventSourceRef'.
+    /// Return the type identifier for the opaque type [`CGEventSourceRef`].
+    ///
+    /// [`CGEventSourceRef`]: crate::sys::CGEventSourceRef
     fn CGEventSourceGetTypeID() -> CFTypeID;
 
     /// Return a Quartz event source created with a specified source state.

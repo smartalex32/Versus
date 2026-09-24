@@ -3,33 +3,28 @@
 
 [package]
 name = "objc2-user-notifications"
-version = "0.2.2" # Remember to update html_root_url in lib.rs
+version.workspace = true
 description = "Bindings to the UserNotifications framework"
-edition = "2021"
-rust-version = "1.60"
+edition.workspace = true
+rust-version.workspace = true
 keywords = ["cocoa", "apple", "framework", "macos", "ios"]
-categories = [
-    "api-bindings",
-    "development-tools::ffi",
-    "external-ffi-bindings",
-    "os::macos-apis",
-]
-repository = "https://github.com/madsmtm/objc2"
-license = "MIT"
+categories.workspace = true
+repository.workspace = true
+license.workspace = true
 
 [lints]
 workspace = true
 
 [dependencies]
-bitflags = { version = "2.5.0", default-features = false, optional = true }
-block2 = { path = "../../crates/block2", version = "0.5.1", default-features = false, optional = true }
-objc2 = { path = "../../crates/objc2", version = "0.5.2", default-features = false }
-objc2-core-location = { path = "../objc2-core-location", version = "0.2.2", default-features = false, optional = true }
-objc2-foundation = { path = "../objc2-foundation", version = "0.2.2", default-features = false }
+bitflags = { workspace = true, optional = true, features = ["std"] }
+block2 = { workspace = true, optional = true, features = ["alloc"] }
+objc2 = { workspace = true, features = ["std"] }
+objc2-core-location = { workspace = true, optional = true, features = ["CLRegion"] }
+objc2-foundation = { workspace = true, features = ["alloc"] }
 
 [package.metadata.docs.rs]
 default-target = "aarch64-apple-darwin"
-features = ["all"]
+rustc-args = ["--cfg", "docsrs"] # Fix cross-crate link to objc2::topics
 targets = [
     "aarch64-apple-darwin",
     "x86_64-apple-darwin",
@@ -37,17 +32,38 @@ targets = [
     "aarch64-apple-tvos",
     "aarch64-apple-watchos",
     "aarch64-apple-ios-macabi",
+    "aarch64-apple-visionos",
 ]
 
 [features]
-default = ["std"]
-
-# Currently not possible to turn off, put here for forwards compatibility.
-std = ["alloc", "bitflags?/std", "block2?/std", "objc2/std", "objc2-core-location?/std", "objc2-foundation/std"]
-alloc = ["block2?/alloc", "objc2/alloc", "objc2-core-location?/alloc", "objc2-foundation/alloc"]
-bitflags = ["dep:bitflags", "objc2-foundation/bitflags"]
-block2 = ["dep:block2", "objc2-core-location?/block2", "objc2-foundation/block2"]
+default = [
+    "std",
+    "NSString_UserNotifications",
+    "UNError",
+    "UNNotification",
+    "UNNotificationAction",
+    "UNNotificationActionIcon",
+    "UNNotificationAttachment",
+    "UNNotificationAttributedMessageContext",
+    "UNNotificationCategory",
+    "UNNotificationContent",
+    "UNNotificationRequest",
+    "UNNotificationResponse",
+    "UNNotificationServiceExtension",
+    "UNNotificationSettings",
+    "UNNotificationSound",
+    "UNNotificationTrigger",
+    "UNUserNotificationCenter",
+    "bitflags",
+    "block2",
+    "objc2-core-location",
+]
+std = ["alloc"]
+alloc = []
+bitflags = ["dep:bitflags"]
+block2 = ["dep:block2"]
 objc2-core-location = ["dep:objc2-core-location"]
+unstable-darwin-objc = []
 
 NSString_UserNotifications = [
     "objc2-foundation/NSArray",
@@ -74,6 +90,7 @@ UNNotificationAttachment = [
     "objc2-foundation/NSString",
     "objc2-foundation/NSURL",
 ]
+UNNotificationAttributedMessageContext = []
 UNNotificationCategory = [
     "bitflags",
     "objc2-foundation/NSArray",
@@ -103,7 +120,6 @@ UNNotificationSound = [
     "objc2-foundation/NSString",
 ]
 UNNotificationTrigger = [
-    "objc2-core-location?/CLRegion",
     "objc2-foundation/NSCalendar",
     "objc2-foundation/NSDate",
     "objc2-foundation/NSObject",
@@ -114,24 +130,4 @@ UNUserNotificationCenter = [
     "objc2-foundation/NSError",
     "objc2-foundation/NSSet",
     "objc2-foundation/NSString",
-]
-all = [
-    "NSString_UserNotifications",
-    "UNError",
-    "UNNotification",
-    "UNNotificationAction",
-    "UNNotificationActionIcon",
-    "UNNotificationAttachment",
-    "UNNotificationCategory",
-    "UNNotificationContent",
-    "UNNotificationRequest",
-    "UNNotificationResponse",
-    "UNNotificationServiceExtension",
-    "UNNotificationSettings",
-    "UNNotificationSound",
-    "UNNotificationTrigger",
-    "UNUserNotificationCenter",
-    "bitflags",
-    "block2",
-    "objc2-core-location",
 ]

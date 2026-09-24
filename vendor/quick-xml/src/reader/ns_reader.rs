@@ -20,13 +20,13 @@ use crate::reader::{Config, Reader, Span, XmlSource};
 #[derive(Debug, Clone)]
 pub struct NsReader<R> {
     /// An XML reader
-    pub(super) reader: Reader<R>,
+    pub(crate) reader: Reader<R>,
     /// A buffer to manage namespaces
-    pub(super) ns_resolver: NamespaceResolver,
+    pub(crate) ns_resolver: NamespaceResolver,
     /// We cannot pop data from the namespace stack until returned `Empty` or `End`
     /// event will be processed by the user, so we only mark that we should that
     /// in the next [`Self::read_event_impl()`] call.
-    pending_pop: bool,
+    pub(crate) pending_pop: bool,
 }
 
 /// Builder methods
@@ -126,7 +126,7 @@ impl<R> NsReader<R> {
     /// associated with this reader.
     ///
     /// Useful for configuring the resolver, e.g. to change the
-    /// [per-element namespace-declaration limit](NamespaceResolver::set_max_declarations_per_element).
+    /// [namespace-binding limit](NamespaceResolver::set_max_namespace_bindings).
     #[inline]
     pub fn resolver_mut(&mut self) -> &mut NamespaceResolver {
         &mut self.ns_resolver
@@ -167,13 +167,13 @@ impl<R: BufRead> NsReader<R> {
     ///             count += 1;
     ///             let (ns, local) = reader.resolver().resolve_element(e.name());
     ///             match local.as_ref() {
-    ///                 b"tag1" => assert_eq!(ns, Bound(Namespace(b"www.xxxx"))),
-    ///                 b"tag2" => assert_eq!(ns, Bound(Namespace(b"www.yyyy"))),
+    ///                 "tag1" => assert_eq!(ns, Bound(Namespace("www.xxxx"))),
+    ///                 "tag2" => assert_eq!(ns, Bound(Namespace("www.yyyy"))),
     ///                 _ => unreachable!(),
     ///             }
     ///         }
     ///         Event::Text(e) => {
-    ///             txt.push(e.decode().unwrap().into_owned())
+    ///             txt.push(e.into_inner().into_owned())
     ///         }
     ///         Event::Eof => break,
     ///         _ => (),
@@ -221,18 +221,18 @@ impl<R: BufRead> NsReader<R> {
     /// let mut txt = Vec::new();
     /// loop {
     ///     match reader.read_resolved_event_into(&mut buf).unwrap() {
-    ///         (Bound(Namespace(b"www.xxxx")), Event::Start(e)) => {
+    ///         (Bound(Namespace("www.xxxx")), Event::Start(e)) => {
     ///             count += 1;
-    ///             assert_eq!(e.local_name(), QName(b"tag1").into());
+    ///             assert_eq!(e.local_name(), QName("tag1").into());
     ///         }
-    ///         (Bound(Namespace(b"www.yyyy")), Event::Start(e)) => {
+    ///         (Bound(Namespace("www.yyyy")), Event::Start(e)) => {
     ///             count += 1;
-    ///             assert_eq!(e.local_name(), QName(b"tag2").into());
+    ///             assert_eq!(e.local_name(), QName("tag2").into());
     ///         }
     ///         (_, Event::Start(_)) => unreachable!(),
     ///
     ///         (_, Event::Text(e)) => {
-    ///             txt.push(e.decode().unwrap().into_owned())
+    ///             txt.push(e.into_inner().into_owned())
     ///         }
     ///         (_, Event::Eof) => break,
     ///         _ => (),
@@ -324,7 +324,7 @@ impl<R: BufRead> NsReader<R> {
     /// reader.config_mut().trim_text(true);
     /// let mut buf = Vec::new();
     ///
-    /// let ns = Namespace(b"namespace 1");
+    /// let ns = Namespace("namespace 1");
     /// let start = BytesStart::from_content(r#"outer xmlns="namespace 1""#, 5);
     /// let end   = start.to_end().into_owned();
     ///
@@ -412,7 +412,7 @@ impl<R: BufRead> NsReader<R> {
     /// // ...then, we could read text content until close tag.
     /// // This call will correctly handle nested <html> elements.
     /// let text = reader.read_text_into(end.name(), &mut buf).unwrap();
-    /// let text = text.decode().unwrap();
+    /// let text = text.into_inner();
     /// assert_eq!(text, r#"
     ///         <title>This is a HTML text</title>
     ///         <p>Usual XML rules does not apply inside it
@@ -496,13 +496,13 @@ impl<'i> NsReader<&'i [u8]> {
     ///             count += 1;
     ///             let (ns, local) = reader.resolver().resolve_element(e.name());
     ///             match local.as_ref() {
-    ///                 b"tag1" => assert_eq!(ns, Bound(Namespace(b"www.xxxx"))),
-    ///                 b"tag2" => assert_eq!(ns, Bound(Namespace(b"www.yyyy"))),
+    ///                 "tag1" => assert_eq!(ns, Bound(Namespace("www.xxxx"))),
+    ///                 "tag2" => assert_eq!(ns, Bound(Namespace("www.yyyy"))),
     ///                 _ => unreachable!(),
     ///             }
     ///         }
     ///         Event::Text(e) => {
-    ///             txt.push(e.decode().unwrap().into_owned())
+    ///             txt.push(e.into_inner().into_owned())
     ///         }
     ///         Event::Eof => break,
     ///         _ => (),
@@ -553,18 +553,18 @@ impl<'i> NsReader<&'i [u8]> {
     /// let mut txt = Vec::new();
     /// loop {
     ///     match reader.read_resolved_event().unwrap() {
-    ///         (Bound(Namespace(b"www.xxxx")), Event::Start(e)) => {
+    ///         (Bound(Namespace("www.xxxx")), Event::Start(e)) => {
     ///             count += 1;
-    ///             assert_eq!(e.local_name(), QName(b"tag1").into());
+    ///             assert_eq!(e.local_name(), QName("tag1").into());
     ///         }
-    ///         (Bound(Namespace(b"www.yyyy")), Event::Start(e)) => {
+    ///         (Bound(Namespace("www.yyyy")), Event::Start(e)) => {
     ///             count += 1;
-    ///             assert_eq!(e.local_name(), QName(b"tag2").into());
+    ///             assert_eq!(e.local_name(), QName("tag2").into());
     ///         }
     ///         (_, Event::Start(_)) => unreachable!(),
     ///
     ///         (_, Event::Text(e)) => {
-    ///             txt.push(e.decode().unwrap().into_owned())
+    ///             txt.push(e.into_inner().into_owned())
     ///         }
     ///         (_, Event::Eof) => break,
     ///         _ => (),
@@ -645,7 +645,7 @@ impl<'i> NsReader<&'i [u8]> {
     /// "#);
     /// reader.config_mut().trim_text(true);
     ///
-    /// let ns = Namespace(b"namespace 1");
+    /// let ns = Namespace("namespace 1");
     /// let start = BytesStart::from_content(r#"outer xmlns="namespace 1""#, 5);
     /// let end   = start.to_end().into_owned();
     ///
@@ -695,13 +695,11 @@ impl<'i> NsReader<&'i [u8]> {
     /// it reads, and if, for example, it contains CDATA section, attempt to
     /// unescape it content will spoil data.
     ///
-    /// Any text will be decoded using the XML current [`decoder()`].
-    ///
     /// Actually, this method perform the following code:
     ///
     /// ```ignore
     /// let span = reader.read_to_end(end)?;
-    /// let text = reader.decoder().decode(&reader.inner_slice[span]);
+    /// let text = &reader.inner_slice[span];
     /// ```
     ///
     /// # Examples
@@ -734,7 +732,7 @@ impl<'i> NsReader<&'i [u8]> {
     /// // ...then, we could read text content until close tag.
     /// // This call will correctly handle nested <html> elements.
     /// let text = reader.read_text(end.name()).unwrap();
-    /// let text = text.decode().unwrap();
+    /// let text = text.into_inner();
     /// assert_eq!(text, r#"
     ///         <title>This is a HTML text</title>
     ///         <p>Usual XML rules does not apply inside it
@@ -750,7 +748,6 @@ impl<'i> NsReader<&'i [u8]> {
     /// ```
     ///
     /// [`Start`]: Event::Start
-    /// [`decoder()`]: Reader::decoder()
     #[inline]
     pub fn read_text(&mut self, end: QName) -> Result<BytesText<'i>> {
         // According to the https://www.w3.org/TR/xml11/#dt-etag, end name should

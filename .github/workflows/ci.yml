@@ -13,9 +13,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: rustfmt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci --offline --cache npm-cache
       - run: cargo fmt --check
       - run: cargo test --locked --offline
-      - run: cargo build --release --locked --offline
+      - run: cargo test -p versus-desktop --locked --offline
+      - run: npm run build
+      - run: npm run tauri -- build --no-bundle
 
   linux:
     runs-on: ubuntu-22.04
@@ -24,17 +31,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: rustfmt
-      - name: Install native build prerequisites
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install Tauri prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install --yes libfontconfig1-dev libgl1-mesa-dev libgtk-3-dev libx11-dev libxrandr-dev libxi-dev libxcursor-dev libxkbcommon-dev libwayland-dev
+          sudo apt-get install --yes libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      - run: npm ci --offline --cache npm-cache
       - run: cargo fmt --check
       - run: cargo test --locked --offline
-      - run: cargo build --release --locked --offline
-      - run: bash scripts/package-linux.sh
-      - uses: actions/upload-artifact@v4
-        with:
-          name: linux-pr-artifacts
-          path: |
-            dist/Versus.AppImage
-            dist/versus-linux-x86_64.tar.gz
+      - run: cargo test -p versus-desktop --locked --offline
+      - run: npm run build
+      - run: npm run tauri -- build --no-bundle

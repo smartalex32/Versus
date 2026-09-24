@@ -12,6 +12,10 @@
 #![allow(clippy::upper_case_acronyms)]
 #![allow(clippy::identity_op)]
 #![allow(clippy::missing_safety_doc)]
+#![allow(clippy::doc_lazy_continuation)]
+#![allow(rustdoc::broken_intra_doc_links)]
+#![allow(rustdoc::bare_urls)]
+#![allow(rustdoc::invalid_html_tags)]
 
 #[link(name = "UserNotifications", kind = "framework")]
 extern "C" {}
@@ -34,6 +38,9 @@ mod __UNNotificationActionIcon;
 #[cfg(feature = "UNNotificationAttachment")]
 #[path = "UNNotificationAttachment.rs"]
 mod __UNNotificationAttachment;
+#[cfg(feature = "UNNotificationAttributedMessageContext")]
+#[path = "UNNotificationAttributedMessageContext.rs"]
+mod __UNNotificationAttributedMessageContext;
 #[cfg(feature = "UNNotificationCategory")]
 #[path = "UNNotificationCategory.rs"]
 mod __UNNotificationCategory;
@@ -90,6 +97,8 @@ pub use self::__UNNotificationAttachment::UNNotificationAttachmentOptionsThumbna
 pub use self::__UNNotificationAttachment::UNNotificationAttachmentOptionsThumbnailTimeKey;
 #[cfg(feature = "UNNotificationAttachment")]
 pub use self::__UNNotificationAttachment::UNNotificationAttachmentOptionsTypeHintKey;
+#[cfg(feature = "UNNotificationAttributedMessageContext")]
+pub use self::__UNNotificationAttributedMessageContext::UNNotificationAttributedMessageContext;
 #[cfg(feature = "UNNotificationCategory")]
 pub use self::__UNNotificationCategory::UNNotificationCategory;
 #[cfg(feature = "UNNotificationCategory")]

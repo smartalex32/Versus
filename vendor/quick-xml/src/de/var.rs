@@ -3,7 +3,7 @@ use crate::{
     de::map::ElementMapAccess,
     de::resolver::EntityResolver,
     de::simple_type::SimpleTypeDeserializer,
-    de::{DeEvent, Deserializer, XmlRead, TEXT_KEY},
+    de::{DeEvent, Deserializer, TEXT_KEY, XmlRead},
     errors::serialize::DeError,
 };
 use serde::de::value::BorrowedStrDeserializer;
@@ -132,7 +132,7 @@ where
         V: Visitor<'de>,
     {
         match self.de.next()? {
-            DeEvent::Start(e) => visitor.visit_map(ElementMapAccess::new(self.de, e, fields)),
+            DeEvent::Start(e) => visitor.visit_map(ElementMapAccess::new(self.de, e, fields)?),
             DeEvent::Text(e) => {
                 SimpleTypeDeserializer::from_text_content(e).deserialize_struct("", fields, visitor)
             }

@@ -4,7 +4,7 @@ repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 output_path="${1:-$repository_root/dist/versus-source-offline.tar.gz}"
 inventory_path="${2:-$repository_root/dist/DEPENDENCY-LICENSES.md}"
 cd "$repository_root"
-for required in Cargo.toml Cargo.lock vendor "$inventory_path"; do
+for required in Cargo.toml Cargo.lock package.json package-lock.json npm-cache vendor src-ui src-tauri "$inventory_path"; do
   [[ -e "$required" ]] || { echo "Required offline source bundle input is missing: $required" >&2; exit 1; }
 done
 staging_directory="$(mktemp -d)"

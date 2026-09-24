@@ -5,11 +5,11 @@ use crate::{
     de::resolver::EntityResolver,
     de::simple_type::SimpleTypeDeserializer,
     de::text::TextDeserializer,
-    de::{DeEvent, Deserializer, XmlRead, TEXT_KEY, VALUE_KEY},
-    errors::serialize::DeError,
+    de::{DeEvent, Deserializer, TEXT_KEY, VALUE_KEY, XmlRead},
     errors::Error,
-    events::attributes::IterState,
+    errors::serialize::DeError,
     events::BytesStart,
+    events::attributes::IterState,
     name::QName,
 };
 use serde::de::value::BorrowedStrDeserializer;
@@ -205,8 +205,12 @@ where
         de: &'d mut Deserializer<'de, R, E>,
         start: BytesStart<'de>,
         fields: &'static [&'static str],
-    ) -> Self {
-        Self {
+    ) -> Result<Self, DeError> {
+        if de.depth >= de.max_depth {
+            return Err(DeError::TooDeeplyNested(de.max_depth));
+        }
+        de.depth += 1;
+        Ok(Self {
             de,
             iter: IterState::new(start.name().as_ref().len(), false),
             start,
@@ -214,22 +218,7 @@ where
             fields,
             has_value_field: fields.contains(&VALUE_KEY),
             has_text_field: fields.contains(&TEXT_KEY),
-        }
-    }
-
-    /// Determines if subtree started with the specified event shoould be skipped.
-    ///
-    /// Used to map elements with `xsi:nil` attribute set to true to `None` in optional contexts.
-    ///
-    /// We need to handle two attributes:
-    /// - on parent element: `<map xsi:nil="true"><foo/></map>`
-    /// - on this element:   `<map><foo xsi:nil="true"/></map>`
-    ///
-    /// We check parent element too because `xsi:nil` affects only nested elements of the
-    /// tag where it is defined. We can map structure with fields mapped to attributes to
-    /// the `<map>` element and set to `None` all its optional elements.
-    fn should_skip_subtree(&self, start: &BytesStart) -> bool {
-        self.de.reader.reader.has_nil_attr(&self.start) || self.de.reader.reader.has_nil_attr(start)
+        })
     }
 
     /// Skips whitespaces when they are not preserved
@@ -237,6 +226,16 @@ where
     fn skip_whitespaces(&mut self) -> Result<(), DeError> {
         // TODO: respect the `xml:space` attribute and probably some deserialized type sign
         self.de.skip_whitespaces()
+    }
+}
+
+impl<'de, 'd, R, E> Drop for ElementMapAccess<'de, 'd, R, E>
+where
+    R: XmlRead<'de>,
+    E: EntityResolver,
+{
+    fn drop(&mut self) {
+        self.de.depth -= 1;
     }
 }
 
@@ -255,9 +254,7 @@ where
 
         // FIXME: There error positions counted from the start of tag name - need global position
         let slice = &self.start.buf;
-        let decoder = self.start.decoder();
-
-        if let Some(a) = self.iter.next(slice).transpose()? {
+        if let Some(a) = self.iter.next(slice.as_bytes()).transpose()? {
             // try getting map from attributes (key= "value")
             let (key, value) = a.into();
             self.source = ValueSource::Attribute(value.unwrap_or_default());
@@ -267,8 +264,7 @@ where
             self.de.key_buf.clear();
             self.de.key_buf.push('@');
 
-            let de =
-                QNameDeserializer::from_attr(QName(&slice[key]), decoder, &mut self.de.key_buf)?;
+            let de = QNameDeserializer::from_attr(QName(&slice[key]), &mut self.de.key_buf)?;
             seed.deserialize(de).map(Some)
         } else {
             self.skip_whitespaces()?;
@@ -330,9 +326,7 @@ where
                 }
                 // We cannot get `Eof` legally, because we always inside of the
                 // opened tag `self.start`
-                DeEvent::Eof => {
-                    Err(Error::missed_end(self.start.name(), self.start.decoder()).into())
-                }
+                DeEvent::Eof => Err(Error::missed_end(self.start.name()).into()),
             }
         }
     }
@@ -346,7 +340,6 @@ where
                 &self.start.buf,
                 value,
                 self.de.reader.reader.xml_version(),
-                self.start.decoder(),
             )),
             // This arm processes the following XML shape:
             // <any-tag>
@@ -569,15 +562,16 @@ where
     where
         V: Visitor<'de>,
     {
-        // We cannot use result of `peek()` directly because of borrow checker
-        let _ = self.map.de.peek()?;
-        match self.map.de.last_peeked() {
-            DeEvent::Text(t) if t.is_empty() => visitor.visit_none(),
-            DeEvent::Start(start) if self.map.should_skip_subtree(start) => {
-                self.map.de.skip_next_tree()?;
-                visitor.visit_none()
-            }
-            _ => visitor.visit_some(self),
+        // `self.map.start` already was taken from the reader, so its namespace bindings were already processed.
+        let has_nil = self
+            .map
+            .start
+            .attributes()
+            .has_nil(&self.map.de.ns_resolver);
+        if self.map.de.deserialize_opt(Some(has_nil))? {
+            visitor.visit_some(self)
+        } else {
+            visitor.visit_none()
         }
     }
 
@@ -800,7 +794,7 @@ where
         V: Visitor<'de>,
     {
         match self.map.de.next()? {
-            DeEvent::Start(e) => visitor.visit_map(ElementMapAccess::new(self.map.de, e, fields)),
+            DeEvent::Start(e) => visitor.visit_map(ElementMapAccess::new(self.map.de, e, fields)?),
             DeEvent::Text(e) => {
                 SimpleTypeDeserializer::from_text_content(e).deserialize_struct("", fields, visitor)
             }
@@ -812,14 +806,13 @@ where
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-/// Check if tag `start` is included in the `fields` list. `decoder` is used to
-/// get a string representation of a tag.
+/// Check if tag `start` is included in the `fields` list.
 ///
 /// Returns `true`, if `start` is not in the `fields` list and `false` otherwise.
 fn not_in(fields: &'static [&'static str], start: &BytesStart) -> Result<bool, DeError> {
-    let tag = start.decoder().decode(start.local_name().into_inner())?;
+    let tag = start.local_name().into_inner();
 
-    Ok(fields.iter().all(|&field| field != tag.as_ref()))
+    Ok(fields.iter().all(|&field| field != tag))
 }
 
 /// A filter that determines, what tags should form a sequence.
@@ -896,7 +889,7 @@ impl<'de> TagFilter<'de> {
 /// <>
 ///   ...
 ///   <item>The is the one item</item>
-///   This is <![CDATA[one another]]> item<!-- even when--> it splitted by comments
+///   This is <![CDATA[one another]]> item<!-- even when--> it is split by comments
 ///   <tag>...and that is the third!</tag>
 ///   ...
 /// </>
@@ -984,9 +977,7 @@ where
                 }
                 // We cannot get `Eof` legally, because we always inside of the
                 // opened tag `self.map.start`
-                DeEvent::Eof => {
-                    Err(Error::missed_end(self.map.start.name(), self.map.start.decoder()).into())
-                }
+                DeEvent::Eof => Err(Error::missed_end(self.map.start.name()).into()),
 
                 DeEvent::Text(_) => match self.map.de.next()? {
                     DeEvent::Text(e) => seed.deserialize(TextDeserializer(e)).map(Some),
@@ -1143,7 +1134,7 @@ where
     where
         V: Visitor<'de>,
     {
-        visitor.visit_map(ElementMapAccess::new(self.de, self.start, fields))
+        visitor.visit_map(ElementMapAccess::new(self.de, self.start, fields)?)
     }
 
     fn deserialize_enum<V>(

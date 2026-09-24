@@ -1,91 +1,58 @@
 # Versus
 
-Versus is a fast, offline desktop utility for comparing directories and two files.
-It uses operating-system filesystem paths, so
-mapped drives and UNC paths on Windows and mounted network filesystems on Linux
-work through the same local APIs as other paths. Versus does not implement network
-authentication or make outbound network requests at runtime.
+Versus is an offline desktop utility for comparing directories and two text files.
+The interface uses React and TypeScript in a Tauri 2 WebView. Rust performs all file
+comparison and saving. Local, mapped-drive, UNC, and mounted network paths are
+handled by the operating system; Versus has no cloud service or telemetry.
 
 ## Use
 
-Open Versus and choose **Directory** or **2-Way**. Enter, paste, drop,
-or browse for local paths, mapped drives, UNC shares, or mounted Linux paths.
-Directory comparison starts with **All** and shows aligned folder trees. Expand a
-folder to inspect its indented contents; color markers identify matching, changed,
-and one-sided items. Use **All**, **Diffs**, or **Same** to change the visible
-results, and double-click a changed file to inspect it and return to the directory
-results afterward. File comparison has the same
-view controls and shows aligned line numbers, highlighted changes, and difference
-navigation. Choose
-**Edit buffers** to edit either side, then **Recalculate edited diff** to update
-the highlighting. Copying a selected difference changes only the working buffer
-until you choose **Save** or **Save As**. Use the
-**Dark mode** or **Light mode** button in the header to switch appearance; the
-choice is saved with the other local settings.
+Choose **Folders** or **Files**, then enter, paste, drop, or browse for two paths.
+Folder results can be filtered and expanded. Select a changed file to inspect it
+without losing the folder results. The file view aligns lines, highlights changes,
+and has previous/next navigation. **Edit buffers** lets you change either side or
+copy the selected difference. Changes stay in memory until **Save**; replacing an
+existing file requires explicit confirmation.
 
-Versus never writes compared files during opening or comparison. It requests
-confirmation before replacing an existing destination. Settings are stored locally
-in `Versus/settings.conf` under the platform's configuration directory and contain
-no file contents.
+Appearance and comparison options are stored locally. Compared file contents are
+not stored in preferences.
 
-## Releases
+## Development
 
-Tagged releases build these artifacts in GitHub Actions:
-
-- `Versus.exe`: the portable Windows executable for Windows 10 and 11.
-- `Versus.AppImage`: the primary portable Linux x86-64 distribution. Run `chmod +x
-  Versus.AppImage && ./Versus.AppImage`.
-- `Versus-windows-x86_64.zip` and `versus-linux-x86_64.tar.gz`: convenience archives.
-- `versus-source-offline.tar.gz`: source, lockfile, vendor tree, build scripts, and
-  generated dependency/license inventory for disconnected builds.
-
-The release workflow builds these artifacts; this repository does not claim that a
-particular artifact has been executed on every supported operating system. Linux
-still requires a compatible kernel, display stack, and graphics driver supplied by
-the host.
-
-Versus is licensed under [MIT](LICENSE). Each release includes
-`DEPENDENCY-LICENSES.md`, generated from Cargo metadata; review third-party
-licenses before redistributing.
-
-## Build from source
-
-Install Rust 1.95 on a connected development machine, clone the repository, and run:
+Install Node.js, Rust, and the [Tauri 2 platform prerequisites](https://v2.tauri.app/start/prerequisites/).
+Then run:
 
 ```powershell
-cargo build --release --locked --offline
+npm ci --offline --cache npm-cache
+npm run tauri -- dev
 ```
 
-The checked-in `.cargo/config.toml` directs Cargo to `vendor/` and forces offline
-resolution. The command must work without DNS, package repositories, or Internet
-access when `Cargo.lock` and `vendor/` are present.
-
-To refresh locked dependencies on a connected machine after intentionally changing
-`Cargo.toml` or `Cargo.lock`, run:
-
-```powershell
-./scripts/vendor-dependencies.ps1
-cargo build --release --locked --offline
-./scripts/export-dependency-licenses.ps1 -OutputPath dist/DEPENDENCY-LICENSES.md
-```
-
-Review and commit the resulting `vendor/`, `.cargo/config.toml`, lockfile, and
-inventory output used for a release. Do not run the vendor refresh in an air-gapped
-environment. A separate Rust toolchain bundle is required where Rust is not already
-installed; it is intentionally outside this repository.
-
-On Linux, install the host development libraries required by the native windowing
-backend, then use the same Cargo command. The release workflow lists the Ubuntu
-packages it uses as a reproducible reference.
-
-## Development checks
+The root Rust crate is the UI-independent comparison core. `src-tauri/` contains
+the desktop shell and narrow native commands; `src-ui/` contains the TypeScript UI.
+The production frontend has no network assets. Rust dependencies are locked in
+`Cargo.lock` and checked into `vendor/`; `.cargo/config.toml` forces offline Cargo
+resolution. The npm lockfile fixes frontend dependency versions, and `npm-cache/`
+contains the Windows and Linux x64 npm packages needed for an offline source build.
 
 ```powershell
 cargo fmt --check
 cargo test --locked --offline
-cargo build --release --locked --offline
+cargo test -p versus-desktop --locked --offline
+npm run build
+npm run tauri -- build --no-bundle
 git diff --check
 ```
 
-Run the narrow relevant test target first while developing. The full commands above
-are the release readiness baseline.
+Refresh Rust dependencies on a connected development machine with
+`./scripts/vendor-dependencies.ps1`, then check the lockfile and vendor changes.
+
+## Packaging
+
+The release workflow builds a Windows NSIS installer with an offline WebView2
+installer, a Windows executable for systems that already have WebView2, and a Linux
+AppImage. The Windows executable alone depends on WebView2 being present. Linux
+requires the host's compatible display and WebKit stack. No programming runtime or
+Internet access is needed when running a packaged app.
+
+Versus is licensed under [MIT](LICENSE). Review the dependency inventory before
+redistributing a release.

@@ -11,10 +11,11 @@
 
 [package]
 edition = "2021"
-rust-version = "1.60"
+rust-version = "1.71"
 name = "objc2-user-notifications"
-version = "0.2.2"
+version = "0.3.2"
 build = false
+autolib = false
 autobins = false
 autoexamples = false
 autotests = false
@@ -34,12 +35,15 @@ categories = [
     "external-ffi-bindings",
     "os::macos-apis",
 ]
-license = "MIT"
+license = "Zlib OR Apache-2.0 OR MIT"
 repository = "https://github.com/madsmtm/objc2"
 
 [package.metadata.docs.rs]
 default-target = "aarch64-apple-darwin"
-features = ["all"]
+rustc-args = [
+    "--cfg",
+    "docsrs",
+]
 targets = [
     "aarch64-apple-darwin",
     "x86_64-apple-darwin",
@@ -47,34 +51,8 @@ targets = [
     "aarch64-apple-tvos",
     "aarch64-apple-watchos",
     "aarch64-apple-ios-macabi",
+    "aarch64-apple-visionos",
 ]
-
-[lib]
-name = "objc2_user_notifications"
-path = "src/lib.rs"
-
-[dependencies.bitflags]
-version = "2.5.0"
-optional = true
-default-features = false
-
-[dependencies.block2]
-version = "0.5.1"
-optional = true
-default-features = false
-
-[dependencies.objc2]
-version = "0.5.2"
-default-features = false
-
-[dependencies.objc2-core-location]
-version = "0.2.2"
-optional = true
-default-features = false
-
-[dependencies.objc2-foundation]
-version = "0.2.2"
-default-features = false
 
 [features]
 NSString_UserNotifications = [
@@ -102,6 +80,7 @@ UNNotificationAttachment = [
     "objc2-foundation/NSString",
     "objc2-foundation/NSURL",
 ]
+UNNotificationAttributedMessageContext = []
 UNNotificationCategory = [
     "bitflags",
     "objc2-foundation/NSArray",
@@ -131,7 +110,6 @@ UNNotificationSound = [
     "objc2-foundation/NSString",
 ]
 UNNotificationTrigger = [
-    "objc2-core-location?/CLRegion",
     "objc2-foundation/NSCalendar",
     "objc2-foundation/NSDate",
     "objc2-foundation/NSObject",
@@ -143,13 +121,18 @@ UNUserNotificationCenter = [
     "objc2-foundation/NSSet",
     "objc2-foundation/NSString",
 ]
-all = [
+alloc = []
+bitflags = ["dep:bitflags"]
+block2 = ["dep:block2"]
+default = [
+    "std",
     "NSString_UserNotifications",
     "UNError",
     "UNNotification",
     "UNNotificationAction",
     "UNNotificationActionIcon",
     "UNNotificationAttachment",
+    "UNNotificationAttributedMessageContext",
     "UNNotificationCategory",
     "UNNotificationContent",
     "UNNotificationRequest",
@@ -163,40 +146,53 @@ all = [
     "block2",
     "objc2-core-location",
 ]
-alloc = [
-    "block2?/alloc",
-    "objc2/alloc",
-    "objc2-core-location?/alloc",
-    "objc2-foundation/alloc",
-]
-bitflags = [
-    "dep:bitflags",
-    "objc2-foundation/bitflags",
-]
-block2 = [
-    "dep:block2",
-    "objc2-core-location?/block2",
-    "objc2-foundation/block2",
-]
-default = ["std"]
 objc2-core-location = ["dep:objc2-core-location"]
-std = [
-    "alloc",
-    "bitflags?/std",
-    "block2?/std",
-    "objc2/std",
-    "objc2-core-location?/std",
-    "objc2-foundation/std",
-]
+std = ["alloc"]
+unstable-darwin-objc = []
+
+[lib]
+name = "objc2_user_notifications"
+path = "src/lib.rs"
+
+[dependencies.bitflags]
+version = "2.5.0"
+features = ["std"]
+optional = true
+default-features = false
+
+[dependencies.block2]
+version = ">=0.6.1, <0.8.0"
+features = ["alloc"]
+optional = true
+default-features = false
+
+[dependencies.objc2]
+version = ">=0.6.2, <0.8.0"
+features = ["std"]
+default-features = false
+
+[dependencies.objc2-core-location]
+version = "0.3.2"
+features = ["CLRegion"]
+optional = true
+default-features = false
+
+[dependencies.objc2-foundation]
+version = "0.3.2"
+features = ["alloc"]
+default-features = false
 
 [lints.clippy]
-cargo = "warn"
 ptr_as_ptr = "warn"
+redundant_feature_names = "allow"
+
+[lints.clippy.cargo]
+level = "warn"
+priority = -1
 
 [lints.rust]
 elided_lifetimes_in_paths = "warn"
 missing_copy_implementations = "warn"
-missing_debug_implementations = "warn"
 non_ascii_idents = "deny"
 unreachable_pub = "warn"
 unsafe_op_in_unsafe_fn = "deny"

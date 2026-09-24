@@ -10,10 +10,10 @@
 # See Cargo.toml.orig for the original contents.
 
 [package]
-edition = "2021"
-rust-version = "1.79"
+edition = "2024"
+rust-version = "1.86"
 name = "quick-xml"
-version = "0.41.0"
+version = "0.42.0"
 build = false
 include = [
     "src/*",

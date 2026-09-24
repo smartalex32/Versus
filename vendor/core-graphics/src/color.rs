@@ -11,6 +11,7 @@ use super::sys::CGColorRef;
 use crate::base::CGFloat;
 use core_foundation::base::CFTypeID;
 use core_foundation::base::TCFType;
+use core_foundation::{declare_TCFType, impl_TCFType};
 
 pub use super::sys::CGColorRef as SysCGColorRef;
 
@@ -26,6 +27,14 @@ impl CGColor {
             CGColor::wrap_under_create_rule(ptr)
         }
     }
+
+    #[cfg(feature = "catalina")]
+    pub fn srgb(red: CGFloat, green: CGFloat, blue: CGFloat, alpha: CGFloat) -> Self {
+        unsafe {
+            let ptr = CGColorCreateSRGB(red, green, blue, alpha);
+            CGColor::wrap_under_create_rule(ptr)
+        }
+    }
 }
 
 #[cfg_attr(feature = "link", link(name = "CoreGraphics", kind = "framework"))]
@@ -36,5 +45,14 @@ extern "C" {
         blue: CGFloat,
         alpha: CGFloat,
     ) -> crate::sys::CGColorRef;
+
+    #[cfg(feature = "catalina")]
+    fn CGColorCreateSRGB(
+        red: CGFloat,
+        green: CGFloat,
+        blue: CGFloat,
+        alpha: CGFloat,
+    ) -> crate::sys::CGColorRef;
+
     fn CGColorGetTypeID() -> CFTypeID;
 }

@@ -14,13 +14,12 @@ use crate::font::{CGFont, CGGlyph};
 use crate::geometry::{CGPoint, CGSize};
 use crate::gradient::{CGGradient, CGGradientDrawingOptions};
 use crate::path::CGPathRef;
+use core::ffi::c_void;
 use core_foundation::base::{CFTypeID, TCFType};
-use libc::{c_int, size_t};
-use std::os::raw::c_void;
 
 use crate::geometry::{CGAffineTransform, CGRect};
 use crate::image::CGImage;
-use foreign_types::{ForeignType, ForeignTypeRef};
+use foreign_types::{foreign_type, ForeignType, ForeignTypeRef};
 use std::cmp;
 use std::ptr;
 use std::slice;
@@ -123,7 +122,7 @@ impl CGContext {
 
     /// Creates a `CGContext` instance from an existing [`CGContextRef`] pointer.
     ///
-    /// This funtion will internally call [`CGRetain`] and hence there is no need to call it explicitly.
+    /// This function will internally call [`CGRetain`] and hence there is no need to call it explicitly.
     ///
     /// This function is particularly useful for cases when the context is not instantiated/managed
     /// by the caller, but it's retrieve via other means (e.g., by calling the method [`NSGraphicsContext::CGContext`]
@@ -139,10 +138,10 @@ impl CGContext {
 
     pub fn create_bitmap_context(
         data: Option<*mut c_void>,
-        width: size_t,
-        height: size_t,
-        bits_per_component: size_t,
-        bytes_per_row: size_t,
+        width: usize,
+        height: usize,
+        bits_per_component: usize,
+        bytes_per_row: usize,
         space: &CGColorSpace,
         bitmap_info: u32,
     ) -> CGContext {
@@ -176,15 +175,15 @@ impl CGContextRef {
         unsafe { CGContextFlush(self.as_ptr()) }
     }
 
-    pub fn width(&self) -> size_t {
+    pub fn width(&self) -> usize {
         unsafe { CGBitmapContextGetWidth(self.as_ptr()) }
     }
 
-    pub fn height(&self) -> size_t {
+    pub fn height(&self) -> usize {
         unsafe { CGBitmapContextGetHeight(self.as_ptr()) }
     }
 
-    pub fn bytes_per_row(&self) -> size_t {
+    pub fn bytes_per_row(&self) -> usize {
         unsafe { CGBitmapContextGetBytesPerRow(self.as_ptr()) }
     }
 
@@ -222,12 +221,6 @@ impl CGContextRef {
 
     pub fn set_allows_font_smoothing(&self, allows_font_smoothing: bool) {
         unsafe { CGContextSetAllowsFontSmoothing(self.as_ptr(), allows_font_smoothing) }
-    }
-
-    pub fn set_font_smoothing_style(&self, style: i32) {
-        unsafe {
-            CGContextSetFontSmoothingStyle(self.as_ptr(), style as _);
-        }
     }
 
     pub fn set_should_smooth_fonts(&self, should_smooth_fonts: bool) {
@@ -622,17 +615,17 @@ extern "C" {
 
     fn CGBitmapContextCreate(
         data: *mut c_void,
-        width: size_t,
-        height: size_t,
-        bitsPerComponent: size_t,
-        bytesPerRow: size_t,
+        width: usize,
+        height: usize,
+        bitsPerComponent: usize,
+        bytesPerRow: usize,
         space: crate::sys::CGColorSpaceRef,
         bitmapInfo: u32,
     ) -> crate::sys::CGContextRef;
     fn CGBitmapContextGetData(context: crate::sys::CGContextRef) -> *mut c_void;
-    fn CGBitmapContextGetWidth(context: crate::sys::CGContextRef) -> size_t;
-    fn CGBitmapContextGetHeight(context: crate::sys::CGContextRef) -> size_t;
-    fn CGBitmapContextGetBytesPerRow(context: crate::sys::CGContextRef) -> size_t;
+    fn CGBitmapContextGetWidth(context: crate::sys::CGContextRef) -> usize;
+    fn CGBitmapContextGetHeight(context: crate::sys::CGContextRef) -> usize;
+    fn CGBitmapContextGetBytesPerRow(context: crate::sys::CGContextRef) -> usize;
     fn CGBitmapContextCreateImage(context: crate::sys::CGContextRef) -> crate::sys::CGImageRef;
     fn CGContextGetTypeID() -> CFTypeID;
     fn CGContextGetClipBoundingBox(c: crate::sys::CGContextRef) -> CGRect;
@@ -640,7 +633,6 @@ extern "C" {
     fn CGContextSetBlendMode(c: crate::sys::CGContextRef, blendMode: CGBlendMode);
     fn CGContextSetAllowsFontSmoothing(c: crate::sys::CGContextRef, allowsFontSmoothing: bool);
     fn CGContextSetShouldSmoothFonts(c: crate::sys::CGContextRef, shouldSmoothFonts: bool);
-    fn CGContextSetFontSmoothingStyle(c: crate::sys::CGContextRef, style: c_int);
     fn CGContextSetAllowsAntialiasing(c: crate::sys::CGContextRef, allowsAntialiasing: bool);
     fn CGContextSetShouldAntialias(c: crate::sys::CGContextRef, shouldAntialias: bool);
     fn CGContextSetAllowsFontSubpixelQuantization(
@@ -666,7 +658,7 @@ extern "C" {
         c: crate::sys::CGContextRef,
         phase: CGFloat,
         lengths: *const CGFloat,
-        count: size_t,
+        count: usize,
     );
     fn CGContextSetLineJoin(c: crate::sys::CGContextRef, join: CGLineJoin);
     fn CGContextSetLineWidth(c: crate::sys::CGContextRef, width: CGFloat);
@@ -717,7 +709,7 @@ extern "C" {
     fn CGContextSetGrayFillColor(context: crate::sys::CGContextRef, gray: CGFloat, alpha: CGFloat);
     fn CGContextClearRect(context: crate::sys::CGContextRef, rect: CGRect);
     fn CGContextFillRect(context: crate::sys::CGContextRef, rect: CGRect);
-    fn CGContextFillRects(context: crate::sys::CGContextRef, rects: *const CGRect, count: size_t);
+    fn CGContextFillRects(context: crate::sys::CGContextRef, rects: *const CGRect, count: usize);
     fn CGContextStrokeRect(context: crate::sys::CGContextRef, rect: CGRect);
     fn CGContextStrokeRectWithWidth(
         context: crate::sys::CGContextRef,
@@ -725,7 +717,7 @@ extern "C" {
         width: CGFloat,
     );
     fn CGContextClipToRect(context: crate::sys::CGContextRef, rect: CGRect);
-    fn CGContextClipToRects(context: crate::sys::CGContextRef, rects: *const CGRect, count: size_t);
+    fn CGContextClipToRects(context: crate::sys::CGContextRef, rects: *const CGRect, count: usize);
     fn CGContextClipToMask(
         ctx: crate::sys::CGContextRef,
         rect: CGRect,
@@ -737,7 +729,7 @@ extern "C" {
     fn CGContextStrokeLineSegments(
         context: crate::sys::CGContextRef,
         points: *const CGPoint,
-        count: size_t,
+        count: usize,
     );
     fn CGContextDrawImage(c: crate::sys::CGContextRef, rect: CGRect, image: crate::sys::CGImageRef);
     fn CGContextSetInterpolationQuality(
@@ -753,7 +745,7 @@ extern "C" {
         c: crate::sys::CGContextRef,
         glyphs: *const CGGlyph,
         positions: *const CGPoint,
-        count: size_t,
+        count: usize,
     );
 
     fn CGContextSaveGState(c: crate::sys::CGContextRef);

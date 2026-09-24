@@ -1,13 +1,16 @@
 #![allow(non_upper_case_globals)]
 use crate::event_source::CGEventSource;
 use crate::geometry::CGPoint;
+
+use bitflags::bitflags;
+use core::ffi::{c_ulong, c_void};
 use core_foundation::{
     base::{CFRelease, CFRetain, CFTypeID, TCFType},
-    mach_port::{CFMachPort, CFMachPortRef},
+    mach_port::{CFMachPort, CFMachPortInvalidate, CFMachPortRef},
+    runloop::{kCFRunLoopCommonModes, CFRunLoop},
 };
-use foreign_types::ForeignType;
-use libc::c_void;
-use std::mem::ManuallyDrop;
+use foreign_types::{foreign_type, ForeignType};
+use std::{mem::ManuallyDrop, ptr};
 
 pub type CGEventField = u32;
 pub type CGKeyCode = u16;
@@ -18,6 +21,7 @@ bitflags! {
     ///
     /// [Ref](http://opensource.apple.com/source/IOHIDFamily/IOHIDFamily-700/IOHIDSystem/IOKit/hidsystem/IOLLEvent.h)
     #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
     pub struct CGEventFlags: u64 {
         const CGEventFlagNull = 0;
 
@@ -40,12 +44,92 @@ bitflags! {
     }
 }
 
-/// Key codes for keys that are independent of keyboard layout.
+/// Constants for the virtual key codes
 ///
-/// [Ref](https://github.com/phracker/MacOSX-SDKs/blob/master/MacOSX10.13.sdk/System/Library/Frameworks/Carbon.framework/Versions/A/Frameworks/HIToolbox.framework/Versions/A/Headers/Events.h)
+/// These constants are the virtual keycodes defined originally in
+/// Inside Mac Volume V, pg. V-191. They identify physical keys on a
+/// keyboard. The struct contains the values of the `ANSIKeyCode`,
+/// `KeyCode`, `ISOKeyCode` and `JISKeyCode` of the original Carbon headers.
+///
+/// Those constants with "ANSI" in the name are labeled
+/// according to the key position on an ANSI-standard US keyboard.
+/// For example, `ANSI_A` indicates the virtual keycode for the key
+/// with the letter 'A' in the US keyboard layout. Other keyboard
+/// layouts may have the 'A' key label on a different physical key;
+/// in this case, pressing 'A' will generate a different virtual
+/// keycode. Constants with the 'JIS_' or 'ISO_' prefix behave
+/// analogously. Keys without a prefix are independent of the
+/// keyboard layout.
+///
+/// [Ref](https://github.com/phracker/MacOSX-SDKs/blob/master/MacOSX10.13.sdk/System/Library/Frameworks/Carbon.framework/Versions/A/Frameworks/HIToolbox.framework/Versions/A/Headers/Events.h#L197-L327)
 #[repr(C)]
 pub struct KeyCode;
 impl KeyCode {
+    pub const ANSI_A: CGKeyCode = 0x00;
+    pub const ANSI_S: CGKeyCode = 0x01;
+    pub const ANSI_D: CGKeyCode = 0x02;
+    pub const ANSI_F: CGKeyCode = 0x03;
+    pub const ANSI_H: CGKeyCode = 0x04;
+    pub const ANSI_G: CGKeyCode = 0x05;
+    pub const ANSI_Z: CGKeyCode = 0x06;
+    pub const ANSI_X: CGKeyCode = 0x07;
+    pub const ANSI_C: CGKeyCode = 0x08;
+    pub const ANSI_V: CGKeyCode = 0x09;
+    pub const ANSI_B: CGKeyCode = 0x0B;
+    pub const ANSI_Q: CGKeyCode = 0x0C;
+    pub const ANSI_W: CGKeyCode = 0x0D;
+    pub const ANSI_E: CGKeyCode = 0x0E;
+    pub const ANSI_R: CGKeyCode = 0x0F;
+    pub const ANSI_Y: CGKeyCode = 0x10;
+    pub const ANSI_T: CGKeyCode = 0x11;
+    pub const ANSI_1: CGKeyCode = 0x12;
+    pub const ANSI_2: CGKeyCode = 0x13;
+    pub const ANSI_3: CGKeyCode = 0x14;
+    pub const ANSI_4: CGKeyCode = 0x15;
+    pub const ANSI_6: CGKeyCode = 0x16;
+    pub const ANSI_5: CGKeyCode = 0x17;
+    pub const ANSI_EQUAL: CGKeyCode = 0x18;
+    pub const ANSI_9: CGKeyCode = 0x19;
+    pub const ANSI_7: CGKeyCode = 0x1A;
+    pub const ANSI_MINUS: CGKeyCode = 0x1B;
+    pub const ANSI_8: CGKeyCode = 0x1C;
+    pub const ANSI_0: CGKeyCode = 0x1D;
+    pub const ANSI_RIGHT_BRACKET: CGKeyCode = 0x1E;
+    pub const ANSI_O: CGKeyCode = 0x1F;
+    pub const ANSI_U: CGKeyCode = 0x20;
+    pub const ANSI_LEFT_BRACKET: CGKeyCode = 0x21;
+    pub const ANSI_I: CGKeyCode = 0x22;
+    pub const ANSI_P: CGKeyCode = 0x23;
+    pub const ANSI_L: CGKeyCode = 0x25;
+    pub const ANSI_J: CGKeyCode = 0x26;
+    pub const ANSI_QUOTE: CGKeyCode = 0x27;
+    pub const ANSI_K: CGKeyCode = 0x28;
+    pub const ANSI_SEMICOLON: CGKeyCode = 0x29;
+    pub const ANSI_BACKSLASH: CGKeyCode = 0x2A;
+    pub const ANSI_COMMA: CGKeyCode = 0x2B;
+    pub const ANSI_SLASH: CGKeyCode = 0x2C;
+    pub const ANSI_N: CGKeyCode = 0x2D;
+    pub const ANSI_M: CGKeyCode = 0x2E;
+    pub const ANSI_PERIOD: CGKeyCode = 0x2F;
+    pub const ANSI_GRAVE: CGKeyCode = 0x32;
+    pub const ANSI_KEYPAD_DECIMAL: CGKeyCode = 0x41;
+    pub const ANSI_KEYPAD_MULTIPLY: CGKeyCode = 0x43;
+    pub const ANSI_KEYPAD_PLUS: CGKeyCode = 0x45;
+    pub const ANSI_KEYPAD_CLEAR: CGKeyCode = 0x47;
+    pub const ANSI_KEYPAD_DIVIDE: CGKeyCode = 0x4B;
+    pub const ANSI_KEYPAD_ENTER: CGKeyCode = 0x4C;
+    pub const ANSI_KEYPAD_MINUS: CGKeyCode = 0x4E;
+    pub const ANSI_KEYPAD_EQUAL: CGKeyCode = 0x51;
+    pub const ANSI_KEYPAD_0: CGKeyCode = 0x52;
+    pub const ANSI_KEYPAD_1: CGKeyCode = 0x53;
+    pub const ANSI_KEYPAD_2: CGKeyCode = 0x54;
+    pub const ANSI_KEYPAD_3: CGKeyCode = 0x55;
+    pub const ANSI_KEYPAD_4: CGKeyCode = 0x56;
+    pub const ANSI_KEYPAD_5: CGKeyCode = 0x57;
+    pub const ANSI_KEYPAD_6: CGKeyCode = 0x58;
+    pub const ANSI_KEYPAD_7: CGKeyCode = 0x59;
+    pub const ANSI_KEYPAD_8: CGKeyCode = 0x5B;
+    pub const ANSI_KEYPAD_9: CGKeyCode = 0x5C;
     pub const RETURN: CGKeyCode = 0x24;
     pub const TAB: CGKeyCode = 0x30;
     pub const SPACE: CGKeyCode = 0x31;
@@ -61,39 +145,45 @@ impl KeyCode {
     pub const RIGHT_OPTION: CGKeyCode = 0x3D;
     pub const RIGHT_CONTROL: CGKeyCode = 0x3E;
     pub const FUNCTION: CGKeyCode = 0x3F;
+    pub const F17: CGKeyCode = 0x40;
     pub const VOLUME_UP: CGKeyCode = 0x48;
     pub const VOLUME_DOWN: CGKeyCode = 0x49;
     pub const MUTE: CGKeyCode = 0x4A;
-    pub const F1: CGKeyCode = 0x7A;
-    pub const F2: CGKeyCode = 0x78;
-    pub const F3: CGKeyCode = 0x63;
-    pub const F4: CGKeyCode = 0x76;
-    pub const F5: CGKeyCode = 0x60;
-    pub const F6: CGKeyCode = 0x61;
-    pub const F7: CGKeyCode = 0x62;
-    pub const F8: CGKeyCode = 0x64;
-    pub const F9: CGKeyCode = 0x65;
-    pub const F10: CGKeyCode = 0x6D;
-    pub const F11: CGKeyCode = 0x67;
-    pub const F12: CGKeyCode = 0x6F;
-    pub const F13: CGKeyCode = 0x69;
-    pub const F14: CGKeyCode = 0x6B;
-    pub const F15: CGKeyCode = 0x71;
-    pub const F16: CGKeyCode = 0x6A;
-    pub const F17: CGKeyCode = 0x40;
     pub const F18: CGKeyCode = 0x4F;
     pub const F19: CGKeyCode = 0x50;
     pub const F20: CGKeyCode = 0x5A;
+    pub const F5: CGKeyCode = 0x60;
+    pub const F6: CGKeyCode = 0x61;
+    pub const F7: CGKeyCode = 0x62;
+    pub const F3: CGKeyCode = 0x63;
+    pub const F8: CGKeyCode = 0x64;
+    pub const F9: CGKeyCode = 0x65;
+    pub const F11: CGKeyCode = 0x67;
+    pub const F13: CGKeyCode = 0x69;
+    pub const F16: CGKeyCode = 0x6A;
+    pub const F14: CGKeyCode = 0x6B;
+    pub const F10: CGKeyCode = 0x6D;
+    pub const F12: CGKeyCode = 0x6F;
+    pub const F15: CGKeyCode = 0x71;
     pub const HELP: CGKeyCode = 0x72;
     pub const HOME: CGKeyCode = 0x73;
     pub const PAGE_UP: CGKeyCode = 0x74;
     pub const FORWARD_DELETE: CGKeyCode = 0x75;
+    pub const F4: CGKeyCode = 0x76;
     pub const END: CGKeyCode = 0x77;
+    pub const F2: CGKeyCode = 0x78;
     pub const PAGE_DOWN: CGKeyCode = 0x79;
+    pub const F1: CGKeyCode = 0x7A;
     pub const LEFT_ARROW: CGKeyCode = 0x7B;
     pub const RIGHT_ARROW: CGKeyCode = 0x7C;
     pub const DOWN_ARROW: CGKeyCode = 0x7D;
     pub const UP_ARROW: CGKeyCode = 0x7E;
+    pub const ISO_SECTION: CGKeyCode = 0x0A;
+    pub const JIS_YEN: CGKeyCode = 0x5D;
+    pub const JIS_UNDERSCORE: CGKeyCode = 0x5E;
+    pub const JIS_KEYPAD_COMMA: CGKeyCode = 0x5F;
+    pub const JIS_EISU: CGKeyCode = 0x66;
+    pub const JIS_KANA: CGKeyCode = 0x68;
 }
 
 #[repr(C)]
@@ -409,13 +499,26 @@ pub type CGEventMask = u64;
 /* Generate an event mask for a single type of event. */
 macro_rules! CGEventMaskBit {
     ($eventType:expr) => {
-        1 << $eventType as CGEventMask
+        (1 << $eventType as CGEventMask)
     };
 }
 
 pub type CGEventTapProxy = *const c_void;
-pub type CGEventTapCallBackFn<'tap_life> =
-    Box<dyn Fn(CGEventTapProxy, CGEventType, &CGEvent) -> Option<CGEvent> + 'tap_life>;
+
+/// What the system should do with the event passed to the callback.
+///
+/// This value is ignored if [`CGEventTapOptions::ListenOnly`] is specified.
+pub enum CallbackResult {
+    /// Pass the event unchanged to other consumers.
+    Keep,
+    /// Drop the event so it is not passed to later consumers.
+    Drop,
+    /// Replace the event with a different one.
+    Replace(CGEvent),
+}
+
+type CGEventTapCallbackFn<'tap_life> =
+    Box<dyn Fn(CGEventTapProxy, CGEventType, &CGEvent) -> CallbackResult + 'tap_life>;
 type CGEventTapCallBackInternal = unsafe extern "C" fn(
     proxy: CGEventTapProxy,
     etype: CGEventType,
@@ -424,68 +527,106 @@ type CGEventTapCallBackInternal = unsafe extern "C" fn(
 ) -> crate::sys::CGEventRef;
 
 unsafe extern "C" fn cg_event_tap_callback_internal(
-    _proxy: CGEventTapProxy,
-    _etype: CGEventType,
-    _event: crate::sys::CGEventRef,
-    _user_info: *const c_void,
+    proxy: CGEventTapProxy,
+    etype: CGEventType,
+    event: crate::sys::CGEventRef,
+    user_info: *const c_void,
 ) -> crate::sys::CGEventRef {
-    let callback = _user_info as *mut CGEventTapCallBackFn;
-    let event = CGEvent::from_ptr(_event);
-    let new_event = (*callback)(_proxy, _etype, &event);
-    let event = match new_event {
-        Some(new_event) => new_event,
-        None => event,
-    };
-    ManuallyDrop::new(event).as_ptr()
+    let callback = user_info as *mut CGEventTapCallbackFn;
+    let event = ManuallyDrop::new(CGEvent::from_ptr(event));
+    let response = (*callback)(proxy, etype, &event);
+    use CallbackResult::*;
+    match response {
+        Keep => event.as_ptr(),
+        Drop => ptr::null_mut(),
+        Replace(new_event) => ManuallyDrop::new(new_event).as_ptr(),
+    }
 }
 
 /// ```no_run
-///extern crate core_foundation;
-///use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop};
-///use core_graphics::event::{CGEventTap, CGEventTapLocation, CGEventTapPlacement, CGEventTapOptions, CGEventType};
-///let current = CFRunLoop::get_current();
-///match CGEventTap::new(
+/// use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop};
+/// use core_graphics::event::{CGEventTap, CGEventTapLocation, CGEventTapPlacement, CGEventTapOptions, CGEventType, CallbackResult};
+/// let current = CFRunLoop::get_current();
+///
+/// CGEventTap::with_enabled(
 ///     CGEventTapLocation::HID,
 ///     CGEventTapPlacement::HeadInsertEventTap,
 ///     CGEventTapOptions::Default,
 ///     vec![CGEventType::MouseMoved],
-///     |_a, _b, d| {
-///         println!("{:?}", d.location());
-///         None
+///     |_proxy, _type, event| {
+///         println!("{:?}", event.location());
+///         CallbackResult::Keep
 ///     },
-/// ) {
-///     Ok(tap) => unsafe {
-///         let loop_source = tap
-///             .mach_port
-///             .create_runloop_source(0)
-///             .expect("Somethings is bad ");
-///         current.add_source(&loop_source, kCFRunLoopCommonModes);
-///         tap.enable();
-///         CFRunLoop::run_current();
-///     },
-///     Err(_) => (assert!(false)),
-/// }
+///     ||  CFRunLoop::run_current(),
+/// ).expect("Failed to install event tap");
 /// ```
+#[must_use = "CGEventTap is disabled when dropped"]
 pub struct CGEventTap<'tap_life> {
-    pub mach_port: CFMachPort,
-    pub callback_ref:
-        Box<dyn Fn(CGEventTapProxy, CGEventType, &CGEvent) -> Option<CGEvent> + 'tap_life>,
+    mach_port: CFMachPort,
+    _callback: Box<CGEventTapCallbackFn<'tap_life>>,
 }
 
-impl<'tap_life> CGEventTap<'tap_life> {
-    pub fn new<F: Fn(CGEventTapProxy, CGEventType, &CGEvent) -> Option<CGEvent> + 'tap_life>(
+impl CGEventTap<'static> {
+    pub fn new<F: Fn(CGEventTapProxy, CGEventType, &CGEvent) -> CallbackResult + Send + 'static>(
         tap: CGEventTapLocation,
         place: CGEventTapPlacement,
         options: CGEventTapOptions,
         events_of_interest: std::vec::Vec<CGEventType>,
         callback: F,
-    ) -> Result<CGEventTap<'tap_life>, ()> {
+    ) -> Result<Self, ()> {
+        // SAFETY: callback is 'static so even if this object is forgotten it
+        // will be valid to call. F is safe to send across threads.
+        unsafe { Self::new_unchecked(tap, place, options, events_of_interest, callback) }
+    }
+}
+
+impl<'tap_life> CGEventTap<'tap_life> {
+    /// Configures an event tap with the supplied options and callback, then
+    /// calls `with_fn`.
+    ///
+    /// Note that the current thread run loop must run within `with_fn` for the
+    /// tap to process events. The tap is destroyed when `with_fn` returns.
+    pub fn with_enabled<R>(
+        tap: CGEventTapLocation,
+        place: CGEventTapPlacement,
+        options: CGEventTapOptions,
+        events_of_interest: std::vec::Vec<CGEventType>,
+        callback: impl Fn(CGEventTapProxy, CGEventType, &CGEvent) -> CallbackResult + 'tap_life,
+        with_fn: impl FnOnce() -> R,
+    ) -> Result<R, ()> {
+        // SAFETY: We are okay to bypass the 'static restriction because the
+        // event tap is dropped before returning. The callback therefore cannot
+        // be called after its lifetime expires. Since we only enable the tap
+        // on the current thread run loop and don't hand it to user code, we
+        // know that the callback will only be called from the current thread.
+        let event_tap: Self =
+            unsafe { Self::new_unchecked(tap, place, options, events_of_interest, callback)? };
+        let loop_source = event_tap
+            .mach_port()
+            .create_runloop_source(0)
+            .expect("Runloop source creation failed");
+        CFRunLoop::get_current().add_source(&loop_source, unsafe { kCFRunLoopCommonModes });
+        event_tap.enable();
+        Ok(with_fn())
+    }
+
+    /// Caller is responsible for ensuring that this object is dropped before
+    /// `'tap_life` expires. Either state captured by `callback` must be safe to
+    /// send across threads, or the tap must only be installed on the current
+    /// thread's run loop.
+    pub unsafe fn new_unchecked(
+        tap: CGEventTapLocation,
+        place: CGEventTapPlacement,
+        options: CGEventTapOptions,
+        events_of_interest: std::vec::Vec<CGEventType>,
+        callback: impl Fn(CGEventTapProxy, CGEventType, &CGEvent) -> CallbackResult + 'tap_life,
+    ) -> Result<Self, ()> {
         let event_mask: CGEventMask = events_of_interest
             .iter()
             .fold(CGEventType::Null as CGEventMask, |mask, &etype| {
                 mask | CGEventMaskBit!(etype)
             });
-        let cb = Box::new(Box::new(callback) as CGEventTapCallBackFn);
+        let cb: Box<CGEventTapCallbackFn> = Box::new(Box::new(callback));
         let cbr = Box::into_raw(cb);
         unsafe {
             let event_tap_ref = CGEventTapCreate(
@@ -500,7 +641,7 @@ impl<'tap_life> CGEventTap<'tap_life> {
             if !event_tap_ref.is_null() {
                 Ok(Self {
                     mach_port: (CFMachPort::wrap_under_create_rule(event_tap_ref)),
-                    callback_ref: Box::from_raw(cbr),
+                    _callback: Box::from_raw(cbr),
                 })
             } else {
                 let _ = Box::from_raw(cbr);
@@ -509,8 +650,18 @@ impl<'tap_life> CGEventTap<'tap_life> {
         }
     }
 
+    pub fn mach_port(&self) -> &CFMachPort {
+        &self.mach_port
+    }
+
     pub fn enable(&self) {
         unsafe { CGEventTapEnable(self.mach_port.as_concrete_TypeRef(), true) }
+    }
+}
+
+impl Drop for CGEventTap<'_> {
+    fn drop(&mut self) {
+        unsafe { CFMachPortInvalidate(self.mach_port.as_CFTypeRef() as *mut _) };
     }
 }
 
@@ -617,6 +768,12 @@ impl CGEvent {
         unsafe { CGEventGetLocation(self.as_ptr()) }
     }
 
+    pub fn set_location(&self, location: CGPoint) {
+        unsafe {
+            CGEventSetLocation(self.as_ptr(), location);
+        }
+    }
+
     #[cfg(feature = "elcapitan")]
     pub fn post_to_pid(&self, pid: libc::pid_t) {
         unsafe {
@@ -645,7 +802,7 @@ impl CGEvent {
     }
 
     pub fn set_string_from_utf16_unchecked(&self, buf: &[u16]) {
-        let buflen = buf.len() as libc::c_ulong;
+        let buflen = buf.len() as c_ulong;
         unsafe {
             CGEventKeyboardSetUnicodeString(self.as_ptr(), buflen, buf.as_ptr());
         }
@@ -675,10 +832,12 @@ impl CGEvent {
 
 #[cfg_attr(feature = "link", link(name = "CoreGraphics", kind = "framework"))]
 extern "C" {
-    /// Return the type identifier for the opaque type `CGEventRef'.
+    /// Return the type identifier for the opaque type [`CGEventRef`].
+    ///
+    /// [`CGEventRef`]: crate::sys::CGEventRef
     fn CGEventGetTypeID() -> CFTypeID;
 
-    /// Return a new event using the event source `source'. If `source' is NULL,
+    /// Return a new event using the event source `source`. If `source` is NULL,
     /// the default source is used.
     fn CGEventCreate(source: crate::sys::CGEventSourceRef) -> crate::sys::CGEventRef;
 
@@ -701,11 +860,11 @@ extern "C" {
     /// Return a new mouse event.
     ///
     /// The event source may be taken from another event, or may be NULL.
-    /// `mouseType' should be one of the mouse event types. `mouseCursorPosition'
+    /// `mouseType` should be one of the mouse event types. `mouseCursorPosition`
     /// should be the position of the mouse cursor in global coordinates.
-    /// `mouseButton' should be the button that's changing state; `mouseButton'
-    /// is ignored unless `mouseType' is one of `kCGEventOtherMouseDown',
-    /// `kCGEventOtherMouseDragged', or `kCGEventOtherMouseUp'.
+    /// `mouseButton` should be the button that's changing state; `mouseButton`
+    /// is ignored unless `mouseType` is one of `kCGEventOtherMouseDown`,
+    /// `kCGEventOtherMouseDragged`, or `kCGEventOtherMouseUp`.
     ///
     /// The current implementation of the event system supports a maximum of
     /// thirty-two buttons. Mouse button 0 is the primary button on the mouse.
@@ -718,7 +877,7 @@ extern "C" {
         mouseButton: CGMouseButton,
     ) -> crate::sys::CGEventRef;
 
-    /// A non-variadic variant version of CGEventCreateScrollWheelEvent.
+    /// A non-variadic variant version of [`CGEventCreateScrollWheelEvent`].
     ///
     /// Returns a new Quartz scrolling event.
     ///
@@ -754,7 +913,9 @@ extern "C" {
     fn CGEventGetFlags(event: crate::sys::CGEventRef) -> CGEventFlags;
 
     /// Return the location of an event in global display coordinates.
-    /// CGPointZero is returned if event is not a valid crate::sys::CGEventRef.
+    /// `CGPointZero` is returned if event is not a valid [`CGEventRef`].
+    ///
+    /// [`CGEventRef`]: crate::sys::CGEventRef
     fn CGEventGetLocation(event: crate::sys::CGEventRef) -> CGPoint;
 
     /// Set the event type of an event.
@@ -773,7 +934,7 @@ extern "C" {
     /// keycode and perceived event state.
     fn CGEventKeyboardSetUnicodeString(
         event: crate::sys::CGEventRef,
-        length: libc::c_ulong,
+        length: c_ulong,
         string: *const u16,
     );
 
@@ -783,13 +944,13 @@ extern "C" {
     /// Set the integer value of a field in an event.
     ///
     /// Before calling this function, the event type must be set using a typed
-    /// event creation function such as `CGEventCreateMouseEvent', or by
-    /// calling `CGEventSetType'.
+    /// event creation function such as [`CGEventCreateMouseEvent`], or by
+    /// calling [`CGEventSetType`].
     ///
     /// If you are creating a mouse event generated by a tablet, call this
-    /// function and specify the field `kCGMouseEventSubtype' with a value of
-    /// `kCGEventMouseSubtypeTabletPoint' or
-    /// `kCGEventMouseSubtypeTabletProximity' before setting other parameters.
+    /// function and specify the field `kCGMouseEventSubtype` with a value of
+    /// `kCGEventMouseSubtypeTabletPoint` or
+    /// `kCGEventMouseSubtypeTabletProximity` before setting other parameters.
     fn CGEventSetIntegerValueField(event: crate::sys::CGEventRef, field: CGEventField, value: i64);
 
     /// Return the floating-point value of a field in an event.
@@ -802,8 +963,8 @@ extern "C" {
     /// Set the floating-point value of a field in an event.
     ///
     /// Before calling this function, the event type must be set using a typed
-    /// event creation function such as `CGEventCreateMouseEvent', or by calling
-    /// `CGEventSetType'.
+    /// event creation function such as [`CGEventCreateMouseEvent`], or by calling
+    /// [`CGEventSetType`].
     ///
     /// In cases where the field’s value is represented within the event by a
     /// fixed point number or integer, the value parameter is scaled as needed
@@ -820,6 +981,14 @@ extern "C" {
         userInfo: *const c_void,
     ) -> CFMachPortRef;
 
+    /// Enable or disable an event tap.
+    ///
+    /// Event taps are normally enabled when created. If an event tap becomes
+    /// unresponsive, or if a user requests that event taps be disabled, then
+    /// a `kCGEventTapDisabled` event is passed to the event tap callback
+    /// function. Event taps may be re-enabled by calling this function.
     fn CGEventTapEnable(tap: CFMachPortRef, enable: bool);
 
+    /// Set the location of a mouse event.
+    fn CGEventSetLocation(event: crate::sys::CGEventRef, location: CGPoint);
 }

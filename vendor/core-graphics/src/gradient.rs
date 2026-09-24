@@ -13,14 +13,14 @@ use crate::base::CGFloat;
 use crate::color::CGColor;
 use crate::color_space::CGColorSpace;
 
+use bitflags::bitflags;
 use core_foundation::array::{CFArray, CFArrayRef};
 use core_foundation::base::{CFRelease, CFRetain, TCFType};
-use foreign_types::ForeignType;
-
-use libc::size_t;
+use foreign_types::{foreign_type, ForeignType};
 
 bitflags! {
     #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
     pub struct CGGradientDrawingOptions: u32 {
         const CGGradientDrawsBeforeStartLocation = (1 << 0);
         const CGGradientDrawsAfterEndLocation = (1 << 1);
@@ -78,7 +78,7 @@ extern "C" {
         color_space: crate::sys::CGColorSpaceRef,
         components: *const CGFloat,
         locations: *const CGFloat,
-        count: size_t,
+        count: usize,
     ) -> crate::sys::CGGradientRef;
     fn CGGradientCreateWithColors(
         color_space: crate::sys::CGColorSpaceRef,

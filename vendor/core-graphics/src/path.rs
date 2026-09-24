@@ -10,9 +10,9 @@
 pub use crate::sys::CGPathRef as SysCGPathRef;
 
 use crate::geometry::{CGAffineTransform, CGPoint, CGRect};
+use core::ffi::c_void;
 use core_foundation::base::{CFRelease, CFRetain, CFTypeID};
-use foreign_types::ForeignType;
-use libc::c_void;
+use foreign_types::{foreign_type, ForeignType};
 use std::fmt::{self, Debug, Formatter};
 use std::marker::PhantomData;
 use std::ops::Deref;
@@ -80,7 +80,7 @@ pub struct CGPathElementRef<'a> {
     phantom: PhantomData<&'a CGPathElement>,
 }
 
-impl<'a> CGPathElementRef<'a> {
+impl CGPathElementRef<'_> {
     fn new<'b>(element: *const CGPathElement) -> CGPathElementRef<'b> {
         CGPathElementRef {
             element,
@@ -89,7 +89,7 @@ impl<'a> CGPathElementRef<'a> {
     }
 }
 
-impl<'a> Deref for CGPathElementRef<'a> {
+impl Deref for CGPathElementRef<'_> {
     type Target = CGPathElement;
     fn deref(&self) -> &CGPathElement {
         unsafe { &*self.element }

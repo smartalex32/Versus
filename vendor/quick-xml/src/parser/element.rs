@@ -30,7 +30,7 @@ use crate::parser::Parser;
 /// let mut parser = ElementParser::default();
 ///
 /// // Parse `<my-element  with = 'some > inside'>and the text follow...`
-/// // splitted into three chunks
+/// // split into three chunks
 /// assert_eq!(parser.feed(b"<my-element"), None);
 /// // ...get new chunk of data
 /// assert_eq!(parser.feed(b" with = 'some >"), None);
@@ -91,8 +91,8 @@ impl Default for ElementParser {
 
 #[test]
 fn parse() {
-    use pretty_assertions::assert_eq;
     use ElementParser::*;
+    use pretty_assertions::assert_eq;
 
     /// Returns `Ok(pos)` with the position in the buffer where element is ended.
     ///

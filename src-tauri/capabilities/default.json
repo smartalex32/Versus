@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The UI uses only core window APIs. Filesystem access is limited to Versus commands.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

@@ -104,7 +104,7 @@ impl<R: AsyncBufRead + Unpin> Reader<R> {
     /// loop {
     ///     match reader.read_event_into_async(&mut buf).await {
     ///         Ok(Event::Start(_)) => count += 1,
-    ///         Ok(Event::Text(e)) => txt.push(e.decode().unwrap().into_owned()),
+    ///         Ok(Event::Text(e)) => txt.push(e.into_inner().into_owned()),
     ///         Err(e) => panic!("Error at position {}: {:?}", reader.error_position(), e),
     ///         Ok(Event::Eof) => break,
     ///         _ => (),
@@ -237,7 +237,7 @@ impl<R: AsyncBufRead + Unpin> Reader<R> {
     /// // ...then, we could read text content until close tag.
     /// // This call will correctly handle nested <html> elements.
     /// let text = reader.read_text_into_async(end.name(), &mut buf).await.unwrap();
-    /// let text = text.decode().unwrap();
+    /// let text = text.into_inner();
     /// assert_eq!(text, r#"
     ///         <title>This is a HTML text</title>
     ///         <p>Usual XML rules does not apply inside it
@@ -270,7 +270,8 @@ impl<R: AsyncBufRead + Unpin> Reader<R> {
         // usize (because otherwise we panic at appending to the buffer before that point)
         let end = start + len as usize;
 
-        Ok(BytesText::wrap(&buf[start..end], self.decoder()))
+        let text = std::str::from_utf8(&buf[start..end])?;
+        Ok(BytesText::wrap(text))
     }
 
     /// Private function to read until `>` is found. This function expects that
@@ -318,13 +319,13 @@ impl<R: AsyncBufRead + Unpin> NsReader<R> {
     ///             count += 1;
     ///             let (ns, local) = reader.resolver().resolve_element(e.name());
     ///             match local.as_ref() {
-    ///                 b"tag1" => assert_eq!(ns, Bound(Namespace(b"www.xxxx"))),
-    ///                 b"tag2" => assert_eq!(ns, Bound(Namespace(b"www.yyyy"))),
+    ///                 "tag1" => assert_eq!(ns, Bound(Namespace("www.xxxx"))),
+    ///                 "tag2" => assert_eq!(ns, Bound(Namespace("www.yyyy"))),
     ///                 _ => unreachable!(),
     ///             }
     ///         }
     ///         Event::Text(e) => {
-    ///             txt.push(e.decode().unwrap().into_owned())
+    ///             txt.push(e.into_inner().into_owned())
     ///         }
     ///         Event::Eof => break,
     ///         _ => (),
@@ -381,7 +382,7 @@ impl<R: AsyncBufRead + Unpin> NsReader<R> {
     /// reader.config_mut().trim_text(true);
     /// let mut buf = Vec::new();
     ///
-    /// let ns = Namespace(b"namespace 1");
+    /// let ns = Namespace("namespace 1");
     /// let start = BytesStart::from_content(r#"outer xmlns="namespace 1""#, 5);
     /// let end   = start.to_end().into_owned();
     ///
@@ -461,7 +462,7 @@ impl<R: AsyncBufRead + Unpin> NsReader<R> {
     /// // ...then, we could read text content until close tag.
     /// // This call will correctly handle nested <html> elements.
     /// let text = reader.read_text_into_async(end.name(), &mut buf).await.unwrap();
-    /// let text = text.decode().unwrap();
+    /// let text = text.into_inner();
     /// assert_eq!(text, r#"
     ///         <title>This is a HTML text</title>
     ///         <p>Usual XML rules does not apply inside it
@@ -526,18 +527,18 @@ impl<R: AsyncBufRead + Unpin> NsReader<R> {
     /// let mut txt = Vec::new();
     /// loop {
     ///     match reader.read_resolved_event_into_async(&mut buf).await.unwrap() {
-    ///         (Bound(Namespace(b"www.xxxx")), Event::Start(e)) => {
+    ///         (Bound(Namespace("www.xxxx")), Event::Start(e)) => {
     ///             count += 1;
-    ///             assert_eq!(e.local_name(), QName(b"tag1").into());
+    ///             assert_eq!(e.local_name(), QName("tag1").into());
     ///         }
-    ///         (Bound(Namespace(b"www.yyyy")), Event::Start(e)) => {
+    ///         (Bound(Namespace("www.yyyy")), Event::Start(e)) => {
     ///             count += 1;
-    ///             assert_eq!(e.local_name(), QName(b"tag2").into());
+    ///             assert_eq!(e.local_name(), QName("tag2").into());
     ///         }
     ///         (_, Event::Start(_)) => unreachable!(),
     ///
     ///         (_, Event::Text(e)) => {
-    ///             txt.push(e.decode().unwrap().into_owned())
+    ///             txt.push(e.into_inner().into_owned())
     ///         }
     ///         (_, Event::Eof) => break,
     ///         _ => (),
@@ -575,7 +576,7 @@ mod test {
         read_event_into_async,
         TokioAdapter,
         1,
-        &mut Vec::new(),
+        &mut Vec::<u8>::new(),
         async,
         await
     );

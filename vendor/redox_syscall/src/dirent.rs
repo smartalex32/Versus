@@ -72,6 +72,7 @@ impl DirentKind {
     }
 }
 
+
 pub struct DirentIter<'a>(&'a [u8]);
 
 impl<'a> DirentIter<'a> {
@@ -180,15 +181,12 @@ impl<'a, B: Buffer<'a>> DirentBuf<B> {
     }
     pub fn entry(&mut self, entry: DirEntry<'_>) -> Result<()> {
         let name16 = u16::try_from(entry.name.len()).map_err(|_| Error::new(EINVAL))?;
-        let record_align = align_of::<*const DirentHeader>();
         let record_len = self
             .header_size
             .checked_add(name16)
             // XXX: NUL byte. Unfortunately this is probably the only performant way to be
             // compatible with C.
             .and_then(|l| l.checked_add(1))
-            // Align length so next header is aligned
-            .and_then(|l| l.checked_next_multiple_of(record_align as u16))
             .ok_or(Error::new(ENAMETOOLONG))?;
 
         let [this, remaining] = core::mem::replace(&mut self.buffer, B::empty())
@@ -218,7 +216,7 @@ impl<'a, B: Buffer<'a>> DirentBuf<B> {
         })?;
         this_header_extra.zero_out()?;
         this_name.copy_from_slice_exact(entry.name.as_bytes())?;
-        this_name_nul.zero_out()?;
+        this_name_nul.copy_from_slice_exact(&[0])?;
 
         self.written += usize::from(record_len);
         self.buffer = remaining;

@@ -1,11 +1,10 @@
 //! Contains high-level interface for a pull-based XML parser.
 
 #[cfg(feature = "encoding")]
-use encoding_rs::Encoding;
+use encoding_rs;
 use std::io;
 use std::ops::Range;
 
-use crate::encoding::Decoder;
 #[cfg(feature = "encoding")]
 use crate::encoding::DetectedEncoding;
 use crate::errors::{Error, IllFormedError, SyntaxError};
@@ -160,57 +159,83 @@ pub struct Config {
     /// [`check_end_names`]: Self::check_end_names
     pub trim_markup_names_in_closing_tags: bool,
 
-    /// Whether whitespace before character data should be removed.
+    /// Whether leading whitespace before character data should be removed.
     ///
-    /// When set to `true`, leading whitespace is trimmed in [`Text`] events.
-    /// If after that the event is empty it will not be pushed.
+    /// When set to `true`, whitespace at the start of [`Text`] events is
+    /// stripped. If the event becomes empty after trimming, it is still
+    /// emitted as `Text("")`.
     ///
     /// Default: `false`
     ///
-    /// <div style="background:rgba(80, 240, 100, 0.20);padding:0.75em;">
+    /// <div style="background:rgba(255, 80, 80, 0.20);padding:0.75em;">
     ///
-    /// WARNING: With this option every text events will be trimmed which is
-    /// incorrect behavior when text events delimited by comments, processing
-    /// instructions or CDATA sections. To correctly trim data manually apply
-    /// [`BytesText::inplace_trim_start`] and [`BytesText::inplace_trim_end`]
-    /// only to necessary events.
+    /// **WARNING:** This option has known issues.
+    ///
+    /// - **Incorrect trimming around comments, PIs, and CDATA sections:**
+    ///   Trimming applies to every [`Text`] event regardless of context.
+    ///   In `text <!-- comment --> more`, the leading space of ` more` is
+    ///   content, but this option trims it because the parser treats each
+    ///   text chunk independently without knowledge of the surrounding markup.
+    /// - **Empty events:** Whitespace-only text that is fully trimmed
+    ///   produces an empty `Text("")` event instead of being suppressed
+    ///   ([#984]).
+    ///
+    /// To correctly trim data manually apply [`BytesText::inplace_trim_start`]
+    /// and [`BytesText::inplace_trim_end`] only to necessary events.
     /// </div>
     ///
     /// [`Text`]: crate::events::Event::Text
     /// [`BytesText::inplace_trim_start`]: crate::events::BytesText::inplace_trim_start
     /// [`BytesText::inplace_trim_end`]: crate::events::BytesText::inplace_trim_end
+    /// [#984]: https://github.com/tafia/quick-xml/issues/984
     pub trim_text_start: bool,
 
-    /// Whether whitespace after character data should be removed.
+    /// Whether trailing whitespace after character data should be removed.
     ///
-    /// When set to `true`, trailing whitespace is trimmed in [`Text`] events.
-    /// If after that the event is empty it will not be pushed.
+    /// When set to `true`, trailing whitespace in [`Text`] events is
+    /// stripped. If the event becomes empty after trimming, it is still
+    /// emitted as `Text("")`.
     ///
     /// Default: `false`
     ///
-    /// <div style="background:rgba(80, 240, 100, 0.20);padding:0.75em;">
+    /// <div style="background:rgba(255, 80, 80, 0.20);padding:0.75em;">
     ///
-    /// WARNING: With this option every text events will be trimmed which is
-    /// incorrect behavior when text events delimited by comments, processing
-    /// instructions or CDATA sections. To correctly trim data manually apply
-    /// [`BytesText::inplace_trim_start`] and [`BytesText::inplace_trim_end`]
-    /// only to necessary events.
+    /// **WARNING:** This option has known issues.
+    ///
+    /// - **Incorrect trimming around comments, PIs, and CDATA sections:**
+    ///   Trimming applies to every [`Text`] event regardless of context.
+    ///   In `text <!-- comment --> more`, the trailing space of `text ` is
+    ///   content, but this option trims it because the parser treats each
+    ///   text chunk independently without knowledge of the surrounding markup.
+    /// - **Empty events:** Whitespace-only text that is fully trimmed
+    ///   produces an empty `Text("")` event instead of being suppressed
+    ///   ([#984]).
+    ///
+    /// To correctly trim data manually apply [`BytesText::inplace_trim_start`]
+    /// and [`BytesText::inplace_trim_end`] only to necessary events.
     /// </div>
     ///
     /// [`Text`]: crate::events::Event::Text
     /// [`BytesText::inplace_trim_start`]: crate::events::BytesText::inplace_trim_start
     /// [`BytesText::inplace_trim_end`]: crate::events::BytesText::inplace_trim_end
+    /// [#984]: https://github.com/tafia/quick-xml/issues/984
     pub trim_text_end: bool,
 }
 
 impl Config {
     /// Set both [`trim_text_start`] and [`trim_text_end`] to the same value.
     ///
-    /// <div style="background:rgba(80, 240, 100, 0.20);padding:0.75em;">
+    /// See those options for more details, including known issues.
     ///
-    /// WARNING: With this option every text events will be trimmed which is
-    /// incorrect behavior when text events delimited by comments, processing
-    /// instructions or CDATA sections. To correctly trim data manually apply
+    /// Default: `false`
+    ///
+    /// <div style="background:rgba(255, 80, 80, 0.20);padding:0.75em;">
+    ///
+    /// **WARNING:** This option has known issues.
+    ///
+    /// With this option every text event will be trimmed which is incorrect
+    /// behavior when text events delimited by comments, processing instructions
+    /// or CDATA sections. To correctly trim data manually apply
     /// [`BytesText::inplace_trim_start`] and [`BytesText::inplace_trim_end`]
     /// only to necessary events.
     /// </div>
@@ -219,6 +244,7 @@ impl Config {
     /// [`trim_text_end`]: Self::trim_text_end
     /// [`BytesText::inplace_trim_start`]: crate::events::BytesText::inplace_trim_start
     /// [`BytesText::inplace_trim_end`]: crate::events::BytesText::inplace_trim_end
+    /// [#984]: https://github.com/tafia/quick-xml/issues/984
     #[inline]
     pub fn trim_text(&mut self, trim: bool) {
         self.trim_text_start = trim;
@@ -288,12 +314,12 @@ macro_rules! read_event_impl {
                             $self.state.state = ParseState::InsideText;
                             // +1 to skip start `&`
                             // -1 to skip end `;`
-                            Ok(Event::GeneralRef(BytesRef::wrap(&bytes[1..bytes.len() - 1], $self.decoder())))
+                            Ok(Event::GeneralRef(BytesRef::wrap(&bytes[1..bytes.len() - 1])))
                         }
                         // Go to Done state
                         ReadRefResult::UpToEof(bytes) if $self.state.config.allow_dangling_amp => {
                             $self.state.state = ParseState::Done;
-                            Ok(Event::Text($self.state.emit_text(bytes)))
+                            Ok(Event::Text($self.state.emit_text(bytes)?))
                         }
                         ReadRefResult::UpToEof(_) => {
                             $self.state.state = ParseState::Done;
@@ -302,7 +328,7 @@ macro_rules! read_event_impl {
                         }
                         // Do not change state, stay in InsideRef
                         ReadRefResult::UpToRef(bytes) if $self.state.config.allow_dangling_amp => {
-                            Ok(Event::Text($self.state.emit_text(bytes)))
+                            Ok(Event::Text($self.state.emit_text(bytes)?))
                         }
                         ReadRefResult::UpToRef(_) => {
                             $self.state.last_error_offset = start;
@@ -311,14 +337,14 @@ macro_rules! read_event_impl {
                         // Go to InsideMarkup state
                         ReadRefResult::UpToMarkup(bytes) if $self.state.config.allow_dangling_amp => {
                             $self.state.state = ParseState::InsideMarkup;
-                            Ok(Event::Text($self.state.emit_text(bytes)))
+                            Ok(Event::Text($self.state.emit_text(bytes)?))
                         }
                         ReadRefResult::UpToMarkup(_) => {
                             $self.state.state = ParseState::InsideMarkup;
                             $self.state.last_error_offset = start;
                             Err(Error::IllFormed(IllFormedError::UnclosedReference))
                         }
-                        ReadRefResult::Err(e) => Err(Error::from(e)),
+                        ReadRefResult::Err(e) => Err(e),
                     }
                 }
                 ParseState::InsideText => { // Go to InsideMarkup or Done state
@@ -345,24 +371,24 @@ macro_rules! read_event_impl {
                             // - event contains only spaces
                             // - trim_text_start = false
                             // - trim_text_end = true
-                            Ok(Event::Text($self.state.emit_text(bytes)))
+                            Ok(Event::Text($self.state.emit_text(bytes)?))
                         }
                         ReadTextResult::UpToRef(bytes) => {
                             $self.state.state = ParseState::InsideRef;
                             // Return Text event with `bytes` content or Eof if bytes is empty
-                            Ok(Event::Text($self.state.emit_text(bytes)))
+                            Ok(Event::Text($self.state.emit_text(bytes)?))
                         }
                         ReadTextResult::UpToEof(bytes) => {
                             $self.state.state = ParseState::Done;
                             // Trim bytes from end if required
-                            let event = $self.state.emit_text(bytes);
+                            let event = $self.state.emit_text(bytes)?;
                             if event.is_empty() {
                                 Ok(Event::Eof)
                             } else {
                                 Ok(Event::Text(event))
                             }
                         }
-                        ReadTextResult::Err(e) => Err(Error::from(e)),
+                        ReadTextResult::Err(e) => Err(e),
                     }
                 },
                 // Go to InsideText state in next two arms
@@ -462,7 +488,7 @@ macro_rules! read_until_close {
                 .read_with(ElementParser::Outside, $buf, &mut $self.state.offset)
                 $(.$await)?
             {
-                Ok(bytes) => Ok($self.state.emit_start(bytes)),
+                Ok(bytes) => $self.state.emit_start(bytes),
                 Err(e) => {
                     // We want to report error at `<`
                     $self.state.last_error_offset = start;
@@ -527,7 +553,7 @@ macro_rules! read_to_end {
                 }
                 Ok(Event::Eof) => {
                     $self.config_mut().trim_text_start = trim;
-                    return Err(Error::missed_end($end, $self.decoder()));
+                    return Err(Error::missed_end($end));
                 }
                 _ => (),
             }
@@ -616,21 +642,21 @@ enum ParseState {
 enum EncodingRef {
     /// Encoding was implicitly assumed to have a specified value. It can be refined
     /// using BOM or by the XML declaration event (`<?xml encoding=... ?>`)
-    Implicit(&'static Encoding),
+    Implicit(&'static encoding_rs::Encoding),
     /// Encoding was explicitly set to the desired value. It cannot be changed
     /// nor by BOM, nor by parsing XML declaration (`<?xml encoding=... ?>`)
-    Explicit(&'static Encoding),
+    Explicit(&'static encoding_rs::Encoding),
     /// Encoding was detected from a byte order mark (BOM) or by the first bytes
     /// of the content. It can be refined by the XML declaration event (`<?xml encoding=... ?>`)
-    BomDetected(&'static Encoding),
+    BomDetected(&'static encoding_rs::Encoding),
     /// Encoding was detected using XML declaration event (`<?xml encoding=... ?>`).
     /// It can no longer change
-    XmlDetected(&'static Encoding),
+    XmlDetected(&'static encoding_rs::Encoding),
 }
 #[cfg(feature = "encoding")]
 impl EncodingRef {
     #[inline]
-    const fn encoding(&self) -> &'static Encoding {
+    const fn encoding(&self) -> &'static encoding_rs::Encoding {
         match self {
             Self::Implicit(e) => e,
             Self::Explicit(e) => e,
@@ -711,12 +737,16 @@ where
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-/// A low level encoding-agnostic XML event reader.
+/// A low level XML event reader that expects UTF-8 input.
 ///
 /// Consumes bytes and streams XML [`Event`]s.
 ///
 /// This reader does not manage namespace declarations and not able to resolve
 /// prefixes. If you want these features, use the [`NsReader`].
+///
+/// If you need to decode a document which may not be UTF-8, enable the `encoding` feature
+/// and wrap the input in `DecodingReader`. This is a `BufRead` adapter that auto-detects
+/// encoding from BOM or XML declaration and transcodes to UTF-8.
 ///
 /// # Examples
 ///
@@ -747,14 +777,14 @@ where
 ///
 ///         Ok(Event::Start(e)) => {
 ///             match e.name().as_ref() {
-///                 b"tag1" => println!("attributes values: {:?}",
+///                 "tag1" => println!("attributes values: {:?}",
 ///                                     e.attributes().map(|a| a.unwrap().value)
 ///                                     .collect::<Vec<_>>()),
-///                 b"tag2" => count += 1,
+///                 "tag2" => count += 1,
 ///                 _ => (),
 ///             }
 ///         }
-///         Ok(Event::Text(e)) => txt.push(e.decode().unwrap().into_owned()),
+///         Ok(Event::Text(e)) => txt.push(e.into_inner().into_owned()),
 ///
 ///         // There are several other `Event`s we do not consider here
 ///         _ => (),
@@ -837,9 +867,9 @@ impl<R> Reader<R> {
     /// loop {
     ///     match reader.read_event_into(&mut buf) {
     ///         Ok(Event::Start(ref e)) => match e.name().as_ref() {
-    ///             b"tag1" | b"tag2" => (),
+    ///             "tag1" | "tag2" => (),
     ///             tag => {
-    ///                 assert_eq!(b"tag3", tag);
+    ///                 assert_eq!("tag3", tag);
     ///                 assert_eq!((3, 22), into_line_and_column(reader));
     ///                 break;
     ///             }
@@ -895,18 +925,16 @@ impl<R> Reader<R> {
         self.state.last_error_offset
     }
 
-    /// Get the decoder, used to decode bytes, read by this reader, to the strings.
+    /// Returns the encoding used by this reader.
     ///
-    /// If [`encoding`] feature is enabled, the used encoding may change after
-    /// parsing the XML declaration, otherwise encoding is fixed to UTF-8.
+    /// The used encoding may change after parsing the XML declaration,
+    /// otherwise encoding is fixed to UTF-8.
     ///
-    /// If [`encoding`] feature is enabled and no encoding is specified in declaration,
-    /// defaults to UTF-8.
-    ///
-    /// [`encoding`]: ../index.html#encoding
+    /// If no encoding is specified in the declaration, defaults to UTF-8.
+    #[cfg(feature = "encoding")]
     #[inline]
-    pub const fn decoder(&self) -> Decoder {
-        self.state.decoder()
+    pub const fn encoding(&self) -> &'static encoding_rs::Encoding {
+        self.state.encoding.encoding()
     }
 
     /// Get the direct access to the underlying reader, but tracks the amount of
@@ -997,25 +1025,24 @@ impl<R> Reader<R> {
 /// Result of an attempt to read XML textual data from the source.
 #[derive(Debug)]
 enum ReadTextResult<'r, B> {
-    /// Start of markup (`<` character) was found in the first byte. `<` was consumed.
+    /// The reader is positioned at `<` (start of markup). `<` was not consumed.
     /// Contains buffer that should be returned back to the next iteration cycle
     /// to satisfy borrow checker requirements.
     Markup(B),
-    /// Start of reference (`&` character) was found in the first byte.
-    /// `&` was not consumed.
+    /// The reader is positioned at `&` (start of a reference). `&` was not consumed.
     /// Contains buffer that should be returned back to the next iteration cycle
     /// to satisfy borrow checker requirements.
     Ref(B),
-    /// Contains text block up to start of markup (`<` character). `<` was consumed.
-    UpToMarkup(&'r [u8]),
+    /// Contains text block up to start of markup (`<` character). `<` was not consumed.
+    UpToMarkup(&'r str),
     /// Contains text block up to start of reference (`&` character).
     /// `&` was not consumed.
-    UpToRef(&'r [u8]),
+    UpToRef(&'r str),
     /// Contains text block up to EOF, neither start of markup (`<` character)
     /// or start of reference (`&` character) was found.
-    UpToEof(&'r [u8]),
-    /// IO error occurred.
-    Err(io::Error),
+    UpToEof(&'r str),
+    /// IO or decoding error occurred.
+    Err(Error),
 }
 
 /// Result of an attempt to read general reference from the reader.
@@ -1023,19 +1050,19 @@ enum ReadTextResult<'r, B> {
 enum ReadRefResult<'r> {
     /// Contains text block up to end of reference (`;` character).
     /// Result includes start `&`, but not end `;`.
-    Ref(&'r [u8]),
+    Ref(&'r str),
     /// Contains text block up to EOF. Neither end of reference (`;`), start of
     /// another reference (`&`) or start of markup (`<`) characters was found.
     /// Result includes start `&`.
-    UpToEof(&'r [u8]),
+    UpToEof(&'r str),
     /// Contains text block up to next possible reference (`&` character).
     /// Result includes start `&`.
-    UpToRef(&'r [u8]),
+    UpToRef(&'r str),
     /// Contains text block up to start of markup (`<` character).
     /// Result includes start `&`.
-    UpToMarkup(&'r [u8]),
-    /// IO error occurred.
-    Err(io::Error),
+    UpToMarkup(&'r str),
+    /// IO or decoding error occurred.
+    Err(Error),
 }
 
 /// Represents an input for a reader that can return borrowed data.
@@ -1104,7 +1131,7 @@ trait XmlSource<'r, B> {
     /// reader which provides bytes fed into the parser.
     ///
     /// [events]: crate::events::Event
-    fn read_with<P>(&mut self, parser: P, buf: B, position: &mut u64) -> Result<&'r [u8], Error>
+    fn read_with<P>(&mut self, parser: P, buf: B, position: &mut u64) -> Result<&'r str, Error>
     where
         P: Parser;
 
@@ -1127,7 +1154,7 @@ trait XmlSource<'r, B> {
         &mut self,
         buf: B,
         position: &mut u64,
-    ) -> Result<(BangType, &'r [u8]), Error>;
+    ) -> Result<(BangType, &'r str), Error>;
 
     /// Consume and discard all the whitespace until the next non-whitespace
     /// character or EOF.
@@ -1214,7 +1241,7 @@ impl BangType {
                     }
                 }
             }
-            Self::DocType(ref mut parser) => return parser.feed(buf, chunk),
+            Self::DocType(parser) => return parser.feed(buf, chunk),
         }
         None
     }
@@ -1248,7 +1275,7 @@ mod test {
                 use super::*;
                 use crate::errors::{Error, SyntaxError};
                 use crate::reader::{BangType, DtdParser};
-                use crate::utils::Bytes;
+
 
                 /// Checks that reading CDATA content works correctly
                 mod cdata {
@@ -1307,8 +1334,8 @@ mod test {
                             $(.$await)?
                             .unwrap();
                         assert_eq!(
-                            (ty, Bytes(bytes)),
-                            (BangType::CData, Bytes(b"<![CDATA[]]>"))
+                            (ty, bytes),
+                            (BangType::CData, "<![CDATA[]]>")
                         );
                         assert_eq!(position, 12);
                     }
@@ -1328,8 +1355,8 @@ mod test {
                             $(.$await)?
                             .unwrap();
                         assert_eq!(
-                            (ty, Bytes(bytes)),
-                            (BangType::CData, Bytes(b"<![CDATA[cdata]] ]>content]]>"))
+                            (ty, bytes),
+                            (BangType::CData, "<![CDATA[cdata]] ]>content]]>")
                         );
                         assert_eq!(position, 29);
                     }
@@ -1453,8 +1480,8 @@ mod test {
                             $(.$await)?
                             .unwrap();
                         assert_eq!(
-                            (ty, Bytes(bytes)),
-                            (BangType::Comment, Bytes(b"<!---->"))
+                            (ty, bytes),
+                            (BangType::Comment, "<!---->")
                         );
                         assert_eq!(position, 7);
                     }
@@ -1471,8 +1498,8 @@ mod test {
                             $(.$await)?
                             .unwrap();
                         assert_eq!(
-                            (ty, Bytes(bytes)),
-                            (BangType::Comment, Bytes(b"<!--->comment<--->"))
+                            (ty, bytes),
+                            (BangType::Comment, "<!--->comment<--->")
                         );
                         assert_eq!(position, 18);
                     }
@@ -1532,8 +1559,8 @@ mod test {
                                 $(.$await)?
                                 .unwrap();
                             assert_eq!(
-                                (ty, Bytes(bytes)),
-                                (BangType::DocType(DtdParser::Finished), Bytes(b"<!DOCTYPE>"))
+                                (ty, bytes),
+                                (BangType::DocType(DtdParser::Finished), "<!DOCTYPE>")
                             );
                             assert_eq!(position, 10);
                         }
@@ -1606,8 +1633,8 @@ mod test {
                                 $(.$await)?
                                 .unwrap();
                             assert_eq!(
-                                (ty, Bytes(bytes)),
-                                (BangType::DocType(DtdParser::Finished), Bytes(b"<!doctype>"))
+                                (ty, bytes),
+                                (BangType::DocType(DtdParser::Finished), "<!doctype>")
                             );
                             assert_eq!(position, 10);
                         }
@@ -1635,7 +1662,7 @@ mod test {
             mod read_text {
                 use super::*;
                 use crate::reader::ReadTextResult;
-                use crate::utils::Bytes;
+
                 use pretty_assertions::assert_eq;
 
                 #[$test]
@@ -1646,7 +1673,7 @@ mod test {
                     //                ^= 1
 
                     match $source(&mut input).read_text(buf, &mut position) $(.$await)? {
-                        ReadTextResult::UpToEof(bytes) => assert_eq!(Bytes(bytes), Bytes(b"")),
+                        ReadTextResult::UpToEof(bytes) => assert_eq!(bytes, ""),
                         x => panic!("Expected `UpToEof(_)`, but got `{:?}`", x),
                     }
                     assert_eq!(position, 1);
@@ -1688,7 +1715,7 @@ mod test {
                     //                  ^= 2
 
                     match $source(&mut input).read_text(buf, &mut position) $(.$await)? {
-                        ReadTextResult::UpToMarkup(bytes) => assert_eq!(Bytes(bytes), Bytes(b"a")),
+                        ReadTextResult::UpToMarkup(bytes) => assert_eq!(bytes, "a"),
                         x => panic!("Expected `UpToMarkup(_)`, but got `{:?}`", x),
                     }
                     assert_eq!(position, 2);
@@ -1702,7 +1729,7 @@ mod test {
                     //                 ^= 2
 
                     match $source(&mut input).read_text(buf, &mut position) $(.$await)? {
-                        ReadTextResult::UpToRef(bytes) => assert_eq!(Bytes(bytes), Bytes(b"a")),
+                        ReadTextResult::UpToRef(bytes) => assert_eq!(bytes, "a"),
                         x => panic!("Expected `UpToRef(_)`, but got `{:?}`", x),
                     }
                     assert_eq!(position, 2);
@@ -1716,7 +1743,7 @@ mod test {
                     //                 ^= 2
 
                     match $source(&mut input).read_text(buf, &mut position) $(.$await)? {
-                        ReadTextResult::UpToEof(bytes) => assert_eq!(Bytes(bytes), Bytes(b"a")),
+                        ReadTextResult::UpToEof(bytes) => assert_eq!(bytes, "a"),
                         x => panic!("Expected `UpToEof(_)`, but got `{:?}`", x),
                     }
                     assert_eq!(position, 2);
@@ -1726,7 +1753,7 @@ mod test {
             mod read_ref {
                 use super::*;
                 use crate::reader::ReadRefResult;
-                use crate::utils::Bytes;
+
                 use pretty_assertions::assert_eq;
 
                 // Empty input is not allowed for `read_ref` so not tested.
@@ -1741,7 +1768,7 @@ mod test {
                     //                 ^= 2
 
                     match $source(&mut input).read_ref(buf, &mut position) $(.$await)? {
-                        ReadRefResult::UpToEof(bytes) => assert_eq!(Bytes(bytes), Bytes(b"&")),
+                        ReadRefResult::UpToEof(bytes) => assert_eq!(bytes, "&"),
                         x => panic!("Expected `UpToEof(_)`, but got `{:?}`", x),
                     }
                     assert_eq!(position, 2);
@@ -1755,7 +1782,7 @@ mod test {
                     //                 ^= 2
 
                     match $source(&mut input).read_ref(buf, &mut position) $(.$await)? {
-                        ReadRefResult::UpToRef(bytes) => assert_eq!(Bytes(bytes), Bytes(b"&")),
+                        ReadRefResult::UpToRef(bytes) => assert_eq!(bytes, "&"),
                         x => panic!("Expected `UpToRef(_)`, but got `{:?}`", x),
                     }
                     assert_eq!(position, 2);
@@ -1769,7 +1796,7 @@ mod test {
                     //                 ^= 2
 
                     match $source(&mut input).read_ref(buf, &mut position) $(.$await)? {
-                        ReadRefResult::UpToMarkup(bytes) => assert_eq!(Bytes(bytes), Bytes(b"&")),
+                        ReadRefResult::UpToMarkup(bytes) => assert_eq!(bytes, "&"),
                         x => panic!("Expected `UpToMarkup(_)`, but got `{:?}`", x),
                     }
                     assert_eq!(position, 2);
@@ -1783,7 +1810,7 @@ mod test {
                     //                  ^= 3
 
                     match $source(&mut input).read_ref(buf, &mut position) $(.$await)? {
-                        ReadRefResult::Ref(bytes) => assert_eq!(Bytes(bytes), Bytes(b"&;")),
+                        ReadRefResult::Ref(bytes) => assert_eq!(bytes, "&;"),
                         x => panic!("Expected `Ref(_)`, but got `{:?}`", x),
                     }
                     assert_eq!(position, 3);
@@ -1797,7 +1824,7 @@ mod test {
                     //                    ^= 5
 
                     match $source(&mut input).read_ref(buf, &mut position) $(.$await)? {
-                        ReadRefResult::Ref(bytes) => assert_eq!(Bytes(bytes), Bytes(b"&lt;")),
+                        ReadRefResult::Ref(bytes) => assert_eq!(bytes, "&lt;"),
                         x => panic!("Expected `Ref(_)`, but got `{:?}`", x),
                     }
                     assert_eq!(position, 5);
@@ -1808,7 +1835,7 @@ mod test {
                 use super::*;
                 use crate::errors::{Error, SyntaxError};
                 use crate::parser::ElementParser;
-                use crate::utils::Bytes;
+
                 use pretty_assertions::assert_eq;
 
                 /// Checks that nothing was read from empty buffer
@@ -1843,8 +1870,8 @@ mod test {
                         //                   ^= 2
 
                         assert_eq!(
-                            Bytes($source(&mut input).read_with(ElementParser::default(), buf, &mut position) $(.$await)? .unwrap()),
-                            Bytes(b"<>")
+                            $source(&mut input).read_with(ElementParser::default(), buf, &mut position) $(.$await)? .unwrap(),
+                            "<>"
                         );
                         assert_eq!(position, 2);
                     }
@@ -1857,8 +1884,8 @@ mod test {
                         //                      ^= 5
 
                         assert_eq!(
-                            Bytes($source(&mut input).read_with(ElementParser::default(), buf, &mut position) $(.$await)? .unwrap()),
-                            Bytes(b"<tag>")
+                            $source(&mut input).read_with(ElementParser::default(), buf, &mut position) $(.$await)? .unwrap(),
+                            "<tag>"
                         );
                         assert_eq!(position, 5);
                     }
@@ -1871,8 +1898,8 @@ mod test {
                         //                    ^= 3
 
                         assert_eq!(
-                            Bytes($source(&mut input).read_with(ElementParser::default(), buf, &mut position) $(.$await)? .unwrap()),
-                            Bytes(b"<:>")
+                            $source(&mut input).read_with(ElementParser::default(), buf, &mut position) $(.$await)? .unwrap(),
+                            "<:>"
                         );
                         assert_eq!(position, 3);
                     }
@@ -1885,8 +1912,8 @@ mod test {
                         //                       ^= 6
 
                         assert_eq!(
-                            Bytes($source(&mut input).read_with(ElementParser::default(), buf, &mut position) $(.$await)? .unwrap()),
-                            Bytes(b"<:tag>")
+                            $source(&mut input).read_with(ElementParser::default(), buf, &mut position) $(.$await)? .unwrap(),
+                            "<:tag>"
                         );
                         assert_eq!(position, 6);
                     }
@@ -1899,8 +1926,8 @@ mod test {
                         //                                                          ^= 39
 
                         assert_eq!(
-                            Bytes($source(&mut input).read_with(ElementParser::default(), buf, &mut position) $(.$await)? .unwrap()),
-                            Bytes(br#"<tag  attr-1=">"  attr2  =  '>'  3attr>"#)
+                            $source(&mut input).read_with(ElementParser::default(), buf, &mut position) $(.$await)? .unwrap(),
+                            r#"<tag  attr-1=">"  attr2  =  '>'  3attr>"#
                         );
                         assert_eq!(position, 39);
                     }
@@ -1918,8 +1945,8 @@ mod test {
                         //                    ^= 3
 
                         assert_eq!(
-                            Bytes($source(&mut input).read_with(ElementParser::default(), buf, &mut position) $(.$await)? .unwrap()),
-                            Bytes(b"</>")
+                            $source(&mut input).read_with(ElementParser::default(), buf, &mut position) $(.$await)? .unwrap(),
+                            "</>"
                         );
                         assert_eq!(position, 3);
                     }
@@ -1932,8 +1959,8 @@ mod test {
                         //                       ^= 6
 
                         assert_eq!(
-                            Bytes($source(&mut input).read_with(ElementParser::default(), buf, &mut position) $(.$await)? .unwrap()),
-                            Bytes(b"<tag/>")
+                            $source(&mut input).read_with(ElementParser::default(), buf, &mut position) $(.$await)? .unwrap(),
+                            "<tag/>"
                         );
                         assert_eq!(position, 6);
                     }
@@ -1946,8 +1973,8 @@ mod test {
                         //                     ^= 4
 
                         assert_eq!(
-                            Bytes($source(&mut input).read_with(ElementParser::default(), buf, &mut position) $(.$await)? .unwrap()),
-                            Bytes(b"<:/>")
+                            $source(&mut input).read_with(ElementParser::default(), buf, &mut position) $(.$await)? .unwrap(),
+                            "<:/>"
                         );
                         assert_eq!(position, 4);
                     }
@@ -1960,8 +1987,8 @@ mod test {
                         //                        ^= 7
 
                         assert_eq!(
-                            Bytes($source(&mut input).read_with(ElementParser::default(), buf, &mut position) $(.$await)? .unwrap()),
-                            Bytes(b"<:tag/>")
+                            $source(&mut input).read_with(ElementParser::default(), buf, &mut position) $(.$await)? .unwrap(),
+                            "<:tag/>"
                         );
                         assert_eq!(position, 7);
                     }
@@ -1974,8 +2001,8 @@ mod test {
                         //                                                             ^= 42
 
                         assert_eq!(
-                            Bytes($source(&mut input).read_with(ElementParser::default(), buf, &mut position) $(.$await)? .unwrap()),
-                            Bytes(br#"<tag  attr-1="/>"  attr2  =  '/>'  3attr/>"#)
+                            $source(&mut input).read_with(ElementParser::default(), buf, &mut position) $(.$await)? .unwrap(),
+                            r#"<tag  attr-1="/>"  attr2  =  '/>'  3attr/>"#
                         );
                         assert_eq!(position, 42);
                     }
@@ -1993,8 +2020,8 @@ mod test {
                         //                     ^= 4
 
                         assert_eq!(
-                            Bytes($source(&mut input).read_with(ElementParser::default(), buf, &mut position) $(.$await)? .unwrap()),
-                            Bytes(b"</ >")
+                            $source(&mut input).read_with(ElementParser::default(), buf, &mut position) $(.$await)? .unwrap(),
+                            "</ >"
                         );
                         assert_eq!(position, 4);
                     }
@@ -2007,8 +2034,8 @@ mod test {
                         //                       ^= 6
 
                         assert_eq!(
-                            Bytes($source(&mut input).read_with(ElementParser::default(), buf, &mut position) $(.$await)? .unwrap()),
-                            Bytes(b"</tag>")
+                            $source(&mut input).read_with(ElementParser::default(), buf, &mut position) $(.$await)? .unwrap(),
+                            "</tag>"
                         );
                         assert_eq!(position, 6);
                     }
@@ -2021,8 +2048,8 @@ mod test {
                         //                     ^= 4
 
                         assert_eq!(
-                            Bytes($source(&mut input).read_with(ElementParser::default(), buf, &mut position) $(.$await)? .unwrap()),
-                            Bytes(b"</:>")
+                            $source(&mut input).read_with(ElementParser::default(), buf, &mut position) $(.$await)? .unwrap(),
+                            "</:>"
                         );
                         assert_eq!(position, 4);
                     }
@@ -2035,8 +2062,8 @@ mod test {
                         //                        ^= 7
 
                         assert_eq!(
-                            Bytes($source(&mut input).read_with(ElementParser::default(), buf, &mut position) $(.$await)? .unwrap()),
-                            Bytes(b"</:tag>")
+                            $source(&mut input).read_with(ElementParser::default(), buf, &mut position) $(.$await)? .unwrap(),
+                            "</:tag>"
                         );
                         assert_eq!(position, 7);
                     }
@@ -2049,8 +2076,8 @@ mod test {
                         //                                                           ^= 40
 
                         assert_eq!(
-                            Bytes($source(&mut input).read_with(ElementParser::default(), buf, &mut position) $(.$await)? .unwrap()),
-                            Bytes(br#"</tag  attr-1=">"  attr2  =  '>'  3attr>"#)
+                            $source(&mut input).read_with(ElementParser::default(), buf, &mut position) $(.$await)? .unwrap(),
+                            r#"</tag  attr-1=">"  attr2  =  '>'  3attr>"#
                         );
                         assert_eq!(position, 40);
                     }

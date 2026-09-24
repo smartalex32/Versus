@@ -1,10 +1,11 @@
 //! A module for wrappers that encode / decode data.
 
-use std::borrow::Cow;
 use std::str::Utf8Error;
 
 #[cfg(feature = "encoding")]
 use encoding_rs;
+#[cfg(feature = "encoding")]
+use std::borrow::Cow;
 #[cfg(feature = "encoding")]
 use std::io::{self, BufRead, Read};
 
@@ -78,104 +79,6 @@ impl std::fmt::Display for EncodingError {
 pub struct Decoder {
     #[cfg(feature = "encoding")]
     pub(crate) encoding: &'static encoding_rs::Encoding,
-}
-
-impl Decoder {
-    pub(crate) const fn utf8() -> Self {
-        Decoder {
-            #[cfg(feature = "encoding")]
-            encoding: encoding_rs::UTF_8,
-        }
-    }
-
-    #[cfg(all(test, feature = "encoding", feature = "serialize"))]
-    pub(crate) const fn utf16() -> Self {
-        Decoder {
-            encoding: encoding_rs::UTF_16LE,
-        }
-    }
-}
-
-impl Decoder {
-    /// Returns the `Reader`s encoding.
-    ///
-    /// This encoding will be used by [`decode`].
-    ///
-    /// [`decode`]: Self::decode
-    #[cfg(feature = "encoding")]
-    pub const fn encoding(&self) -> &'static encoding_rs::Encoding {
-        self.encoding
-    }
-
-    /// ## Without `encoding` feature
-    ///
-    /// Decodes an UTF-8 slice regardless of XML declaration and ignoring BOM
-    /// if it is present in the `bytes`.
-    ///
-    /// ## With `encoding` feature
-    ///
-    /// Decodes specified bytes using encoding, declared in the XML, if it was
-    /// declared there, or UTF-8 otherwise, and ignoring BOM if it is present
-    /// in the `bytes`.
-    ///
-    /// ----
-    /// Returns an error in case of malformed sequences in the `bytes`.
-    pub fn decode<'b>(&self, bytes: &'b [u8]) -> Result<Cow<'b, str>, EncodingError> {
-        #[cfg(not(feature = "encoding"))]
-        let decoded = Ok(Cow::Borrowed(std::str::from_utf8(bytes)?));
-
-        #[cfg(feature = "encoding")]
-        let decoded = decode(bytes, self.encoding);
-
-        decoded
-    }
-
-    /// Like [`decode`][Self::decode] but using a pre-allocated buffer.
-    pub fn decode_into(&self, bytes: &[u8], buf: &mut String) -> Result<(), EncodingError> {
-        #[cfg(not(feature = "encoding"))]
-        buf.push_str(std::str::from_utf8(bytes)?);
-
-        #[cfg(feature = "encoding")]
-        decode_into(bytes, self.encoding, buf)?;
-
-        Ok(())
-    }
-
-    /// Decodes the `Cow` buffer, preserves the lifetime
-    pub(crate) fn decode_cow<'b>(
-        &self,
-        bytes: &Cow<'b, [u8]>,
-    ) -> Result<Cow<'b, str>, EncodingError> {
-        match bytes {
-            Cow::Borrowed(bytes) => self.decode(bytes),
-            // Convert to owned, because otherwise Cow will be bound with wrong lifetime
-            Cow::Owned(bytes) => Ok(self.decode(bytes)?.into_owned().into()),
-        }
-    }
-
-    /// Decodes the `Cow` buffer, normalizes XML EOLs, preserves the lifetime
-    pub(crate) fn content<'b>(
-        &self,
-        bytes: &Cow<'b, [u8]>,
-        normalize_eol: impl Fn(&str) -> Cow<str>,
-    ) -> Result<Cow<'b, str>, EncodingError> {
-        match bytes {
-            Cow::Borrowed(bytes) => {
-                let text = self.decode(bytes)?;
-                match normalize_eol(&text) {
-                    // If text borrowed after normalization that means that it's not changed
-                    Cow::Borrowed(_) => Ok(text),
-                    Cow::Owned(s) => Ok(Cow::Owned(s)),
-                }
-            }
-            Cow::Owned(bytes) => {
-                let text = self.decode(bytes)?;
-                let text = normalize_eol(&text);
-                // Convert to owned, because otherwise Cow will be bound with wrong lifetime
-                Ok(text.into_owned().into())
-            }
-        }
-    }
 }
 
 /// Decodes the provided bytes using the specified encoding.

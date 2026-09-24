@@ -6,6 +6,13 @@ Current implementation focus (September 2026): directory and two-way file
 comparison. The three-way compare and merge interface is deferred; its requirements
 below remain as historical scope for a later iteration.
 
+The desktop interface now uses Tauri 2 with a React/TypeScript frontend and the
+existing Rust comparison core. Earlier references below to egui, no WebView
+dependency, a single-file Windows distribution, and the old build commands are
+historical. The Windows installer bundles an offline WebView2 installer; a standalone
+executable requires WebView2 already installed. `README.md` and
+`AGENTS_PROJECT_REFERENCE.md` describe the current build and release paths.
+
 1. Summary
 
 Versus is a small, fast, offline desktop utility for comparing files and directories.

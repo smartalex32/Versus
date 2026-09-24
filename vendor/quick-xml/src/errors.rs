@@ -1,6 +1,6 @@
 //! Error management module
 
-use crate::encoding::{Decoder, EncodingError};
+use crate::encoding::EncodingError;
 use crate::escape::EscapeError;
 use crate::events::attributes::AttrError;
 use crate::name::{NamespaceError, QName};
@@ -152,7 +152,11 @@ impl fmt::Display for IllFormedError {
                 f.write_str("an XML declaration does not contain `version` attribute")
             }
             Self::MissingDeclVersion(Some(attr)) => {
-                write!(f, "an XML declaration must start with `version` attribute, but in starts with `{}`", attr)
+                write!(
+                    f,
+                    "an XML declaration must start with `version` attribute, but in starts with `{}`",
+                    attr
+                )
             }
             Self::UnknownVersion => {
                 f.write_str("unknown XML version: either 1.0 or 1.1 is expected")
@@ -209,11 +213,8 @@ pub enum Error {
 }
 
 impl Error {
-    pub(crate) fn missed_end(name: QName, decoder: Decoder) -> Self {
-        match decoder.decode(name.as_ref()) {
-            Ok(name) => IllFormedError::MissingEndTag(name.into()).into(),
-            Err(err) => err.into(),
-        }
+    pub(crate) fn missed_end(name: QName) -> Self {
+        IllFormedError::MissingEndTag(name.as_ref().to_string()).into()
     }
 }
 
@@ -252,6 +253,13 @@ impl From<EncodingError> for Error {
     #[inline]
     fn from(error: EncodingError) -> Error {
         Self::Encoding(error)
+    }
+}
+
+impl From<std::str::Utf8Error> for Error {
+    #[inline]
+    fn from(error: std::str::Utf8Error) -> Error {
+        Self::Encoding(EncodingError::Utf8(error))
     }
 }
 
@@ -313,7 +321,6 @@ pub mod serialize {
     //! A module to handle serde (de)serialization errors
 
     use super::*;
-    use crate::utils::write_byte_string;
     use std::borrow::Cow;
     #[cfg(feature = "overlapped-lists")]
     use std::num::NonZeroUsize;
@@ -335,7 +342,7 @@ pub mod serialize {
         /// Deserializer encounter a start tag with a specified name when it is
         /// not expecting. This happens when you try to deserialize a primitive
         /// value (numbers, strings, booleans) from an XML element.
-        UnexpectedStart(Vec<u8>),
+        MixedContent(String),
         /// The [`Reader`] produced [`Event::Eof`] when it is not expecting,
         /// for example, after producing [`Event::Start`] but before corresponding
         /// [`Event::End`].
@@ -345,6 +352,12 @@ pub mod serialize {
         /// [`Event::Start`]: crate::events::Event::Start
         /// [`Event::End`]: crate::events::Event::End
         UnexpectedEof,
+        /// The XML input exceeds the configured recursion limit.
+        ///
+        /// The contained value is the limit that was exceeded. This error is
+        /// returned when deserializing deeply nested XML structures to prevent
+        /// stack overflows.
+        TooDeeplyNested(usize),
         /// Too many events were skipped while deserializing a sequence, event limit
         /// exceeded. The limit was provided as an argument
         #[cfg(feature = "overlapped-lists")]
@@ -357,12 +370,9 @@ pub mod serialize {
                 Self::Custom(s) => f.write_str(s),
                 Self::InvalidXml(e) => e.fmt(f),
                 Self::KeyNotRead => f.write_str("invalid `Deserialize` implementation: `MapAccess::next_value[_seed]` was called before `MapAccess::next_key[_seed]`"),
-                Self::UnexpectedStart(e) => {
-                    f.write_str("unexpected `Event::Start(")?;
-                    write_byte_string(f, e)?;
-                    f.write_str(")`")
-                }
+                Self::MixedContent(e) => write!(f, "cannot deserialize primitive type from mixed content, found unexpected tag <{}>", e),
                 Self::UnexpectedEof => f.write_str("unexpected `Event::Eof`"),
+                Self::TooDeeplyNested(limit) => write!(f, "XML is too deeply nested, recursion limit of {} exceeded", limit),
                 #[cfg(feature = "overlapped-lists")]
                 Self::TooManyEvents(s) => write!(f, "deserializer buffered {} events, limit exceeded", s),
             }
@@ -408,6 +418,13 @@ pub mod serialize {
     impl From<AttrError> for DeError {
         #[inline]
         fn from(e: AttrError) -> Self {
+            Self::InvalidXml(e.into())
+        }
+    }
+
+    impl From<NamespaceError> for DeError {
+        #[inline]
+        fn from(e: NamespaceError) -> Self {
             Self::InvalidXml(e.into())
         }
     }

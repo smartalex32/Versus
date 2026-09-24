@@ -4,7 +4,8 @@ use std::borrow::Cow;
 use std::io::{self, Write};
 
 use crate::encoding::UTF8_BOM;
-use crate::events::{attributes::Attribute, BytesCData, BytesPI, BytesStart, BytesText, Event};
+use crate::events::attributes::Attribute;
+use crate::events::{BytesCData, BytesPI, BytesStart, BytesText, Event};
 
 #[cfg(feature = "async-tokio")]
 mod async_tokio;
@@ -75,7 +76,7 @@ pub struct Config {
 /// let mut writer = Writer::new(Cursor::new(Vec::new()));
 /// loop {
 ///     match reader.read_event() {
-///         Ok(Event::Start(e)) if e.name().as_ref() == b"this_tag" => {
+///         Ok(Event::Start(e)) if e.name().as_ref() == "this_tag" => {
 ///
 ///             // creates a new element ... alternatively we could reuse `e` by calling
 ///             // `e.into_owned()`
@@ -90,7 +91,7 @@ pub struct Config {
 ///             // writes the event to the writer
 ///             assert!(writer.write_event(Event::Start(elem)).is_ok());
 ///         },
-///         Ok(Event::End(e)) if e.name().as_ref() == b"this_tag" => {
+///         Ok(Event::End(e)) if e.name().as_ref() == "this_tag" => {
 ///             assert!(writer.write_event(Event::End(BytesEnd::new("my_elem"))).is_ok());
 ///         },
 ///         Ok(Event::Eof) => break,
@@ -217,7 +218,7 @@ impl<W> Writer<W> {
             writer: self,
             start_tag: BytesStart::new(name),
             state: AttributeIndent::NoneAttributesWritten,
-            spaces: Vec::new(),
+            spaces: String::new(),
         }
     }
 }
@@ -262,7 +263,7 @@ impl<W: Write> Writer<W> {
         let mut next_should_line_break = true;
         let result = match event.into() {
             Event::Start(e) => {
-                let result = self.write_wrapped(b"<", &e, b">");
+                let result = self.write_wrapped("<", &e, ">");
                 if let Some(i) = self.indent.as_mut() {
                     i.grow();
                 }
@@ -272,32 +273,32 @@ impl<W: Write> Writer<W> {
                 if let Some(i) = self.indent.as_mut() {
                     i.shrink();
                 }
-                self.write_wrapped(b"</", &e, b">")
+                self.write_wrapped("</", &e, ">")
             }
             Event::Empty(e) => self.write_wrapped(
-                b"<",
+                "<",
                 &e,
                 if self.config.add_space_before_slash_in_empty_elements {
-                    b" />"
+                    " />"
                 } else {
-                    b"/>"
+                    "/>"
                 },
             ),
             Event::Text(e) => {
                 next_should_line_break = false;
-                self.write(&e)
+                self.write(e.as_bytes())
             }
-            Event::Comment(e) => self.write_wrapped(b"<!--", &e, b"-->"),
+            Event::Comment(e) => self.write_wrapped("<!--", &e, "-->"),
             Event::CData(e) => {
                 next_should_line_break = false;
                 self.write(b"<![CDATA[")?;
-                self.write(&e)?;
+                self.write(e.as_bytes())?;
                 self.write(b"]]>")
             }
-            Event::Decl(e) => self.write_wrapped(b"<?", &e, b"?>"),
-            Event::PI(e) => self.write_wrapped(b"<?", &e, b"?>"),
-            Event::DocType(e) => self.write_wrapped(b"<!DOCTYPE ", &e, b">"),
-            Event::GeneralRef(e) => self.write_wrapped(b"&", &e, b";"),
+            Event::Decl(e) => self.write_wrapped("<?", &e, "?>"),
+            Event::PI(e) => self.write_wrapped("<?", &e, "?>"),
+            Event::DocType(e) => self.write_wrapped("<!DOCTYPE ", &e, ">"),
+            Event::GeneralRef(e) => self.write_wrapped("&", &e, ";"),
             Event::Eof => Ok(()),
         };
         if let Some(i) = self.indent.as_mut() {
@@ -313,16 +314,16 @@ impl<W: Write> Writer<W> {
     }
 
     #[inline]
-    fn write_wrapped(&mut self, before: &[u8], value: &[u8], after: &[u8]) -> io::Result<()> {
+    fn write_wrapped(&mut self, before: &str, value: &str, after: &str) -> io::Result<()> {
         if let Some(ref i) = self.indent {
             if i.should_line_break {
                 self.writer.write_all(b"\n")?;
-                self.writer.write_all(i.current())?;
+                self.writer.write_all(i.current().as_bytes())?;
             }
         }
-        self.write(before)?;
-        self.write(value)?;
-        self.write(after)?;
+        self.write(before.as_bytes())?;
+        self.write(value.as_bytes())?;
+        self.write(after.as_bytes())?;
         Ok(())
     }
 
@@ -340,7 +341,7 @@ impl<W: Write> Writer<W> {
     pub fn write_indent(&mut self) -> io::Result<()> {
         if let Some(ref i) = self.indent {
             self.writer.write_all(b"\n")?;
-            self.writer.write_all(i.current())?;
+            self.writer.write_all(i.current().as_bytes())?;
         }
         Ok(())
     }
@@ -453,7 +454,7 @@ pub struct ElementWriter<'a, W> {
     start_tag: BytesStart<'a>,
     state: AttributeIndent,
     /// Contains spaces used to write space indents of attributes
-    spaces: Vec<u8>,
+    spaces: String,
 }
 
 impl<'a, W> ElementWriter<'a, W> {
@@ -570,7 +571,7 @@ impl<'a, W> ElementWriter<'a, W> {
                 // New line was already written
                 AttributeIndent::WriteSpaces(indent) => {
                     if self.spaces.len() < indent {
-                        self.spaces.resize(indent, b' ');
+                        self.spaces = " ".repeat(indent);
                     }
                     self.start_tag.push_indent(&self.spaces[..indent]);
                     self.start_tag.push_attr(attr);
@@ -671,24 +672,25 @@ pub(crate) struct Indentation {
     /// todo: this is an awkward fit as it has no impact on indentation logic, but it is
     /// only applicable when an indentation exists. Potentially refactor later
     should_line_break: bool,
-    /// The character code to be used for indentations (e.g. ` ` or `\t`)
-    indent_char: u8,
+    /// The character to be used for indentations (e.g. ` ` or `\t`)
+    indent_char: char,
     /// How many instances of the indent character ought to be used for each level of indentation
     indent_size: usize,
-    /// Used as a cache for the bytes used for indentation
-    indents: Vec<u8>,
+    /// Used as a cache for the string used for indentation
+    indents: String,
     /// The current amount of indentation
     current_indent_len: usize,
 }
 
 impl Indentation {
     pub fn new(indent_char: u8, indent_size: usize) -> Self {
+        let indent_char = char::from(indent_char);
         Self {
             should_line_break: false,
             indent_char,
             indent_size,
-            indents: vec![indent_char; 128],
-            current_indent_len: 0, // invariant - needs to remain less than indents.len()
+            indents: std::iter::repeat(indent_char).take(128).collect(),
+            current_indent_len: 0,
         }
     }
 
@@ -704,20 +706,20 @@ impl Indentation {
     }
 
     /// Returns indent string for current level
-    pub fn current(&self) -> &[u8] {
+    pub fn current(&self) -> &str {
         &self.indents[..self.current_indent_len]
     }
 
     /// Returns indent with current indent plus additional indent
-    pub fn additional(&mut self, additional_indent: usize) -> &[u8] {
+    pub fn additional(&mut self, additional_indent: usize) -> &str {
         let new_len = self.current_indent_len + additional_indent;
         self.ensure(new_len);
         &self.indents[..new_len]
     }
 
     fn ensure(&mut self, new_len: usize) {
-        if self.indents.len() < new_len {
-            self.indents.resize(new_len, self.indent_char);
+        while self.indents.len() < new_len {
+            self.indents.push(self.indent_char);
         }
     }
 }

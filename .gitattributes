@@ -5,3 +5,6 @@
 
 # Cargo vendor checksums require the original crate bytes on every platform.
 /vendor/** -text -eol -diff linguist-vendored
+
+# npm's content-addressed cache must also survive checkout byte-for-byte.
+/npm-cache/** -text -eol -diff linguist-vendored

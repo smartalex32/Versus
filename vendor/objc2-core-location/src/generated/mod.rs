@@ -12,6 +12,10 @@
 #![allow(clippy::upper_case_acronyms)]
 #![allow(clippy::identity_op)]
 #![allow(clippy::missing_safety_doc)]
+#![allow(clippy::doc_lazy_continuation)]
+#![allow(rustdoc::broken_intra_doc_links)]
+#![allow(rustdoc::bare_urls)]
+#![allow(rustdoc::invalid_html_tags)]
 
 #[link(name = "CoreLocation", kind = "framework")]
 extern "C" {}
@@ -91,12 +95,17 @@ mod __CLPlacemark;
 #[cfg(feature = "CLRegion")]
 #[path = "CLRegion.rs"]
 mod __CLRegion;
+#[cfg(feature = "CLServiceSession")]
+#[path = "CLServiceSession.rs"]
+mod __CLServiceSession;
 #[cfg(feature = "CLVisit")]
 #[path = "CLVisit.rs"]
 mod __CLVisit;
 
 #[cfg(feature = "CLBackgroundActivitySession")]
 pub use self::__CLBackgroundActivitySession::CLBackgroundActivitySession;
+#[cfg(feature = "CLBackgroundActivitySession")]
+pub use self::__CLBackgroundActivitySession::CLBackgroundActivitySessionDiagnostic;
 #[cfg(all(feature = "CLBeaconIdentityCondition", feature = "CLCondition"))]
 pub use self::__CLBeaconIdentityCondition::CLBeaconIdentityCondition;
 #[cfg(feature = "CLBeaconIdentityCondition")]
@@ -135,54 +144,6 @@ pub use self::__CLHeading::kCLHeadingFilterNone;
 pub use self::__CLHeading::CLHeading;
 #[cfg(feature = "CLHeading")]
 pub use self::__CLHeading::CLHeadingComponentValue;
-#[cfg(feature = "CLLocation")]
-pub use self::__CLLocation::kCLDistanceFilterNone;
-#[cfg(feature = "CLLocation")]
-pub use self::__CLLocation::kCLLocationAccuracyBest;
-#[cfg(feature = "CLLocation")]
-pub use self::__CLLocation::kCLLocationAccuracyBestForNavigation;
-#[cfg(feature = "CLLocation")]
-pub use self::__CLLocation::kCLLocationAccuracyHundredMeters;
-#[cfg(feature = "CLLocation")]
-pub use self::__CLLocation::kCLLocationAccuracyKilometer;
-#[cfg(feature = "CLLocation")]
-pub use self::__CLLocation::kCLLocationAccuracyNearestTenMeters;
-#[cfg(feature = "CLLocation")]
-pub use self::__CLLocation::kCLLocationAccuracyReduced;
-#[cfg(feature = "CLLocation")]
-pub use self::__CLLocation::kCLLocationAccuracyThreeKilometers;
-#[cfg(feature = "CLLocation")]
-pub use self::__CLLocation::kCLLocationCoordinate2DInvalid;
-#[cfg(feature = "CLLocation")]
-pub use self::__CLLocation::CLFloor;
-#[cfg(feature = "CLLocation")]
-pub use self::__CLLocation::CLLocation;
-#[cfg(feature = "CLLocation")]
-pub use self::__CLLocation::CLLocationAccuracy;
-#[cfg(feature = "CLLocation")]
-pub use self::__CLLocation::CLLocationCoordinate2D;
-#[cfg(feature = "CLLocation")]
-pub use self::__CLLocation::CLLocationCoordinate2DIsValid;
-#[cfg(feature = "CLLocation")]
-pub use self::__CLLocation::CLLocationCoordinate2DMake;
-#[cfg(feature = "CLLocation")]
-pub use self::__CLLocation::CLLocationDegrees;
-#[cfg(feature = "CLLocation")]
-pub use self::__CLLocation::CLLocationDirection;
-#[cfg(feature = "CLLocation")]
-pub use self::__CLLocation::CLLocationDirectionAccuracy;
-#[cfg(feature = "CLLocation")]
-pub use self::__CLLocation::CLLocationDistance;
-#[cfg(feature = "CLLocation")]
-pub use self::__CLLocation::CLLocationDistanceMax;
-#[cfg(feature = "CLLocation")]
-pub use self::__CLLocation::CLLocationSourceInformation;
-#[cfg(feature = "CLLocation")]
-pub use self::__CLLocation::CLLocationSpeed;
-#[cfg(feature = "CLLocation")]
-pub use self::__CLLocation::CLLocationSpeedAccuracy;
-#[cfg(feature = "CLLocation")]
-pub use self::__CLLocation::CLTimeIntervalMax;
 #[cfg(feature = "CLLocationManager")]
 pub use self::__CLLocationManager::CLAccuracyAuthorization;
 #[cfg(feature = "CLLocationManager")]
@@ -225,5 +186,11 @@ pub use self::__CLRegion::CLProximity;
 pub use self::__CLRegion::CLRegion;
 #[cfg(feature = "CLRegion")]
 pub use self::__CLRegion::CLRegionState;
+#[cfg(feature = "CLServiceSession")]
+pub use self::__CLServiceSession::CLServiceSession;
+#[cfg(feature = "CLServiceSession")]
+pub use self::__CLServiceSession::CLServiceSessionAuthorizationRequirement;
+#[cfg(feature = "CLServiceSession")]
+pub use self::__CLServiceSession::CLServiceSessionDiagnostic;
 #[cfg(feature = "CLVisit")]
 pub use self::__CLVisit::CLVisit;

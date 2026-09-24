@@ -64,7 +64,7 @@ macro_rules! impl_buffered_source {
                     Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
                     Err(e) => {
                         *position += read;
-                        return ReadTextResult::Err(e);
+                        return ReadTextResult::Err(e.into());
                     }
                 };
 
@@ -83,7 +83,10 @@ macro_rules! impl_buffered_source {
                         read += i as u64;
 
                         *position += read;
-                        return ReadTextResult::UpToMarkup(&buf[start..]);
+                        return match std::str::from_utf8(&buf[start..]) {
+                            Ok(s) => ReadTextResult::UpToMarkup(s),
+                            Err(e) => ReadTextResult::Err(e.into()),
+                        };
                     }
                     Some(i) => {
                         buf.extend_from_slice(&available[..i]);
@@ -92,7 +95,10 @@ macro_rules! impl_buffered_source {
                         read += i as u64;
 
                         *position += read;
-                        return ReadTextResult::UpToRef(&buf[start..]);
+                        return match std::str::from_utf8(&buf[start..]) {
+                            Ok(s) => ReadTextResult::UpToRef(s),
+                            Err(e) => ReadTextResult::Err(e.into()),
+                        };
                     }
                     None => {
                         buf.extend_from_slice(available);
@@ -105,7 +111,10 @@ macro_rules! impl_buffered_source {
             }
 
             *position += read;
-            ReadTextResult::UpToEof(&buf[start..])
+            match std::str::from_utf8(&buf[start..]) {
+                Ok(s) => ReadTextResult::UpToEof(s),
+                Err(e) => ReadTextResult::Err(e.into()),
+            }
         }
 
         #[inline]
@@ -123,7 +132,7 @@ macro_rules! impl_buffered_source {
                     Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
                     Err(e) => {
                         *position += read;
-                        return ReadRefResult::Err(e);
+                        return ReadRefResult::Err(e.into());
                     }
                 };
                 // `read_ref` called when the first character is `&`, so we
@@ -154,7 +163,10 @@ macro_rules! impl_buffered_source {
 
                         *position += read;
 
-                        return ReadRefResult::Ref(&buf[start..]);
+                        return match std::str::from_utf8(&buf[start..]) {
+                            Ok(s) => ReadRefResult::Ref(s),
+                            Err(e) => ReadRefResult::Err(e.into()),
+                        };
                     }
                     // Do not consume `&` because it may be lone and we would be need to
                     // return it as part of Text event
@@ -167,10 +179,15 @@ macro_rules! impl_buffered_source {
 
                         *position += read;
 
-                        return if is_amp {
-                            ReadRefResult::UpToRef(&buf[start..])
-                        } else {
-                            ReadRefResult::UpToMarkup(&buf[start..])
+                        return match std::str::from_utf8(&buf[start..]) {
+                            Ok(s) => {
+                                if is_amp {
+                                    ReadRefResult::UpToRef(s)
+                                } else {
+                                    ReadRefResult::UpToMarkup(s)
+                                }
+                            }
+                            Err(e) => ReadRefResult::Err(e.into()),
                         };
                     }
                     None => {
@@ -184,7 +201,10 @@ macro_rules! impl_buffered_source {
             }
 
             *position += read;
-            ReadRefResult::UpToEof(&buf[start..])
+            match std::str::from_utf8(&buf[start..]) {
+                Ok(s) => ReadRefResult::UpToEof(s),
+                Err(e) => ReadRefResult::Err(e.into()),
+            }
         }
 
         #[inline]
@@ -193,7 +213,7 @@ macro_rules! impl_buffered_source {
             mut parser: P,
             buf: &'b mut Vec<u8>,
             position: &mut u64,
-        ) -> Result<&'b [u8]> {
+        ) -> Result<&'b str> {
             let mut read = 1;
             let start = buf.len();
             // '<' was consumed in peek_one(), but not placed in buf
@@ -217,7 +237,7 @@ macro_rules! impl_buffered_source {
                     read += used as u64;
 
                     *position += read;
-                    return Ok(&buf[start..]);
+                    return Ok(std::str::from_utf8(&buf[start..])?);
                 }
 
                 // The `>` symbol not yet found, continue reading
@@ -237,7 +257,7 @@ macro_rules! impl_buffered_source {
             &mut self,
             buf: &'b mut Vec<u8>,
             position: &mut u64,
-        ) -> Result<(BangType, &'b [u8])> {
+        ) -> Result<(BangType, &'b str)> {
             // Peeked '<!' before being called, so it's guaranteed to start with it.
             let start = buf.len();
             let mut read = 2;
@@ -274,7 +294,7 @@ macro_rules! impl_buffered_source {
                     read += consumed as u64;
 
                     *position += read;
-                    return Ok((bang_type, &buf[start..]));
+                    return Ok((bang_type, std::str::from_utf8(&buf[start..])?));
                 }
 
                 // The `>` symbol not yet found, continue reading
@@ -377,7 +397,7 @@ impl<R: BufRead> Reader<R> {
     /// loop {
     ///     match reader.read_event_into(&mut buf) {
     ///         Ok(Event::Start(_)) => count += 1,
-    ///         Ok(Event::Text(e)) => txt.push(e.decode().unwrap().into_owned()),
+    ///         Ok(Event::Text(e)) => txt.push(e.into_inner().into_owned()),
     ///         Err(e) => panic!("Error at position {}: {:?}", reader.error_position(), e),
     ///         Ok(Event::Eof) => break,
     ///         _ => (),
@@ -534,7 +554,7 @@ impl<R: BufRead> Reader<R> {
     /// // ...then, we could read text content until close tag.
     /// // This call will correctly handle nested <html> elements.
     /// let text = reader.read_text_into(end.name(), &mut buf).unwrap();
-    /// let text = text.decode().unwrap();
+    /// let text = text.into_inner();
     /// assert_eq!(text, r#"
     ///         <title>This is a HTML text</title>
     ///         <p>Usual XML rules does not apply inside it
@@ -565,7 +585,8 @@ impl<R: BufRead> Reader<R> {
         // usize (because otherwise we panic at appending to the buffer before that point)
         let end = start + len as usize;
 
-        Ok(BytesText::wrap(&buf[start..end], self.decoder()))
+        let text = std::str::from_utf8(&buf[start..end])?;
+        Ok(BytesText::wrap(text))
     }
 }
 
@@ -580,8 +601,8 @@ impl Reader<BufReader<File>> {
 
 #[cfg(test)]
 mod test {
-    use crate::reader::test::check;
     use crate::reader::XmlSource;
+    use crate::reader::test::check;
 
     /// Default buffer constructor just pass the byte array from the test
     fn identity<T>(input: T) -> T {

@@ -9,7 +9,8 @@
 
 #![allow(non_upper_case_globals)]
 
-use libc;
+use bitflags::bitflags;
+use core::ffi::{c_double, c_void};
 use std::ops::Deref;
 use std::ptr;
 
@@ -17,34 +18,17 @@ pub use crate::base::{boolean_t, CGError};
 pub use crate::geometry::{CGPoint, CGRect, CGSize};
 
 use crate::image::CGImage;
+use crate::window::{
+    kCGNullWindowID, CGWindowID, CGWindowImageOption, CGWindowLevel, CGWindowListOption,
+};
 use core_foundation::base::{CFRetain, TCFType};
 use core_foundation::string::{CFString, CFStringRef};
-use foreign_types::ForeignType;
+use core_graphics_types::base::kCGErrorSuccess;
+use foreign_types::{foreign_type, ForeignType};
 
 pub type CGDirectDisplayID = u32;
-pub type CGWindowID = u32;
-pub type CGWindowLevel = i32;
 
-pub const kCGNullWindowID: CGWindowID = 0 as CGWindowID;
 pub const kCGNullDirectDisplayID: CGDirectDisplayID = 0 as CGDirectDisplayID;
-
-pub type CGWindowListOption = u32;
-
-pub const kCGWindowListOptionAll: CGWindowListOption = 0;
-pub const kCGWindowListOptionOnScreenOnly: CGWindowListOption = 1 << 0;
-pub const kCGWindowListOptionOnScreenAboveWindow: CGWindowListOption = 1 << 1;
-pub const kCGWindowListOptionOnScreenBelowWindow: CGWindowListOption = 1 << 2;
-pub const kCGWindowListOptionIncludingWindow: CGWindowListOption = 1 << 3;
-pub const kCGWindowListExcludeDesktopElements: CGWindowListOption = 1 << 4;
-
-pub type CGWindowImageOption = u32;
-
-pub const kCGWindowImageDefault: CGWindowImageOption = 0;
-pub const kCGWindowImageBoundsIgnoreFraming: CGWindowImageOption = 1 << 0;
-pub const kCGWindowImageShouldBeOpaque: CGWindowImageOption = 1 << 1;
-pub const kCGWindowImageOnlyShadows: CGWindowImageOption = 1 << 2;
-pub const kCGWindowImageBestResolution: CGWindowImageOption = 1 << 3;
-pub const kCGWindowImageNominalResolution: CGWindowImageOption = 1 << 4;
 
 pub const kDisplayModeValidFlag: u32 = 0x00000001;
 pub const kDisplayModeSafeFlag: u32 = 0x00000002;
@@ -100,7 +84,7 @@ pub use core_foundation::dictionary::{
     CFDictionary, CFDictionaryGetValueIfPresent, CFDictionaryRef,
 };
 
-pub type CGDisplayConfigRef = *mut libc::c_void;
+pub type CGDisplayConfigRef = *mut c_void;
 
 #[repr(u32)]
 #[derive(Clone, Copy)]
@@ -108,6 +92,41 @@ pub enum CGConfigureOption {
     ConfigureForAppOnly = 0,
     ConfigureForSession = 1,
     ConfigurePermanently = 2,
+}
+
+/// A client-supplied callback function that’s invoked whenever the configuration of a local display is changed.
+pub type CGDisplayReconfigurationCallBack =
+    unsafe extern "C" fn(display: CGDirectDisplayID, flags: u32, user_info: *const c_void);
+
+bitflags! {
+    /// The configuration parameters that are passed to a display reconfiguration callback function.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct CGDisplayChangeSummaryFlags: u32 {
+        /// The display configuration is about to change.
+        const kCGDisplayBeginConfigurationFlag = 1;
+        /// The location of the upper-left corner of the display in the global display coordinate space has changed.
+        const kCGDisplayMovedFlag = 1 << 1;
+        /// The display is now the main display.
+        const kCGDisplaySetMainFlag = 1 << 2;
+        /// The display mode has changed.
+        const kCGDisplaySetModeFlag = 1 << 3;
+        /// The display has been added to the active display list.
+        const kCGDisplayAddFlag = 1 << 4;
+        /// The display has been removed from the active display list.
+        const kCGDisplayRemoveFlag = 1 << 5;
+        /// The display has been enabled.
+        const kCGDisplayEnabledFlag = 1 << 8;
+        /// The display has been disabled.
+        const kCGDisplayDisabledFlag = 1 << 9;
+        /// The display is now mirroring another display.
+        const kCGDisplayMirrorFlag = 1 << 10;
+        /// The display is no longer mirroring another display.
+        const kCGDisplayUnMirrorFlag = 1 << 11;
+        /// The shape of the desktop (the union of display areas) has changed.
+        const kCGDisplayDesktopShapeChangedFlag = 1 << 12;
+
+        const _ = !0;
+    }
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -139,6 +158,90 @@ impl CGDisplay {
     /// A value that will never correspond to actual hardware.
     pub fn null_display() -> CGDisplay {
         CGDisplay::new(kCGNullDirectDisplayID)
+    }
+
+    /// Return the number of online displays with bounds that include the
+    /// specified point.
+    #[inline]
+    pub fn display_count_with_point(point: CGPoint) -> Result<u32, CGError> {
+        let mut matching_display_count: u32 = 0;
+        let result = unsafe {
+            CGGetDisplaysWithPoint(point, 0, ptr::null_mut(), &mut matching_display_count)
+        };
+        if result == kCGErrorSuccess {
+            Ok(matching_display_count)
+        } else {
+            Err(result)
+        }
+    }
+
+    /// Return a list of online displays with bounds that include the specified
+    /// point.
+    #[inline]
+    pub fn displays_with_point(
+        point: CGPoint,
+        max_displays: u32,
+    ) -> Result<(Vec<CGDirectDisplayID>, u32), CGError> {
+        let count = CGDisplay::display_count_with_point(point)?;
+        let count = u32::max(u32::min(count, max_displays), 1);
+
+        let mut matching_display_count: u32 = 0;
+        let mut displays: Vec<CGDirectDisplayID> = vec![0; count as usize];
+        let result = unsafe {
+            CGGetDisplaysWithPoint(
+                point,
+                max_displays,
+                displays.as_mut_ptr(),
+                &mut matching_display_count,
+            )
+        };
+
+        if result == kCGErrorSuccess {
+            Ok((displays, matching_display_count))
+        } else {
+            Err(result)
+        }
+    }
+
+    /// Return the number of online displays with bounds that intersect the
+    /// specified rectangle.
+    #[inline]
+    pub fn display_count_with_rect(rect: CGRect) -> Result<u32, CGError> {
+        let mut matching_display_count: u32 = 0;
+        let result =
+            unsafe { CGGetDisplaysWithRect(rect, 0, ptr::null_mut(), &mut matching_display_count) };
+        if result == kCGErrorSuccess {
+            Ok(matching_display_count)
+        } else {
+            Err(result)
+        }
+    }
+
+    /// Return a list of online displays with bounds that intersect the specified rectangle.
+    #[inline]
+    pub fn displays_with_rect(
+        rect: CGRect,
+        max_displays: u32,
+    ) -> Result<(Vec<CGDirectDisplayID>, u32), CGError> {
+        let count = CGDisplay::display_count_with_rect(rect)?;
+        let count = u32::max(u32::min(count, max_displays), 1);
+
+        let mut matching_display_count: u32 = 0;
+        let mut displays: Vec<CGDirectDisplayID> = vec![0; count as usize];
+        let result = unsafe {
+            CGGetDisplaysWithRect(
+                rect,
+                max_displays,
+                displays.as_mut_ptr(),
+                &mut matching_display_count,
+            )
+        };
+
+        if result == kCGErrorSuccess {
+            Ok((displays, matching_display_count))
+        } else {
+            Err(result)
+        }
     }
 
     /// Returns the bounds of a display in the global display coordinate space.
@@ -460,10 +563,15 @@ impl CGDisplay {
     /// Provides a list of displays that are active (or drawable).
     #[inline]
     pub fn active_displays() -> Result<Vec<CGDirectDisplayID>, CGError> {
-        let count = CGDisplay::active_display_count()?;
-        let mut buf: Vec<CGDirectDisplayID> = vec![0; count as usize];
-        let result = unsafe { CGGetActiveDisplayList(count, buf.as_mut_ptr(), ptr::null_mut()) };
+        let expected_count = CGDisplay::active_display_count()?;
+        let mut buf: Vec<CGDirectDisplayID> = vec![0; expected_count as usize];
+
+        let mut actual_count: u32 = 0;
+
+        let result =
+            unsafe { CGGetActiveDisplayList(expected_count, buf.as_mut_ptr(), &mut actual_count) };
         if result == 0 {
+            buf.truncate(actual_count as usize);
             Ok(buf)
         } else {
             Err(result)
@@ -662,7 +770,7 @@ extern "C" {
     pub fn CGDisplayIsStereo(display: CGDirectDisplayID) -> boolean_t;
     pub fn CGDisplayMirrorsDisplay(display: CGDirectDisplayID) -> CGDirectDisplayID;
     pub fn CGDisplayPrimaryDisplay(display: CGDirectDisplayID) -> CGDirectDisplayID;
-    pub fn CGDisplayRotation(display: CGDirectDisplayID) -> libc::c_double;
+    pub fn CGDisplayRotation(display: CGDirectDisplayID) -> c_double;
     pub fn CGDisplayScreenSize(display: CGDirectDisplayID) -> CGSize;
     pub fn CGDisplaySerialNumber(display: CGDirectDisplayID) -> u32;
     pub fn CGDisplayUnitNumber(display: CGDirectDisplayID) -> u32;
@@ -673,6 +781,12 @@ extern "C" {
         active_displays: *mut CGDirectDisplayID,
         display_count: *mut u32,
     ) -> CGError;
+    pub fn CGGetDisplaysWithPoint(
+        point: CGPoint,
+        max_displays: u32,
+        displays: *mut CGDirectDisplayID,
+        matching_display_count: *mut u32,
+    ) -> CGError;
     pub fn CGGetDisplaysWithRect(
         rect: CGRect,
         max_displays: u32,
@@ -680,8 +794,8 @@ extern "C" {
         matching_display_count: *mut u32,
     ) -> CGError;
     pub fn CGDisplayModelNumber(display: CGDirectDisplayID) -> u32;
-    pub fn CGDisplayPixelsHigh(display: CGDirectDisplayID) -> libc::size_t;
-    pub fn CGDisplayPixelsWide(display: CGDirectDisplayID) -> libc::size_t;
+    pub fn CGDisplayPixelsHigh(display: CGDirectDisplayID) -> usize;
+    pub fn CGDisplayPixelsWide(display: CGDirectDisplayID) -> usize;
     pub fn CGDisplayBounds(display: CGDirectDisplayID) -> CGRect;
     pub fn CGDisplayCreateImage(display: CGDirectDisplayID) -> crate::sys::CGImageRef;
     pub fn CGDisplayCreateImageForRect(
@@ -719,13 +833,21 @@ extern "C" {
         y: i32,
     ) -> CGError;
     pub fn CGRestorePermanentDisplayConfiguration();
+    pub fn CGDisplayRegisterReconfigurationCallback(
+        callback: CGDisplayReconfigurationCallBack,
+        user_info: *const c_void,
+    ) -> CGError;
+    pub fn CGDisplayRemoveReconfigurationCallback(
+        callback: CGDisplayReconfigurationCallBack,
+        user_info: *const c_void,
+    ) -> CGError;
 
     pub fn CGDisplayCopyDisplayMode(display: CGDirectDisplayID) -> crate::sys::CGDisplayModeRef;
-    pub fn CGDisplayModeGetHeight(mode: crate::sys::CGDisplayModeRef) -> libc::size_t;
-    pub fn CGDisplayModeGetWidth(mode: crate::sys::CGDisplayModeRef) -> libc::size_t;
-    pub fn CGDisplayModeGetPixelHeight(mode: crate::sys::CGDisplayModeRef) -> libc::size_t;
-    pub fn CGDisplayModeGetPixelWidth(mode: crate::sys::CGDisplayModeRef) -> libc::size_t;
-    pub fn CGDisplayModeGetRefreshRate(mode: crate::sys::CGDisplayModeRef) -> libc::c_double;
+    pub fn CGDisplayModeGetHeight(mode: crate::sys::CGDisplayModeRef) -> usize;
+    pub fn CGDisplayModeGetWidth(mode: crate::sys::CGDisplayModeRef) -> usize;
+    pub fn CGDisplayModeGetPixelHeight(mode: crate::sys::CGDisplayModeRef) -> usize;
+    pub fn CGDisplayModeGetPixelWidth(mode: crate::sys::CGDisplayModeRef) -> usize;
+    pub fn CGDisplayModeGetRefreshRate(mode: crate::sys::CGDisplayModeRef) -> c_double;
     pub fn CGDisplayModeGetIOFlags(mode: crate::sys::CGDisplayModeRef) -> u32;
     pub fn CGDisplayModeCopyPixelEncoding(mode: crate::sys::CGDisplayModeRef) -> CFStringRef;
     pub fn CGDisplayModeGetIODisplayModeID(mode: crate::sys::CGDisplayModeRef) -> i32;
@@ -789,4 +911,72 @@ extern "C" {
         windowArray: CFArrayRef,
         imageOptions: CGWindowImageOption,
     ) -> crate::sys::CGImageRef;
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_display_count_with_point() {
+        let result = CGDisplay::display_count_with_point(CGPoint::new(0., 0.));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_displays_with_point_0() {
+        let result = CGDisplay::displays_with_point(CGPoint::new(0., 0.), 0);
+        assert!(result.is_ok());
+        let (displays, count) = result.unwrap();
+        assert_eq!(displays.len(), count as usize);
+    }
+
+    #[test]
+    fn test_displays_with_point_5() {
+        let result = CGDisplay::displays_with_point(CGPoint::new(0., 0.), 5);
+        assert!(result.is_ok());
+        let (displays, count) = result.unwrap();
+        assert_eq!(displays.len(), count as usize);
+    }
+
+    // NOTE: CGMainDisplayID must be called before CGGetDisplaysWithRect to avoid:
+    //   Assertion failed: (did_initialize), function CGS_REQUIRE_INIT, file CGInitialization.c, line 44.
+    // See https://github.com/JXA-Cookbook/JXA-Cookbook/issues/27#issuecomment-277517668
+
+    #[test]
+    fn test_display_count_with_rect() {
+        let _ = CGDisplay::main();
+
+        let result = CGDisplay::display_count_with_rect(CGRect::new(
+            &CGPoint::new(10., 10.),
+            &CGSize::new(100., 100.),
+        ));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_displays_with_rect_0() {
+        let _ = CGDisplay::main();
+
+        let result = CGDisplay::displays_with_rect(
+            CGRect::new(&CGPoint::new(0., 0.), &CGSize::new(100., 100.)),
+            0,
+        );
+        assert!(result.is_ok());
+        let (displays, count) = result.unwrap();
+        assert_eq!(displays.len(), count as usize);
+    }
+
+    #[test]
+    fn test_displays_with_rect_5() {
+        let _ = CGDisplay::main();
+
+        let result = CGDisplay::displays_with_rect(
+            CGRect::new(&CGPoint::new(0., 0.), &CGSize::new(100., 100.)),
+            5,
+        );
+        assert!(result.is_ok());
+        let (displays, count) = result.unwrap();
+        assert_eq!(displays.len(), count as usize);
+    }
 }

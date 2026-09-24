@@ -11,10 +11,11 @@
 
 [package]
 edition = "2021"
-rust-version = "1.60"
+rust-version = "1.71"
 name = "objc2-quartz-core"
-version = "0.2.2"
+version = "0.3.2"
 build = false
+autolib = false
 autobins = false
 autoexamples = false
 autotests = false
@@ -34,51 +35,28 @@ categories = [
     "external-ffi-bindings",
     "os::macos-apis",
 ]
-license = "MIT"
+license = "Zlib OR Apache-2.0 OR MIT"
 repository = "https://github.com/madsmtm/objc2"
 
 [package.metadata.docs.rs]
 default-target = "aarch64-apple-darwin"
-features = ["all"]
+rustc-args = [
+    "--cfg",
+    "docsrs",
+]
 targets = [
     "aarch64-apple-darwin",
     "x86_64-apple-darwin",
     "aarch64-apple-ios",
     "aarch64-apple-tvos",
     "aarch64-apple-ios-macabi",
+    "aarch64-apple-visionos",
 ]
-
-[lib]
-name = "objc2_quartz_core"
-path = "src/lib.rs"
-
-[dependencies.bitflags]
-version = "2.5.0"
-optional = true
-default-features = false
-
-[dependencies.block2]
-version = "0.5.1"
-optional = true
-default-features = false
-
-[dependencies.objc2]
-version = "0.5.2"
-default-features = false
-
-[dependencies.objc2-foundation]
-version = "0.2.2"
-default-features = false
-
-[dependencies.objc2-metal]
-version = "0.2.2"
-optional = true
-default-features = false
+features = ["objc2-open-gl"]
 
 [features]
 CAAnimation = [
     "objc2-foundation/NSArray",
-    "objc2-foundation/NSGeometry",
     "objc2-foundation/NSObject",
     "objc2-foundation/NSString",
     "objc2-foundation/NSValue",
@@ -86,7 +64,6 @@ CAAnimation = [
 CABase = []
 CAConstraintLayoutManager = [
     "objc2-foundation/NSArray",
-    "objc2-foundation/NSGeometry",
     "objc2-foundation/NSObject",
     "objc2-foundation/NSString",
 ]
@@ -95,6 +72,7 @@ CADisplayLink = [
     "objc2-foundation/NSRunLoop",
     "objc2-foundation/NSString",
 ]
+CAEAGLLayer = []
 CAEDRMetadata = [
     "objc2-foundation/NSData",
     "objc2-foundation/NSObject",
@@ -102,20 +80,17 @@ CAEDRMetadata = [
 CAEmitterCell = [
     "objc2-foundation/NSArray",
     "objc2-foundation/NSDictionary",
-    "objc2-foundation/NSGeometry",
     "objc2-foundation/NSObject",
     "objc2-foundation/NSString",
 ]
 CAEmitterLayer = [
     "objc2-foundation/NSArray",
-    "objc2-foundation/NSGeometry",
     "objc2-foundation/NSObject",
     "objc2-foundation/NSString",
 ]
 CAFrameRateRange = []
 CAGradientLayer = [
     "objc2-foundation/NSArray",
-    "objc2-foundation/NSGeometry",
     "objc2-foundation/NSObject",
     "objc2-foundation/NSString",
     "objc2-foundation/NSValue",
@@ -124,7 +99,6 @@ CALayer = [
     "bitflags",
     "objc2-foundation/NSArray",
     "objc2-foundation/NSDictionary",
-    "objc2-foundation/NSGeometry",
     "objc2-foundation/NSNull",
     "objc2-foundation/NSObject",
     "objc2-foundation/NSString",
@@ -138,69 +112,52 @@ CAMetalDisplayLink = [
     "objc2-foundation/NSObjCRuntime",
     "objc2-foundation/NSRunLoop",
     "objc2-foundation/NSString",
-    "objc2-metal?/MTLDrawable",
 ]
 CAMetalLayer = [
     "objc2-foundation/NSDictionary",
-    "objc2-foundation/NSGeometry",
     "objc2-foundation/NSObject",
-    "objc2-metal?/MTLDevice",
-    "objc2-metal?/MTLDrawable",
-    "objc2-metal?/MTLPixelFormat",
-    "objc2-metal?/MTLResource",
-    "objc2-metal?/MTLTexture",
 ]
-CAOpenGLLayer = []
+CAOpenGLLayer = ["objc2-foundation/NSObject"]
 CARemoteLayerClient = []
 CARemoteLayerServer = []
 CARenderer = [
     "objc2-foundation/NSDictionary",
-    "objc2-foundation/NSGeometry",
     "objc2-foundation/NSString",
 ]
-CAReplicatorLayer = [
-    "objc2-foundation/NSGeometry",
-    "objc2-foundation/NSObject",
-]
+CAReplicatorLayer = ["objc2-foundation/NSObject"]
 CAScrollLayer = [
-    "objc2-foundation/NSGeometry",
     "objc2-foundation/NSObject",
     "objc2-foundation/NSString",
 ]
 CAShapeLayer = [
     "objc2-foundation/NSArray",
-    "objc2-foundation/NSGeometry",
     "objc2-foundation/NSObject",
     "objc2-foundation/NSString",
     "objc2-foundation/NSValue",
 ]
 CATextLayer = [
-    "objc2-foundation/NSGeometry",
     "objc2-foundation/NSObject",
     "objc2-foundation/NSString",
 ]
-CATiledLayer = [
-    "objc2-foundation/NSGeometry",
-    "objc2-foundation/NSObject",
-]
+CATiledLayer = ["objc2-foundation/NSObject"]
 CATransaction = ["objc2-foundation/NSString"]
-CATransform3D = [
-    "objc2-foundation/NSGeometry",
-    "objc2-foundation/NSValue",
-]
+CATransform3D = ["objc2-foundation/NSValue"]
 CATransformLayer = ["objc2-foundation/NSObject"]
 CAValueFunction = [
     "objc2-foundation/NSObject",
     "objc2-foundation/NSString",
 ]
 CoreAnimation = []
-CoreImage = []
-CoreVideo = []
-all = [
+alloc = []
+bitflags = ["dep:bitflags"]
+block2 = ["dep:block2"]
+default = [
+    "std",
     "CAAnimation",
     "CABase",
     "CAConstraintLayoutManager",
     "CADisplayLink",
+    "CAEAGLLayer",
     "CAEDRMetadata",
     "CAEmitterCell",
     "CAEmitterLayer",
@@ -225,53 +182,121 @@ all = [
     "CATransformLayer",
     "CAValueFunction",
     "CoreAnimation",
-    "CoreImage",
-    "CoreVideo",
     "bitflags",
     "block2",
+    "libc",
+    "objc2-core-foundation",
+    "objc2-core-graphics",
+    "objc2-core-video",
     "objc2-metal",
 ]
-alloc = [
-    "block2?/alloc",
-    "objc2/alloc",
-    "objc2-foundation/alloc",
-    "objc2-metal?/alloc",
-]
-apple = []
-bitflags = [
-    "dep:bitflags",
-    "objc2-foundation/bitflags",
-    "objc2-metal?/bitflags",
-]
-block2 = [
-    "dep:block2",
-    "objc2-foundation/block2",
-    "objc2-metal?/block2",
-]
-default = ["std"]
 gnustep-1-7 = []
 gnustep-1-8 = []
 gnustep-1-9 = []
 gnustep-2-0 = []
 gnustep-2-1 = []
+libc = ["dep:libc"]
+objc2-core-foundation = ["dep:objc2-core-foundation"]
+objc2-core-graphics = ["dep:objc2-core-graphics"]
+objc2-core-video = ["dep:objc2-core-video"]
 objc2-metal = ["dep:objc2-metal"]
-std = [
-    "alloc",
-    "bitflags?/std",
-    "block2?/std",
-    "objc2/std",
-    "objc2-foundation/std",
-    "objc2-metal?/std",
+objc2-open-gl = ["dep:objc2-open-gl"]
+std = ["alloc"]
+unstable-darwin-objc = []
+
+[lib]
+name = "objc2_quartz_core"
+path = "src/lib.rs"
+
+[dependencies.bitflags]
+version = "2.5.0"
+features = ["std"]
+optional = true
+default-features = false
+
+[dependencies.block2]
+version = ">=0.6.1, <0.8.0"
+features = ["alloc"]
+optional = true
+default-features = false
+
+[dependencies.libc]
+version = "0.2.80"
+optional = true
+default-features = false
+
+[dependencies.objc2]
+version = ">=0.6.2, <0.8.0"
+features = ["std"]
+default-features = false
+
+[dependencies.objc2-core-foundation]
+version = "0.3.2"
+features = [
+    "CFCGTypes",
+    "CFDate",
+    "objc2",
 ]
+optional = true
+default-features = false
+
+[dependencies.objc2-core-graphics]
+version = "0.3.2"
+features = [
+    "CGColor",
+    "CGColorSpace",
+    "CGContext",
+    "CGPath",
+    "objc2",
+]
+optional = true
+default-features = false
+
+[dependencies.objc2-core-video]
+version = "0.3.2"
+features = [
+    "CVBase",
+    "objc2",
+]
+optional = true
+default-features = false
+
+[dependencies.objc2-foundation]
+version = "0.3.2"
+features = ["alloc"]
+default-features = false
+
+[dependencies.objc2-metal]
+version = "0.3.2"
+features = [
+    "MTLAllocation",
+    "MTLDevice",
+    "MTLDrawable",
+    "MTLPixelFormat",
+    "MTLResidencySet",
+    "MTLResource",
+    "MTLTexture",
+]
+optional = true
+default-features = false
+
+[target.'cfg(target_os = "macos")'.dependencies.objc2-open-gl]
+version = "0.3.2"
+features = ["CGLTypes"]
+optional = true
+default-features = false
 
 [lints.clippy]
-cargo = "warn"
 ptr_as_ptr = "warn"
+redundant_feature_names = "allow"
+
+[lints.clippy.cargo]
+level = "warn"
+priority = -1
 
 [lints.rust]
 elided_lifetimes_in_paths = "warn"
 missing_copy_implementations = "warn"
-missing_debug_implementations = "warn"
 non_ascii_idents = "deny"
 unreachable_pub = "warn"
 unsafe_op_in_unsafe_fn = "deny"

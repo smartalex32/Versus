@@ -12,6 +12,10 @@
 #![allow(clippy::upper_case_acronyms)]
 #![allow(clippy::identity_op)]
 #![allow(clippy::missing_safety_doc)]
+#![allow(clippy::doc_lazy_continuation)]
+#![allow(rustdoc::broken_intra_doc_links)]
+#![allow(rustdoc::bare_urls)]
+#![allow(rustdoc::invalid_html_tags)]
 
 #[link(name = "QuartzCore", kind = "framework")]
 extern "C" {}
@@ -28,6 +32,9 @@ mod __CAConstraintLayoutManager;
 #[cfg(feature = "CADisplayLink")]
 #[path = "CADisplayLink.rs"]
 mod __CADisplayLink;
+#[cfg(feature = "CAEAGLLayer")]
+#[path = "CAEAGLLayer.rs"]
+mod __CAEAGLLayer;
 #[cfg(feature = "CAEDRMetadata")]
 #[path = "CAEDRMetadata.rs"]
 mod __CAEDRMetadata;
@@ -100,12 +107,6 @@ mod __CAValueFunction;
 #[cfg(feature = "CoreAnimation")]
 #[path = "CoreAnimation.rs"]
 mod __CoreAnimation;
-#[cfg(feature = "CoreImage")]
-#[path = "CoreImage.rs"]
-mod __CoreImage;
-#[cfg(feature = "CoreVideo")]
-#[path = "CoreVideo.rs"]
-mod __CoreVideo;
 
 #[cfg(feature = "CAAnimation")]
 pub use self::__CAAnimation::kCAAnimationCubic;
@@ -161,7 +162,7 @@ pub use self::__CAAnimation::CATransition;
 pub use self::__CAAnimation::CATransitionSubtype;
 #[cfg(feature = "CAAnimation")]
 pub use self::__CAAnimation::CATransitionType;
-#[cfg(feature = "CABase")]
+#[cfg(all(feature = "CABase", feature = "objc2-core-foundation"))]
 pub use self::__CABase::CACurrentMediaTime;
 #[cfg(feature = "CAConstraintLayoutManager")]
 pub use self::__CAConstraintLayoutManager::CAConstraint;
@@ -232,6 +233,8 @@ pub use self::__CAGradientLayer::CAGradientLayer;
 #[cfg(feature = "CAGradientLayer")]
 pub use self::__CAGradientLayer::CAGradientLayerType;
 #[cfg(feature = "CALayer")]
+pub use self::__CALayer::kCAContentsFormatAutomatic;
+#[cfg(feature = "CALayer")]
 pub use self::__CALayer::kCAContentsFormatGray8Uint;
 #[cfg(feature = "CALayer")]
 pub use self::__CALayer::kCAContentsFormatRGBA16Float;
@@ -284,6 +287,16 @@ pub use self::__CALayer::CAAutoresizingMask;
 #[cfg(feature = "CALayer")]
 pub use self::__CALayer::CACornerMask;
 #[cfg(feature = "CALayer")]
+pub use self::__CALayer::CADynamicRange;
+#[cfg(feature = "CALayer")]
+pub use self::__CALayer::CADynamicRangeAutomatic;
+#[cfg(feature = "CALayer")]
+pub use self::__CALayer::CADynamicRangeConstrainedHigh;
+#[cfg(feature = "CALayer")]
+pub use self::__CALayer::CADynamicRangeHigh;
+#[cfg(feature = "CALayer")]
+pub use self::__CALayer::CADynamicRangeStandard;
+#[cfg(feature = "CALayer")]
 pub use self::__CALayer::CAEdgeAntialiasingMask;
 #[cfg(feature = "CALayer")]
 pub use self::__CALayer::CALayer;
@@ -299,6 +312,14 @@ pub use self::__CALayer::CALayerCornerCurve;
 pub use self::__CALayer::CALayerDelegate;
 #[cfg(feature = "CALayer")]
 pub use self::__CALayer::CALayoutManager;
+#[cfg(feature = "CALayer")]
+pub use self::__CALayer::CAToneMapMode;
+#[cfg(feature = "CALayer")]
+pub use self::__CALayer::CAToneMapModeAutomatic;
+#[cfg(feature = "CALayer")]
+pub use self::__CALayer::CAToneMapModeIfSupported;
+#[cfg(feature = "CALayer")]
+pub use self::__CALayer::CAToneMapModeNever;
 #[cfg(feature = "CAMediaTiming")]
 pub use self::__CAMediaTiming::kCAFillModeBackwards;
 #[cfg(feature = "CAMediaTiming")]
@@ -335,6 +356,8 @@ pub use self::__CAMetalDisplayLink::CAMetalDisplayLinkUpdate;
 pub use self::__CAMetalLayer::CAMetalDrawable;
 #[cfg(all(feature = "CALayer", feature = "CAMetalLayer"))]
 pub use self::__CAMetalLayer::CAMetalLayer;
+#[cfg(all(feature = "CALayer", feature = "CAOpenGLLayer"))]
+pub use self::__CAOpenGLLayer::CAOpenGLLayer;
 #[cfg(feature = "CARemoteLayerClient")]
 pub use self::__CARemoteLayerClient::CARemoteLayerClient;
 #[cfg(feature = "CARemoteLayerServer")]
@@ -419,31 +442,35 @@ pub use self::__CATransaction::kCATransactionCompletionBlock;
 pub use self::__CATransaction::kCATransactionDisableActions;
 #[cfg(feature = "CATransaction")]
 pub use self::__CATransaction::CATransaction;
-#[cfg(feature = "CATransform3D")]
+#[cfg(all(feature = "CATransform3D", feature = "objc2-core-foundation"))]
 pub use self::__CATransform3D::CATransform3D;
-#[cfg(feature = "CATransform3D")]
+#[cfg(all(feature = "CATransform3D", feature = "objc2-core-foundation"))]
 pub use self::__CATransform3D::CATransform3DConcat;
-#[cfg(feature = "CATransform3D")]
+#[cfg(all(feature = "CATransform3D", feature = "objc2-core-foundation"))]
 pub use self::__CATransform3D::CATransform3DEqualToTransform;
-#[cfg(feature = "CATransform3D")]
+#[cfg(all(feature = "CATransform3D", feature = "objc2-core-foundation"))]
+pub use self::__CATransform3D::CATransform3DGetAffineTransform;
+#[cfg(all(feature = "CATransform3D", feature = "objc2-core-foundation"))]
 pub use self::__CATransform3D::CATransform3DIdentity;
-#[cfg(feature = "CATransform3D")]
+#[cfg(all(feature = "CATransform3D", feature = "objc2-core-foundation"))]
 pub use self::__CATransform3D::CATransform3DInvert;
-#[cfg(feature = "CATransform3D")]
+#[cfg(all(feature = "CATransform3D", feature = "objc2-core-foundation"))]
 pub use self::__CATransform3D::CATransform3DIsAffine;
-#[cfg(feature = "CATransform3D")]
+#[cfg(all(feature = "CATransform3D", feature = "objc2-core-foundation"))]
 pub use self::__CATransform3D::CATransform3DIsIdentity;
-#[cfg(feature = "CATransform3D")]
+#[cfg(all(feature = "CATransform3D", feature = "objc2-core-foundation"))]
+pub use self::__CATransform3D::CATransform3DMakeAffineTransform;
+#[cfg(all(feature = "CATransform3D", feature = "objc2-core-foundation"))]
 pub use self::__CATransform3D::CATransform3DMakeRotation;
-#[cfg(feature = "CATransform3D")]
+#[cfg(all(feature = "CATransform3D", feature = "objc2-core-foundation"))]
 pub use self::__CATransform3D::CATransform3DMakeScale;
-#[cfg(feature = "CATransform3D")]
+#[cfg(all(feature = "CATransform3D", feature = "objc2-core-foundation"))]
 pub use self::__CATransform3D::CATransform3DMakeTranslation;
-#[cfg(feature = "CATransform3D")]
+#[cfg(all(feature = "CATransform3D", feature = "objc2-core-foundation"))]
 pub use self::__CATransform3D::CATransform3DRotate;
-#[cfg(feature = "CATransform3D")]
+#[cfg(all(feature = "CATransform3D", feature = "objc2-core-foundation"))]
 pub use self::__CATransform3D::CATransform3DScale;
-#[cfg(feature = "CATransform3D")]
+#[cfg(all(feature = "CATransform3D", feature = "objc2-core-foundation"))]
 pub use self::__CATransform3D::CATransform3DTranslate;
 #[cfg(feature = "CATransform3D")]
 pub use self::__CATransform3D::NSValueCATransform3DAdditions;

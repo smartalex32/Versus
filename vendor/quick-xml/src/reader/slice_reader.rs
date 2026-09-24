@@ -63,7 +63,7 @@ impl<'a> Reader<&'a [u8]> {
     /// loop {
     ///     match reader.read_event().unwrap() {
     ///         Event::Start(e) => count += 1,
-    ///         Event::Text(e) => txt.push(e.decode().unwrap().into_owned()),
+    ///         Event::Text(e) => txt.push(e.into_inner().into_owned()),
     ///         Event::Eof => break,
     ///         _ => (),
     ///     }
@@ -171,13 +171,11 @@ impl<'a> Reader<&'a [u8]> {
     /// it reads, and if, for example, it contains CDATA section, attempt to
     /// unescape it content will spoil data.
     ///
-    /// Any text will be decoded using the XML current [`decoder()`].
-    ///
     /// Actually, this method perform the following code:
     ///
     /// ```ignore
     /// let span = reader.read_to_end(end)?;
-    /// let text = reader.decoder().decode(&reader.inner_slice[span]);
+    /// let text = &reader.inner_slice[span];
     /// ```
     ///
     /// # Examples
@@ -210,7 +208,7 @@ impl<'a> Reader<&'a [u8]> {
     /// // ...then, we could read text content until close tag.
     /// // This call will correctly handle nested <html> elements.
     /// let text = reader.read_text(end.name()).unwrap();
-    /// let text = text.decode().unwrap();
+    /// let text = text.into_inner();
     /// assert_eq!(text, r#"
     ///         <title>This is a HTML text</title>
     ///         <p>Usual XML rules does not apply inside it
@@ -226,7 +224,6 @@ impl<'a> Reader<&'a [u8]> {
     /// ```
     ///
     /// [`Start`]: Event::Start
-    /// [`decoder()`]: Self::decoder()
     pub fn read_text(&mut self, end: QName) -> Result<BytesText<'a>> {
         // self.reader will be changed, so store original reference
         let buffer = self.reader;
@@ -235,14 +232,21 @@ impl<'a> Reader<&'a [u8]> {
         let len = span.end - span.start;
         // SAFETY: `span` can only contain indexes up to usize::MAX because it
         // was created from offsets from a single &[u8] slice
-        Ok(BytesText::wrap(&buffer[0..len as usize], self.decoder()))
+        // Could use from_utf8_unchecked: buffer was validated during event parsing
+        let text = std::str::from_utf8(&buffer[0..len as usize])?;
+        Ok(BytesText::wrap(text))
     }
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 /// Implementation of `XmlSource` for `&[u8]` reader using a `Self` as buffer
-/// that will be borrowed by events. This implementation provides a zero-copy deserialization
+/// that will be borrowed by events. This implementation provides a zero-copy deserialization.
+///
+/// Note: When the reader is created via [`Reader::from_str`], the input is
+/// guaranteed to be valid UTF-8. In that case, the `from_utf8` calls below
+/// could safely use `from_utf8_unchecked`. However, `Reader::from_reader`
+/// also instantiates this impl with arbitrary bytes, so we must validate.
 impl<'a> XmlSource<'a, ()> for &'a [u8] {
     #[cfg(not(feature = "encoding"))]
     #[inline]
@@ -271,23 +275,33 @@ impl<'a> XmlSource<'a, ()> for &'a [u8] {
             // Do not consume `&` because it may be lone and we would be need to
             // return it as part of Text event
             Some(0) => ReadTextResult::Ref(()),
+
             Some(i) if self[i] == b'<' => {
                 let (bytes, rest) = self.split_at(i);
                 *self = rest;
                 *position += i as u64;
-                ReadTextResult::UpToMarkup(bytes)
+                match std::str::from_utf8(bytes) {
+                    Ok(s) => ReadTextResult::UpToMarkup(s),
+                    Err(e) => ReadTextResult::Err(e.into()),
+                }
             }
             Some(i) => {
                 let (bytes, rest) = self.split_at(i);
                 *self = rest;
                 *position += i as u64;
-                ReadTextResult::UpToRef(bytes)
+                match std::str::from_utf8(bytes) {
+                    Ok(s) => ReadTextResult::UpToRef(s),
+                    Err(e) => ReadTextResult::Err(e.into()),
+                }
             }
             None => {
                 let bytes = &self[..];
                 *self = &[];
                 *position += bytes.len() as u64;
-                ReadTextResult::UpToEof(bytes)
+                match std::str::from_utf8(bytes) {
+                    Ok(s) => ReadTextResult::UpToEof(s),
+                    Err(e) => ReadTextResult::Err(e.into()),
+                }
             }
         }
     }
@@ -309,7 +323,10 @@ impl<'a> XmlSource<'a, ()> for &'a [u8] {
                 *self = rest;
                 *position += end as u64;
 
-                ReadRefResult::Ref(bytes)
+                match std::str::from_utf8(bytes) {
+                    Ok(s) => ReadRefResult::Ref(s),
+                    Err(e) => ReadRefResult::Err(e.into()),
+                }
             }
             // Do not consume `&` because it may be lone and we would be need to
             // return it as part of Text event
@@ -319,10 +336,15 @@ impl<'a> XmlSource<'a, ()> for &'a [u8] {
                 *self = rest;
                 *position += i as u64 + 1;
 
-                if is_amp {
-                    ReadRefResult::UpToRef(bytes)
-                } else {
-                    ReadRefResult::UpToMarkup(bytes)
+                match std::str::from_utf8(bytes) {
+                    Ok(s) => {
+                        if is_amp {
+                            ReadRefResult::UpToRef(s)
+                        } else {
+                            ReadRefResult::UpToMarkup(s)
+                        }
+                    }
+                    Err(e) => ReadRefResult::Err(e.into()),
                 }
             }
             None => {
@@ -330,13 +352,16 @@ impl<'a> XmlSource<'a, ()> for &'a [u8] {
                 *self = &[];
                 *position += bytes.len() as u64;
 
-                ReadRefResult::UpToEof(bytes)
+                match std::str::from_utf8(bytes) {
+                    Ok(s) => ReadRefResult::UpToEof(s),
+                    Err(e) => ReadRefResult::Err(e.into()),
+                }
             }
         }
     }
 
     #[inline]
-    fn read_with<P>(&mut self, mut parser: P, _buf: (), position: &mut u64) -> Result<&'a [u8]>
+    fn read_with<P>(&mut self, mut parser: P, _buf: (), position: &mut u64) -> Result<&'a str>
     where
         P: Parser,
     {
@@ -345,7 +370,7 @@ impl<'a> XmlSource<'a, ()> for &'a [u8] {
             *position += used as u64;
             let (bytes, rest) = self.split_at(used);
             *self = rest;
-            return Ok(bytes);
+            return Ok(std::str::from_utf8(bytes)?);
         }
 
         *position += self.len() as u64;
@@ -353,7 +378,7 @@ impl<'a> XmlSource<'a, ()> for &'a [u8] {
     }
 
     #[inline]
-    fn read_bang_element(&mut self, _buf: (), position: &mut u64) -> Result<(BangType, &'a [u8])> {
+    fn read_bang_element(&mut self, _buf: (), position: &mut u64) -> Result<(BangType, &'a str)> {
         // Peeked one bang ('!') before being called, so it's guaranteed to
         // start with it.
         debug_assert!(
@@ -369,7 +394,7 @@ impl<'a> XmlSource<'a, ()> for &'a [u8] {
             *position += consumed as u64;
             let (bytes, rest) = self.split_at(consumed);
             *self = rest;
-            return Ok((bang_type, bytes));
+            return Ok((bang_type, std::str::from_utf8(bytes)?));
         }
 
         *position += self.len() as u64;
@@ -400,8 +425,8 @@ impl<'a> XmlSource<'a, ()> for &'a [u8] {
 
 #[cfg(test)]
 mod test {
-    use crate::reader::test::check;
     use crate::reader::XmlSource;
+    use crate::reader::test::check;
 
     /// Default buffer constructor just pass the byte array from the test
     fn identity<T>(input: T) -> T {

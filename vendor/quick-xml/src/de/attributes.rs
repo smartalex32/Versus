@@ -5,11 +5,11 @@ use std::borrow::Cow;
 use serde::de::{DeserializeSeed, Deserializer, Error, MapAccess, Visitor};
 use serde::forward_to_deserialize_any;
 
-use crate::de::key::QNameDeserializer;
+use crate::XmlVersion;
 use crate::de::SimpleTypeDeserializer;
+use crate::de::key::QNameDeserializer;
 use crate::errors::serialize::DeError;
 use crate::events::attributes::Attributes;
-use crate::XmlVersion;
 
 impl<'i> Attributes<'i> {
     /// Converts this iterator into a serde's [`MapAccess`] trait to use with serde.
@@ -97,7 +97,7 @@ impl<'i> Attributes<'i> {
 pub struct AttributesDeserializer<'i> {
     iter: Attributes<'i>,
     /// The value of the attribute, read in last call to `next_key_seed`.
-    value: Option<Cow<'i, [u8]>>,
+    value: Option<Cow<'i, str>>,
     /// This prefix will be stripped from struct fields before match against attribute name.
     prefix: &'static str,
     /// Buffer to store attribute name as a field name exposed to serde consumers.
@@ -139,8 +139,7 @@ impl<'de> MapAccess<'de> for AttributesDeserializer<'de> {
                 self.value = Some(attr.value);
                 self.key_buf.clear();
                 self.key_buf.push_str(self.prefix);
-                let de =
-                    QNameDeserializer::from_attr(attr.key, self.iter.decoder(), &mut self.key_buf)?;
+                let de = QNameDeserializer::from_attr(attr.key, &mut self.key_buf)?;
                 seed.deserialize(de).map(Some)
             }
             Some(Err(err)) => Err(Error::custom(err)),
@@ -153,12 +152,7 @@ impl<'de> MapAccess<'de> for AttributesDeserializer<'de> {
     {
         match self.value.take() {
             Some(value) => {
-                let de = SimpleTypeDeserializer::from_attr(
-                    &value,
-                    0..value.len(),
-                    self.version,
-                    self.iter.decoder(),
-                );
+                let de = SimpleTypeDeserializer::from_attr(&value, 0..value.len(), self.version);
                 seed.deserialize(de)
             }
             None => Err(DeError::KeyNotRead),

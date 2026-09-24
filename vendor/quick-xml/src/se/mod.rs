@@ -83,7 +83,6 @@ use crate::de::TEXT_KEY;
 use crate::writer::{Indentation, ToFmtWrite};
 use serde::ser::{self, Serialize};
 use std::fmt::Write;
-use std::str::from_utf8;
 
 pub use self::simple_type::SimpleTypeSerializer;
 pub use crate::errors::serialize::SeError;
@@ -525,7 +524,7 @@ impl<'i> Indent<'i> {
     pub fn borrow(&mut self) -> Indent<'_> {
         match self {
             Self::None => Indent::None,
-            Self::Owned(ref mut i) => Indent::Borrow(i),
+            Self::Owned(i) => Indent::Borrow(i),
             Self::Borrow(i) => Indent::Borrow(i),
         }
     }
@@ -551,11 +550,11 @@ impl<'i> Indent<'i> {
             Self::None => {}
             Self::Owned(i) => {
                 writer.write_char('\n')?;
-                writer.write_str(from_utf8(i.current())?)?;
+                writer.write_str(i.current())?;
             }
             Self::Borrow(i) => {
                 writer.write_char('\n')?;
-                writer.write_str(from_utf8(i.current())?)?;
+                writer.write_str(i.current())?;
             }
         }
         Ok(())
@@ -719,7 +718,7 @@ impl<'w, 'r, W: Write> Serializer<'w, 'r, W> {
 
     /// Enable or disable expansion of empty elements (without adding space before `/>`).
     ///
-    /// This is the historycally first way to configure empty element handling. You can use
+    /// This is the historically first way to configure empty element handling. You can use
     /// [`empty_element_handling`](Self::empty_element_handling) for more control.
     ///
     /// # Examples
@@ -790,7 +789,33 @@ impl<'w, 'r, W: Write> Serializer<'w, 'r, W> {
         self
     }
 
-    /// Configure indent for a serializer
+    /// Configure indent for a serializer.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use pretty_assertions::assert_eq;
+    /// use quick_xml::se::Serializer;
+    /// use serde::Serialize;
+    ///
+    /// #[derive(Serialize)]
+    /// struct Response {
+    ///     message: &'static str,
+    /// }
+    ///
+    /// let mut output = String::new();
+    /// let mut serializer = Serializer::with_root(&mut output, Some("response")).unwrap();
+    /// serializer.indent(' ', 4);
+    ///
+    /// Response { message: "Success" }
+    ///     .serialize(serializer)
+    ///     .unwrap();
+    ///
+    /// assert_eq!(
+    ///     output,
+    ///     "<response>\n    <message>Success</message>\n</response>"
+    /// );
+    /// ```
     pub fn indent(&mut self, indent_char: char, indent_size: usize) -> &mut Self {
         self.ser.indent = Indent::Owned(Indentation::new(indent_char as u8, indent_size));
         self

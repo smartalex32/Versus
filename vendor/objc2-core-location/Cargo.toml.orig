@@ -3,34 +3,33 @@
 
 [package]
 name = "objc2-core-location"
-version = "0.2.2" # Remember to update html_root_url in lib.rs
+version.workspace = true
 description = "Bindings to the CoreLocation framework"
-edition = "2021"
-rust-version = "1.60"
+edition.workspace = true
+rust-version.workspace = true
 keywords = ["cocoa", "apple", "framework", "macos", "ios"]
-categories = [
-    "api-bindings",
-    "development-tools::ffi",
-    "external-ffi-bindings",
-    "os::macos-apis",
-]
-repository = "https://github.com/madsmtm/objc2"
-license = "MIT"
+categories.workspace = true
+repository.workspace = true
+license.workspace = true
 
 [lints]
 workspace = true
 
 [dependencies]
-block2 = { path = "../../crates/block2", version = "0.5.1", default-features = false, optional = true }
-objc2 = { path = "../../crates/objc2", version = "0.5.2", default-features = false }
-objc2-foundation = { path = "../objc2-foundation", version = "0.2.2", default-features = false }
+block2 = { workspace = true, optional = true, features = ["alloc"] }
+dispatch2 = { workspace = true, optional = true, features = [
+    "alloc",
+    "objc2",
+] }
+objc2 = { workspace = true, features = ["std"] }
+objc2-foundation = { workspace = true, features = ["alloc"] }
 
 [target.'cfg(not(target_os = "tvos"))'.dependencies]
-objc2-contacts = { path = "../objc2-contacts", version = "0.2.2", default-features = false, optional = true }
+objc2-contacts = { workspace = true, optional = true, features = ["CNPostalAddress"] }
 
 [package.metadata.docs.rs]
 default-target = "aarch64-apple-darwin"
-features = ["all"]
+rustc-args = ["--cfg", "docsrs"] # Fix cross-crate link to objc2::topics
 targets = [
     "aarch64-apple-darwin",
     "x86_64-apple-darwin",
@@ -38,16 +37,53 @@ targets = [
     "aarch64-apple-tvos",
     "aarch64-apple-watchos",
     "aarch64-apple-ios-macabi",
+    "aarch64-apple-visionos",
 ]
 
 [features]
-default = ["std"]
-
-# Currently not possible to turn off, put here for forwards compatibility.
-std = ["alloc", "block2?/std", "objc2/std", "objc2-contacts?/std", "objc2-foundation/std"]
-alloc = ["block2?/alloc", "objc2/alloc", "objc2-contacts?/alloc", "objc2-foundation/alloc"]
-block2 = ["dep:block2", "objc2-contacts?/block2", "objc2-foundation/block2"]
+default = [
+    "std",
+    "CLAvailability",
+    "CLBackgroundActivitySession",
+    "CLBeaconIdentityCondition",
+    "CLBeaconIdentityConstraint",
+    "CLBeaconRegion",
+    "CLCircularGeographicCondition",
+    "CLCircularRegion",
+    "CLCondition",
+    "CLError",
+    "CLErrorDomain",
+    "CLGeocoder",
+    "CLHeading",
+    "CLLocation",
+    "CLLocationManager",
+    "CLLocationManagerDelegate",
+    "CLLocationManager_CLVisitExtensions",
+    "CLLocationPushServiceError",
+    "CLLocationPushServiceExtension",
+    "CLLocationUpdater",
+    "CLMonitor",
+    "CLMonitorConfiguration",
+    "CLMonitoringEvent",
+    "CLMonitoringRecord",
+    "CLPlacemark",
+    "CLRegion",
+    "CLServiceSession",
+    "CLVisit",
+    "block2",
+    "dispatch2",
+    "objc2-contacts",
+]
+std = ["alloc"]
+alloc = []
+CLLocation = [
+    "objc2-foundation/NSDate",
+    "objc2-foundation/NSObject",
+]
+block2 = ["dep:block2"]
+dispatch2 = ["dep:dispatch2"]
 objc2-contacts = ["dep:objc2-contacts"]
+unstable-darwin-objc = []
 
 CLAvailability = []
 CLBackgroundActivitySession = []
@@ -77,7 +113,6 @@ CLCondition = ["objc2-foundation/NSObject"]
 CLError = ["objc2-foundation/NSString"]
 CLErrorDomain = ["objc2-foundation/NSString"]
 CLGeocoder = [
-    "objc2-contacts?/CNPostalAddress",
     "objc2-foundation/NSArray",
     "objc2-foundation/NSDictionary",
     "objc2-foundation/NSError",
@@ -85,10 +120,6 @@ CLGeocoder = [
     "objc2-foundation/NSString",
 ]
 CLHeading = [
-    "objc2-foundation/NSDate",
-    "objc2-foundation/NSObject",
-]
-CLLocation = [
     "objc2-foundation/NSDate",
     "objc2-foundation/NSObject",
 ]
@@ -126,7 +157,6 @@ CLMonitoringEvent = [
 ]
 CLMonitoringRecord = ["objc2-foundation/NSObject"]
 CLPlacemark = [
-    "objc2-contacts?/CNPostalAddress",
     "objc2-foundation/NSArray",
     "objc2-foundation/NSDictionary",
     "objc2-foundation/NSObject",
@@ -137,37 +167,8 @@ CLRegion = [
     "objc2-foundation/NSObject",
     "objc2-foundation/NSString",
 ]
+CLServiceSession = ["objc2-foundation/NSString"]
 CLVisit = [
     "objc2-foundation/NSDate",
     "objc2-foundation/NSObject",
-]
-all = [
-    "CLAvailability",
-    "CLBackgroundActivitySession",
-    "CLBeaconIdentityCondition",
-    "CLBeaconIdentityConstraint",
-    "CLBeaconRegion",
-    "CLCircularGeographicCondition",
-    "CLCircularRegion",
-    "CLCondition",
-    "CLError",
-    "CLErrorDomain",
-    "CLGeocoder",
-    "CLHeading",
-    "CLLocation",
-    "CLLocationManager",
-    "CLLocationManagerDelegate",
-    "CLLocationManager_CLVisitExtensions",
-    "CLLocationPushServiceError",
-    "CLLocationPushServiceExtension",
-    "CLLocationUpdater",
-    "CLMonitor",
-    "CLMonitorConfiguration",
-    "CLMonitoringEvent",
-    "CLMonitoringRecord",
-    "CLPlacemark",
-    "CLRegion",
-    "CLVisit",
-    "block2",
-    "objc2-contacts",
 ]
