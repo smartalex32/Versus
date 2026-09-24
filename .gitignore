@@ -29,4 +29,5 @@ desktop.ini
 /src-tauri/icons/android/
 /src-tauri/icons/ios/
 /npm-cache/_logs/
+/npm-cache/_cacache/_lastverified
 /npm-cache/_update-notifier-last-checked
