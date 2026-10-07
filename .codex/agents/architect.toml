@@ -1,6 +1,6 @@
 name = "architect"
 description = "Escalation advisor for difficult architecture, cross-system correctness, or failures unresolved after focused investigation. Returns a decision and implementation plan."
-model = "gpt-6-sol"
+model = "gpt-6.1-sol"
 model_reasoning_effort = "high"
 sandbox_mode = "read-only"
 
