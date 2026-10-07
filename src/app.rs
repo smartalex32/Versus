@@ -595,7 +595,7 @@ impl VersusApp {
             self.tree.as_ref().map(|_| self.counts)
         };
         ui.horizontal_wrapped(|ui| {
-            if back && ui.button("← Back").clicked() {
+            if back && icon_button(ui, ToolbarIcon::Back, true, "Back to folders").clicked() {
                 self.file_view = None;
             }
             for (index, icon) in [
@@ -1166,6 +1166,7 @@ fn paint_status_icon(painter: &egui::Painter, center: Pos2, icon: StatusIcon) {
 
 #[derive(Clone, Copy)]
 enum ToolbarIcon {
+    Back,
     Refresh,
     Expand,
     Collapse,
@@ -1196,6 +1197,14 @@ fn icon_button(ui: &mut egui::Ui, icon: ToolbarIcon, enabled: bool, label: &str)
         let point = |x, y| center + egui::vec2(x, y);
         let stroke = Stroke::new(1.4, color);
         match icon {
+            ToolbarIcon::Back => {
+                ui.painter()
+                    .line_segment([point(6.0, 0.0), point(-6.0, 0.0)], stroke);
+                ui.painter().line(
+                    vec![point(-1.0, -5.0), point(-6.0, 0.0), point(-1.0, 5.0)],
+                    stroke,
+                );
+            }
             ToolbarIcon::Refresh => {
                 let arc: Vec<_> = (0..=24)
                     .map(|step| {
@@ -2077,7 +2086,11 @@ mod tests {
             );
             let cancellation = view.job.as_ref().unwrap().cancellation.clone();
             let output = render(&mut app, &ctx, vec![]);
-            let back = text_positions(&output, "← Back")[0] + egui::vec2(4.0, 5.0);
+            let back = ctx
+                .read_response(egui::Id::new("Back to folders"))
+                .unwrap()
+                .rect
+                .center();
             assert!(text_positions(&output, "assembly").is_empty());
             output.drop_without_applying_deltas();
             click(&mut app, &ctx, back);
@@ -2202,7 +2215,11 @@ mod tests {
         let mut app = loaded_app();
         app.file_view = Some(loaded_file_view());
         let output = render(&mut app, &ctx, vec![]);
-        let back = text_centers(&output, "← Back")[0];
+        let back = ctx
+            .read_response(egui::Id::new("Back to folders"))
+            .unwrap()
+            .rect
+            .center();
         let legend = text_centers(&output, "Different  1")[0];
         let title = text_centers(&output, "Versus")[0];
         assert!(back.x < legend.x);
@@ -2346,7 +2363,10 @@ mod tests {
             .unwrap();
         app.poll_file_comparison(&ctx);
         let output = render(&mut app, &ctx, vec![]);
-        assert_eq!(text_positions(&output, "← Back").len(), 1);
+        assert!(
+            ctx.read_response(egui::Id::new("Back to folders"))
+                .is_some()
+        );
         assert!(
             app.file_view
                 .as_ref()

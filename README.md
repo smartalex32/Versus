@@ -46,8 +46,9 @@ Double-click a regular file on either side to open a read-only, line-by-line fil
 comparison. The same legend colors and icons identify changed, left-only, and
 right-only lines; line numbers and empty placeholders keep both sides aligned.
 Vertical scrolling stays linked, and each pane can scroll horizontally for long
-lines. **Back**, at the left of the legend, returns to the folder view with its
-selection, expansion, and scroll position preserved. Enter or Space on a focused file also opens it.
+lines. The **back arrow**, at the left of the legend, returns to the folder view
+with its selection, expansion, and scroll position preserved. Enter or Space on a
+focused file also opens it.
 
 File contents load in the background. Missing files show an empty side; binary or
 non-UTF-8 files, files above the 32 MiB text limit, and comparisons exceeding the
