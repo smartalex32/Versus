@@ -22,15 +22,15 @@ all** are the stacked plus/minus icons at the upper right and control both trees
 over an action icon for its label. Tab focuses tree rows; Enter or Space toggles a
 folder, and the left/right arrow keys collapse/expand a focused folder.
 
-- Green checkmark: identical entries.
 - Amber unequal sign: changed files or shared folders containing differences.
 - Cyan left arrow: files and folders present only on the left.
 - Violet right arrow: files and folders present only on the right.
 - Red boxed cross: different entry types.
 - Red warning triangle: a filesystem read error. Hover for details.
 
-The legend sits above the two panes; the same icons replace status words in each
-compact tree row. File sizes and recursive folder totals appear beside the status
+Identical files, folders, and lines use ordinary gray text without a status icon
+or a legend entry. The legend sits above the two panes; the same icons replace
+status words in each compact tree row. File sizes and recursive folder totals appear beside the status
 icon, independently for each side, using binary units (KiB, MiB, and so on). Sizes
 reflect filesystem metadata collected during the scan. Folder
 totals count regular-file bytes and exclude symlink targets. Empty folders show
@@ -42,9 +42,19 @@ Files are compared by content, not timestamps. Symlinks are compared by their
 targets and are never recursively followed. Empty folders are included. Changing
 a path clears the prior result so it cannot be mistaken for the new selection.
 
-This rebuild focuses exclusively on read-only folder comparison. Text comparison,
-merge, editing, saving, and other workflows are deferred; their existing Rust core
-primitives remain available for later work. Compared folders are never modified.
+Double-click a regular file on either side to open a read-only, line-by-line file
+comparison. The same legend colors and icons identify changed, left-only, and
+right-only lines; line numbers and empty placeholders keep both sides aligned.
+Vertical scrolling stays linked, and each pane can scroll horizontally for long
+lines. **Back** returns to the folder view with its selection, expansion, and
+scroll position preserved. Enter or Space on a focused file also opens it.
+
+File contents load in the background. Missing files show an empty side; binary or
+non-UTF-8 files, files above the 32 MiB text limit, and comparisons exceeding the
+two-second diff processing limit show an explanation. Type mismatches do not open
+folders or symlink targets. Read errors are shown in the file view, where Back remains available. Line endings are
+normalized for text comparison. Merge, editing, saving, and other workflows remain
+deferred. Compared files and folders are never modified.
 
 ## Releases
 

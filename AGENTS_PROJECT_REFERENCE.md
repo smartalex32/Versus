@@ -3,8 +3,9 @@
 ## Purpose
 
 Versus is an offline native engineering workspace for two-folder comparison on
-Windows and Linux. Text comparison and merge primitives remain in the core for
-future work; the rebuilt UI exposes only linked folder trees. Runtime behavior must
+Windows and Linux. Linked folder trees open read-only, aligned text comparisons
+on file double-click; Back preserves folder-view state. Merge primitives remain
+in the core for future work. Runtime behavior must
 not rely on Internet services, telemetry, automatic updates, a managed runtime, or
 background services. Network-mounted paths are handled through normal filesystem
 APIs and must fail cleanly when unavailable.
@@ -13,10 +14,13 @@ APIs and must fail cleanly when unavailable.
 
 - Rust 1.95 with `eframe`/`egui` (the `glow` backend) for the native UI.
 - `similar` for text differences and `rfd` for native path pickers.
-- `src/app.rs` renders the desktop UI; `src/core/` owns filesystem comparison,
+- `src/app.rs` renders linked folder trees and file comparison panes, with
+  cancellable background loading; `src/core/` owns filesystem comparison,
   text diff, merge, and saving. The core library is independent from UI rendering.
 - `src/core/tree.rs` builds aligned folder trees with per-side types, ancestor
   status aggregation, and shared expansion state.
+- `src/core/file_view.rs` loads bounded text inputs and aligns numbered line rows.
+  Identical entries are neutral gray; both views share difference status icons.
 - `tests/` covers externally observable comparison and filesystem behavior.
 - `.cargo/config.toml` replaces crates.io with the checked-in `vendor/` tree and
   forces Cargo offline.
