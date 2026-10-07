@@ -45,6 +45,8 @@ a path clears the prior result so it cannot be mistaken for the new selection.
 Double-click a regular file on either side to open a read-only, line-by-line file
 comparison. The same legend colors and icons identify changed, left-only, and
 right-only lines; line numbers and empty placeholders keep both sides aligned.
+File headers use the same LEFT/RIGHT styling as folder headers. Long file paths
+show a leading ellipsis so the filename remains visible; hover for the full path.
 Vertical scrolling stays linked, and each pane can scroll horizontally for long
 lines. The **back arrow**, at the left of the legend, returns to the folder view
 with its selection, expansion, and scroll position preserved. Enter or Space on a

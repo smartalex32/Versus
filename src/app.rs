@@ -463,19 +463,8 @@ impl VersusApp {
         let mut picked = false;
         for (side, half) in split_rect(header).into_iter().enumerate() {
             let rect = half.shrink(7.0);
-            let color = if side == 0 {
-                palette.left_only
-            } else {
-                palette.right_only
-            };
             let painter = ui.painter().with_clip_rect(rect);
-            painter.text(
-                rect.left_center(),
-                Align2::LEFT_CENTER,
-                if side == 0 { "LEFT" } else { "RIGHT" },
-                FontId::monospace(10.0),
-                color,
-            );
+            paint_side_label(&painter, rect, side, palette);
             let galley = galleys[side].clone();
             let position = egui::pos2(rect.left() + 40.0, rect.center().y - galley.size().y / 2.0);
             let path_rect = Rect::from_min_size(
@@ -628,30 +617,42 @@ impl VersusApp {
             .stroke(Stroke::new(1.0, palette.border))
             .corner_radius(6)
             .show(ui, |ui| {
-                ui.columns(2, |columns| {
-                    for (side, column) in columns.iter_mut().enumerate() {
-                        column.horizontal(|ui| {
-                            ui.label(
-                                RichText::new(if side == 0 { "LEFT" } else { "RIGHT" })
-                                    .monospace()
-                                    .color(palette.muted),
-                            );
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(view.paths[side].display().to_string())
-                                        .monospace(),
-                                )
-                                .wrap(),
-                            );
-                        });
-                        if view.sources[side].is_none() {
-                            column.label(
-                                RichText::new("Not present on this side").color(palette.muted),
-                            );
+                let (header, _) =
+                    ui.allocate_exact_size(egui::vec2(ui.available_width(), 38.0), Sense::hover());
+                for (side, half) in split_rect(header).into_iter().enumerate() {
+                    let rect = half.shrink(7.0);
+                    let painter = ui.painter().with_clip_rect(rect);
+                    paint_side_label(&painter, rect, side, palette);
+                    let path = view.paths[side].display().to_string();
+                    let path_rect = Rect::from_min_max(rect.min + egui::vec2(40.0, 0.0), rect.max);
+                    let galley = left_elided_path(&painter, &path, path_rect.width(), palette.text);
+                    let position =
+                        egui::pos2(path_rect.left(), rect.center().y - galley.size().y / 2.0);
+                    painter.galley(position, galley, palette.text);
+                    ui.interact(path_rect, ui.id().with(("file-path", side)), Sense::hover())
+                        .on_hover_text(path);
+                }
+                ui.painter().line_segment(
+                    [header.center_top(), header.center_bottom()],
+                    Stroke::new(1.0, palette.border),
+                );
+                let (divider, _) =
+                    ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), Sense::hover());
+                ui.painter().line_segment(
+                    [divider.left_center(), divider.right_center()],
+                    Stroke::new(1.0, palette.border),
+                );
+                if view.sources.iter().any(Option::is_none) {
+                    ui.columns(2, |columns| {
+                        for (side, column) in columns.iter_mut().enumerate() {
+                            if view.sources[side].is_none() {
+                                column.label(
+                                    RichText::new("Not present on this side").color(palette.muted),
+                                );
+                            }
                         }
-                    }
-                });
-                ui.separator();
+                    });
+                }
                 if let Some(error) = &view.error {
                     ui.horizontal(|ui| {
                         let (rect, _) =
@@ -983,6 +984,52 @@ fn absolute_path(path: &str) -> PathBuf {
             .map(|cwd| cwd.join(&path))
             .unwrap_or(path)
     }
+}
+
+fn paint_side_label(painter: &egui::Painter, rect: Rect, side: usize, palette: Palette) {
+    painter.text(
+        rect.left_center(),
+        Align2::LEFT_CENTER,
+        if side == 0 { "LEFT" } else { "RIGHT" },
+        FontId::monospace(10.0),
+        if side == 0 {
+            palette.left_only
+        } else {
+            palette.right_only
+        },
+    );
+}
+
+fn left_elided_path(
+    painter: &egui::Painter,
+    path: &str,
+    width: f32,
+    color: Color32,
+) -> Arc<egui::Galley> {
+    let layout = |text: String| painter.layout_no_wrap(text, FontId::monospace(11.0), color);
+    let full = layout(path.into());
+    if full.size().x <= width {
+        return full;
+    }
+    if layout("…".into()).size().x > width {
+        return layout(String::new());
+    }
+    let boundaries: Vec<_> = path
+        .char_indices()
+        .map(|(index, _)| index)
+        .chain(std::iter::once(path.len()))
+        .collect();
+    let mut first = 0;
+    let mut last = boundaries.len() - 1;
+    while first < last {
+        let middle = (first + last) / 2;
+        if layout(format!("…{}", &path[boundaries[middle]..])).size().x <= width {
+            last = middle;
+        } else {
+            first = middle + 1;
+        }
+    }
+    layout(format!("…{}", &path[boundaries[first]..]))
 }
 
 fn state_index(state: &DirectoryEntryState) -> usize {
@@ -2104,6 +2151,81 @@ mod tests {
             assert_eq!(app.scroll_generation, generation);
             let output = render(&mut app, &ctx, vec![]);
             assert_eq!(text_positions(&output, "model.step").len(), 2);
+            output.drop_without_applying_deltas();
+        }
+    }
+
+    #[test]
+    fn file_headers_match_folder_styles_and_elide_long_paths_on_the_left() {
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            let ctx = egui::Context::default();
+            set_theme(&ctx, theme);
+            let mut app = loaded_app();
+            let draw = |app: &mut VersusApp| {
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(
+                            Pos2::ZERO,
+                            egui::vec2(900.0, 650.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ui| app.render(ui),
+                );
+                output.textures_delta.clear();
+                output
+            };
+            let label_style = |output: &egui::FullOutput, label: &str| {
+                output
+                    .shapes
+                    .iter()
+                    .find_map(|shape| match &shape.shape {
+                        egui::Shape::Text(text) if text.galley.text() == label => Some((
+                            text.fallback_color,
+                            text.galley.job.sections[0].format.font_id.clone(),
+                            text.pos.x,
+                        )),
+                        _ => None,
+                    })
+                    .unwrap()
+            };
+            let output = draw(&mut app);
+            let folder_styles = [label_style(&output, "LEFT"), label_style(&output, "RIGHT")];
+            output.drop_without_applying_deltas();
+            let mut view = loaded_file_view();
+            view.paths = [
+                format!(
+                    "C:\\engineering\\{}assembly\\model.step",
+                    "é𐐀目录\\".repeat(60)
+                )
+                .into(),
+                "/r/model.step".into(),
+            ];
+            app.file_view = Some(view);
+            let output = draw(&mut app);
+            for (side, label) in ["LEFT", "RIGHT"].into_iter().enumerate() {
+                assert_eq!(label_style(&output, label), folder_styles[side]);
+            }
+            let left_path = output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.text().starts_with('…') => {
+                        Some((shape, text))
+                    }
+                    _ => None,
+                })
+                .expect("Long path should show a leading ellipsis");
+            let (shape, text) = left_path;
+            assert!(text.galley.text().ends_with("assembly\\model.step"));
+            assert_eq!(text.galley.rows.len(), 1);
+            let bounds = Rect::from_min_size(text.pos, text.galley.size());
+            assert!(bounds.right() < 450.0);
+            assert!(shape.clip_rect.contains_rect(bounds));
+            let path_y = bounds.center().y;
+            for label in ["LEFT", "RIGHT", "/r/model.step"] {
+                assert!((text_centers(&output, label)[0].y - path_y).abs() < 0.1);
+            }
             output.drop_without_applying_deltas();
         }
     }
