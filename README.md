@@ -8,23 +8,22 @@ authentication or make outbound network requests at runtime.
 
 ## Use
 
-Click the path area or browse icon in either pane header to select a file or
-folder. The first selection opens the corresponding workspace; choosing a
-matching type on the other side starts comparison automatically. Two files open
-the line comparison directly, with no Back button. A file and a folder show an
-incompatible-types explanation until you choose matching types. The comparison
-title appears after a selection and is centered beside the main logo.
+Choose **Folder Compare** or **File Compare** beside the main logo. The active
+mode is highlighted, with Folder Compare selected initially. Clicking a path
+area or browse icon in either pane opens that mode's native folder or file picker
+directly. Selecting the second source starts comparison automatically. File
+Compare opens the line comparison without a Back button.
 
-The **+** button at the right of the legend has the tooltip **New comparison**.
-It clears both selections, results, and pending work while keeping the theme.
+Changing modes starts a fresh comparison and cancels pending work. Clicking the
+active mode preserves the current comparison; clicking Folder Compare while
+viewing a file from its tree returns to that tree. The **+** button at the right
+of the legend has the tooltip **New comparison** and clears both selections,
+results, and pending work while keeping the selected mode and theme.
+
 Both pane headers remain available for browsing in directly selected file views.
 Folder paths wrap to show the full path; file paths use a leading ellipsis with
 the full path on hover. LEFT/RIGHT and browse stay centered beside the path.
-The refresh icon at the upper right compares the same folders again.
-
-macOS offers a combined file/folder picker. On Linux, choose File or Folder before
-the native picker opens. On Windows, the initial native prompt uses Yes for a
-file, No for a folder, and Cancel to keep the current selection. Local paths,
+The refresh icon at the upper right compares the same folders again. Local paths,
 mapped drives, UNC shares, and mounted Linux paths all use the same filesystem
 APIs; paths can be entered through the native dialog.
 

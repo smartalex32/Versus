@@ -10,6 +10,29 @@ pub enum SourceKind {
     Other,
 }
 
+/// The comparison workflow selected by the header buttons.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ComparisonMode {
+    Folder,
+    File,
+}
+
+impl ComparisonMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Folder => "Folder Compare",
+            Self::File => "File Compare",
+        }
+    }
+
+    pub fn source_label(self) -> &'static str {
+        match self {
+            Self::Folder => "folder",
+            Self::File => "file",
+        }
+    }
+}
+
 /// The workspace that can be rendered for the currently selected sources.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SelectionMode {
@@ -86,10 +109,11 @@ fn configured_dialog(
     side: usize,
     current: &str,
     current_kind: Option<SourceKind>,
+    mode: ComparisonMode,
 ) -> rfd::FileDialog {
     let source_name = if side == 0 { "left" } else { "right" };
     let mut dialog =
-        rfd::FileDialog::new().set_title(format!("Choose {source_name} file or folder"));
+        rfd::FileDialog::new().set_title(format!("Choose {source_name} {}", mode.source_label()));
 
     if let Some(directory) = initial_directory(current, current_kind) {
         dialog = dialog.set_directory(directory);
@@ -100,56 +124,17 @@ fn configured_dialog(
     dialog
 }
 
-// Some native backends return standard Yes/No values even when custom labels
-// were requested. Keep the mapping explicit so those choices never become cancel.
-#[cfg(any(not(target_os = "macos"), test))]
-fn picker_kind(choice: rfd::MessageDialogResult) -> Option<SourceKind> {
-    match choice {
-        rfd::MessageDialogResult::Yes => Some(SourceKind::File),
-        rfd::MessageDialogResult::No => Some(SourceKind::Folder),
-        rfd::MessageDialogResult::Custom(choice) if choice == "File" => Some(SourceKind::File),
-        rfd::MessageDialogResult::Custom(choice) if choice == "Folder" => Some(SourceKind::Folder),
-        _ => None,
-    }
-}
-
-/// Show a native source picker for one side of the comparison.
-///
-/// macOS supplies a combined file-or-folder picker. Other supported platforms
-/// first ask which source kind to choose, then open the appropriate native
-/// picker.
-pub fn pick_path(side: usize, current: &str, current_kind: Option<SourceKind>) -> Option<PathBuf> {
-    #[cfg(target_os = "macos")]
-    {
-        configured_dialog(side, current, current_kind).pick_file_or_folder()
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        // Windows' default MessageBox backend cannot label custom buttons.
-        #[cfg(target_os = "windows")]
-        let (description, buttons) = (
-            "Select Yes to choose a file, No to choose a folder, or Cancel to keep the current selection.",
-            rfd::MessageButtons::YesNoCancel,
-        );
-        #[cfg(not(target_os = "windows"))]
-        let (description, buttons) = (
-            "Choose a file or folder to compare. Select Cancel to keep the current source.",
-            rfd::MessageButtons::YesNoCancelCustom("File".into(), "Folder".into(), "Cancel".into()),
-        );
-        let choice = rfd::MessageDialog::new()
-            .set_title("Choose comparison source")
-            .set_description(description)
-            .set_buttons(buttons)
-            .show();
-
-        match picker_kind(choice) {
-            Some(SourceKind::File) => configured_dialog(side, current, current_kind).pick_file(),
-            Some(SourceKind::Folder) => {
-                configured_dialog(side, current, current_kind).pick_folder()
-            }
-            _ => None,
-        }
+/// Open the selected workflow's native picker directly on every platform.
+pub fn pick_path(
+    side: usize,
+    current: &str,
+    current_kind: Option<SourceKind>,
+    mode: ComparisonMode,
+) -> Option<PathBuf> {
+    let dialog = configured_dialog(side, current, current_kind, mode);
+    match mode {
+        ComparisonMode::Folder => dialog.pick_folder(),
+        ComparisonMode::File => dialog.pick_file(),
     }
 }
 
@@ -216,20 +201,6 @@ mod tests {
             selection_mode([Some(SourceKind::Other), None]),
             SelectionMode::Incompatible
         );
-    }
-
-    #[test]
-    fn maps_standard_and_custom_native_choices_without_confusing_cancel() {
-        use rfd::MessageDialogResult::{Cancel, Custom, No, Yes};
-        for choice in [Yes, Custom("File".into())] {
-            assert_eq!(picker_kind(choice), Some(SourceKind::File));
-        }
-        for choice in [No, Custom("Folder".into())] {
-            assert_eq!(picker_kind(choice), Some(SourceKind::Folder));
-        }
-        for choice in [Cancel, Custom("Cancel".into())] {
-            assert_eq!(picker_kind(choice), None);
-        }
     }
 
     #[test]

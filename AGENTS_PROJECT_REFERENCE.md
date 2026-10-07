@@ -3,8 +3,9 @@
 ## Purpose
 
 Versus is an offline native engineering workspace for file or folder comparison
-on Windows and Linux. Native selectors choose either source type; matching pairs
-compare automatically and mixed types show an explanation. Linked folder trees
+on Windows and Linux. Header buttons choose Folder Compare or File Compare;
+browse opens the corresponding native picker directly. Matching pairs compare
+automatically and mixed types show an explanation. Linked folder trees
 open read-only, aligned text comparisons on file double-click; Back preserves
 folder-view state and is omitted for directly selected files. Merge primitives remain
 in the core for future work. Runtime behavior must
@@ -20,7 +21,8 @@ APIs and must fail cleanly when unavailable.
   cancellable background loading; `src/core/` owns filesystem comparison,
   text diff, merge, and saving. The core library is independent from UI rendering.
 - `src/selection.rs` classifies sources without following symlinks and configures
-  native file/folder pickers. New comparison clears both sources and pending work.
+  native pickers for the selected comparison mode. Switching modes clears both
+  sources and pending work; New comparison keeps the selected mode and theme.
 - `src/core/tree.rs` builds aligned folder trees with per-side types, ancestor
   status aggregation, and shared expansion state.
 - `src/core/file_view.rs` loads bounded text inputs and aligns numbered line rows.
