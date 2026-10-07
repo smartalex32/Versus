@@ -46,8 +46,8 @@ Double-click a regular file on either side to open a read-only, line-by-line fil
 comparison. The same legend colors and icons identify changed, left-only, and
 right-only lines; line numbers and empty placeholders keep both sides aligned.
 Vertical scrolling stays linked, and each pane can scroll horizontally for long
-lines. **Back** returns to the folder view with its selection, expansion, and
-scroll position preserved. Enter or Space on a focused file also opens it.
+lines. **Back**, at the left of the legend, returns to the folder view with its
+selection, expansion, and scroll position preserved. Enter or Space on a focused file also opens it.
 
 File contents load in the background. Missing files show an empty side; binary or
 non-UTF-8 files, files above the 32 MiB text limit, and comparisons exceeding the
@@ -55,6 +55,10 @@ two-second diff processing limit show an explanation. Type mismatches do not ope
 folders or symlink targets. Read errors are shown in the file view, where Back remains available. Line endings are
 normalized for text comparison. Merge, editing, saving, and other workflows remain
 deferred. Compared files and folders are never modified.
+
+The sun/moon icon at the upper right switches between light and dark themes in
+either view. The logo and window icon preserve the blue half and use a white half
+in dark mode or the original dark half in light mode.
 
 ## Releases
 

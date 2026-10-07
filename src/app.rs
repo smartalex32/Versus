@@ -13,16 +13,61 @@ use versus::{
     FolderTree, TreeNode, load_file_comparison,
 };
 
-const BACKGROUND: Color32 = Color32::from_rgb(16, 21, 29);
-const PANEL: Color32 = Color32::from_rgb(23, 30, 40);
-const BORDER: Color32 = Color32::from_rgb(48, 59, 74);
-const MUTED: Color32 = Color32::from_rgb(145, 161, 181);
-const TEXT: Color32 = Color32::from_rgb(221, 230, 240);
-const ACCENT: Color32 = Color32::from_rgb(95, 163, 255);
-const CHANGED: Color32 = Color32::from_rgb(244, 191, 98);
-const LEFT_ONLY: Color32 = Color32::from_rgb(94, 211, 221);
-const RIGHT_ONLY: Color32 = Color32::from_rgb(189, 157, 255);
-const ERROR: Color32 = Color32::from_rgb(255, 127, 137);
+#[derive(Clone, Copy)]
+struct Palette {
+    background: Color32,
+    panel: Color32,
+    border: Color32,
+    muted: Color32,
+    text: Color32,
+    accent: Color32,
+    changed: Color32,
+    left_only: Color32,
+    right_only: Color32,
+    error: Color32,
+    alternate: Color32,
+    hover: Color32,
+}
+
+impl Palette {
+    fn for_context(ctx: &egui::Context) -> Self {
+        Self::new(ctx.theme() == egui::Theme::Dark)
+    }
+    fn new(dark: bool) -> Self {
+        if dark {
+            Self {
+                background: Color32::from_rgb(16, 21, 29),
+                panel: Color32::from_rgb(23, 30, 40),
+                border: Color32::from_rgb(48, 59, 74),
+                muted: Color32::from_rgb(145, 161, 181),
+                text: Color32::from_rgb(221, 230, 240),
+                accent: Color32::from_rgb(95, 163, 255),
+                changed: Color32::from_rgb(244, 191, 98),
+                left_only: Color32::from_rgb(94, 211, 221),
+                right_only: Color32::from_rgb(189, 157, 255),
+                error: Color32::from_rgb(255, 127, 137),
+                alternate: Color32::from_rgb(26, 34, 45),
+                hover: Color32::from_rgb(34, 44, 58),
+            }
+        } else {
+            Self {
+                background: Color32::from_rgb(244, 246, 249),
+                panel: Color32::WHITE,
+                border: Color32::from_rgb(207, 215, 225),
+                muted: Color32::from_rgb(88, 101, 119),
+                text: Color32::from_rgb(32, 43, 58),
+                accent: Color32::from_rgb(26, 102, 185),
+                changed: Color32::from_rgb(142, 86, 10),
+                left_only: Color32::from_rgb(0, 112, 128),
+                right_only: Color32::from_rgb(112, 65, 176),
+                error: Color32::from_rgb(179, 38, 58),
+                alternate: Color32::from_rgb(244, 247, 251),
+                hover: Color32::from_rgb(230, 237, 246),
+            }
+        }
+    }
+}
+
 const ROW_HEIGHT: f32 = 22.0;
 
 struct ComparisonJob {
@@ -68,7 +113,7 @@ pub struct VersusApp {
     error: Option<String>,
     elapsed: Option<Duration>,
     counts: [usize; 6],
-    logo_texture: Option<egui::TextureHandle>,
+    logo_texture: Option<(bool, egui::TextureHandle)>,
     scroll_generation: u64,
 }
 
@@ -252,16 +297,25 @@ impl VersusApp {
     }
 
     fn render(&mut self, ui: &mut egui::Ui) {
-        if self.logo_texture.is_none() {
-            let image: egui::ColorImage = (&crate::logo::icon_data()).into();
-            self.logo_texture = Some(ui.ctx().load_texture(
-                "versus-mark",
-                image,
-                egui::TextureOptions::LINEAR,
+        let palette = Palette::for_context(ui.ctx());
+        let dark = ui.visuals().dark_mode;
+        if self
+            .logo_texture
+            .as_ref()
+            .is_none_or(|(theme, _)| *theme != dark)
+        {
+            let icon = crate::logo::themed_icon(dark);
+            let image: egui::ColorImage = (&icon).into();
+            self.logo_texture = Some((
+                dark,
+                ui.ctx()
+                    .load_texture("versus-mark", image, egui::TextureOptions::LINEAR),
             ));
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::Icon(Some(Arc::new(icon))));
         }
         egui::Frame::default()
-            .fill(BACKGROUND)
+            .fill(palette.background)
             .inner_margin(egui::Margin::same(10))
             .show(ui, |ui| {
                 self.header(ui);
@@ -274,10 +328,10 @@ impl VersusApp {
                 }
                 if let Some(error) = &self.error {
                     egui::Frame::default()
-                        .fill(ERROR.gamma_multiply(0.12))
+                        .fill(palette.error.gamma_multiply(0.12))
                         .inner_margin(egui::Margin::same(6))
                         .show(ui, |ui| {
-                            ui.colored_label(ERROR, error);
+                            ui.colored_label(palette.error, error);
                         });
                     ui.add_space(4.0);
                 }
@@ -311,11 +365,9 @@ impl VersusApp {
     }
 
     fn header(&mut self, ui: &mut egui::Ui) {
+        let palette = Palette::for_context(ui.ctx());
         ui.horizontal(|ui| {
-            if self.file_view.is_some() && ui.button("← Back").clicked() {
-                self.file_view = None;
-            }
-            if let Some(logo) = &self.logo_texture {
+            if let Some((_, logo)) = &self.logo_texture {
                 ui.image((logo.id(), egui::vec2(28.0, 28.0)));
             }
             ui.label(RichText::new("Versus").size(18.0).strong());
@@ -327,9 +379,36 @@ impl VersusApp {
                 })
                 .monospace()
                 .size(10.0)
-                .color(MUTED),
+                .color(palette.muted),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let dark = ui.visuals().dark_mode;
+                if icon_button(
+                    ui,
+                    if dark {
+                        ToolbarIcon::Sun
+                    } else {
+                        ToolbarIcon::Moon
+                    },
+                    true,
+                    if dark {
+                        "Switch to light mode"
+                    } else {
+                        "Switch to dark mode"
+                    },
+                )
+                .clicked()
+                {
+                    set_theme(
+                        ui.ctx(),
+                        if dark {
+                            egui::Theme::Light
+                        } else {
+                            egui::Theme::Dark
+                        },
+                    );
+                    ui.ctx().request_repaint();
+                }
                 if self.file_view.is_none() {
                     self.controls(ui);
                 }
@@ -338,6 +417,7 @@ impl VersusApp {
     }
 
     fn folder_inputs(&mut self, ui: &mut egui::Ui) {
+        let palette = Palette::for_context(ui.ctx());
         let full_paths = self.paths.clone().map(|path| {
             if path.is_empty() {
                 "Choose a folder".into()
@@ -349,7 +429,7 @@ impl VersusApp {
         let path_width = (width / 2.0 - 84.0).max(40.0);
         let galleys = full_paths.clone().map(|path| {
             ui.painter()
-                .layout(path, FontId::monospace(11.0), TEXT, path_width)
+                .layout(path, FontId::monospace(11.0), palette.text, path_width)
         });
         let height = galleys
             .iter()
@@ -360,7 +440,11 @@ impl VersusApp {
         let mut picked = false;
         for (side, half) in split_rect(header).into_iter().enumerate() {
             let rect = half.shrink(7.0);
-            let color = if side == 0 { LEFT_ONLY } else { RIGHT_ONLY };
+            let color = if side == 0 {
+                palette.left_only
+            } else {
+                palette.right_only
+            };
             let painter = ui.painter().with_clip_rect(rect);
             painter.text(
                 rect.left_center(),
@@ -372,7 +456,7 @@ impl VersusApp {
             let galley = galleys[side].clone();
             let position = egui::pos2(rect.left() + 40.0, rect.center().y - galley.size().y / 2.0);
             let path_rect = Rect::from_min_size(position, egui::vec2(path_width, galley.size().y));
-            painter.galley(position, galley, TEXT);
+            painter.galley(position, galley, palette.text);
             ui.interact(
                 path_rect,
                 ui.id().with(("selected-folder", side)),
@@ -468,13 +552,18 @@ impl VersusApp {
         }
     }
 
-    fn legend(&self, ui: &mut egui::Ui) {
+    fn legend(&mut self, ui: &mut egui::Ui) {
+        let palette = Palette::for_context(ui.ctx());
+        let back = self.file_view.is_some();
         let counts = if let Some(view) = &self.file_view {
             view.comparison.as_ref().map(|_| view.counts)
         } else {
             self.tree.as_ref().map(|_| self.counts)
         };
         ui.horizontal_wrapped(|ui| {
+            if back && ui.button("← Back").clicked() {
+                self.file_view = None;
+            }
             for (index, icon) in [
                 StatusIcon::Different,
                 StatusIcon::LeftOnly,
@@ -491,17 +580,18 @@ impl VersusApp {
                     || icon.label().into(),
                     |counts| format!("{}  {}", icon.label(), counts[index + 1]),
                 );
-                ui.label(RichText::new(label).size(10.0).color(icon.color()));
+                ui.label(RichText::new(label).size(10.0).color(icon.color(palette)));
                 ui.add_space(5.0);
             }
         });
     }
 
     fn file_area(&mut self, ui: &mut egui::Ui) {
+        let palette = Palette::for_context(ui.ctx());
         let view = self.file_view.as_mut().unwrap();
         egui::Frame::default()
-            .fill(PANEL)
-            .stroke(Stroke::new(1.0, BORDER))
+            .fill(palette.panel)
+            .stroke(Stroke::new(1.0, palette.border))
             .corner_radius(6)
             .show(ui, |ui| {
                 ui.columns(2, |columns| {
@@ -510,7 +600,7 @@ impl VersusApp {
                             ui.label(
                                 RichText::new(if side == 0 { "LEFT" } else { "RIGHT" })
                                     .monospace()
-                                    .color(MUTED),
+                                    .color(palette.muted),
                             );
                             ui.add(
                                 egui::Label::new(
@@ -521,7 +611,9 @@ impl VersusApp {
                             );
                         });
                         if view.sources[side].is_none() {
-                            column.label(RichText::new("Not present on this side").color(MUTED));
+                            column.label(
+                                RichText::new("Not present on this side").color(palette.muted),
+                            );
                         }
                     }
                 });
@@ -531,7 +623,7 @@ impl VersusApp {
                         let (rect, _) =
                             ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::hover());
                         paint_status_icon(ui.painter(), rect.center(), view.error_icon);
-                        ui.colored_label(ERROR, error);
+                        ui.colored_label(palette.error, error);
                     });
                     return;
                 }
@@ -543,11 +635,11 @@ impl VersusApp {
                     return;
                 };
                 if let Some(message) = &comparison.message {
-                    ui.label(RichText::new(message).color(MUTED));
+                    ui.label(RichText::new(message).color(palette.muted));
                 }
                 if comparison.rows.is_empty() {
                     if comparison.message.is_none() {
-                        ui.label(RichText::new("Both files are empty.").color(MUTED));
+                        ui.label(RichText::new("Both files are empty.").color(palette.muted));
                     }
                     return;
                 }
@@ -611,10 +703,11 @@ impl VersusApp {
     }
 
     fn tree_area(&mut self, ui: &mut egui::Ui, height: f32) {
+        let palette = Palette::for_context(ui.ctx());
         let mut open = None;
         egui::Frame::default()
-            .fill(PANEL)
-            .stroke(Stroke::new(1.0, BORDER))
+            .fill(palette.panel)
+            .stroke(Stroke::new(1.0, palette.border))
             .corner_radius(6)
             .show(ui, |ui| {
                 ui.set_min_height(height);
@@ -627,14 +720,14 @@ impl VersusApp {
                     ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), Sense::hover());
                 ui.painter().line_segment(
                     [divider.left_center(), divider.right_center()],
-                    Stroke::new(1.0, BORDER),
+                    Stroke::new(1.0, palette.border),
                 );
                 ui.painter().line_segment(
                     [
                         egui::pos2(divider.center().x, header_top),
                         divider.center_bottom(),
                     ],
-                    Stroke::new(1.0, BORDER),
+                    Stroke::new(1.0, palette.border),
                 );
                 let body_height = (height - header_height - 2.0).max(60.0);
                 if let Some(tree) = &mut self.tree {
@@ -755,13 +848,13 @@ impl VersusApp {
                                             );
                                         }
                                         if let DirectoryEntryState::Error(error) = &node.state {
-                                            ui.colored_label(ERROR, error.to_string());
+                                            ui.colored_label(palette.error, error.to_string());
                                         }
                                     });
                                 }
                                 ui.painter().line_segment(
                                     [rect.center_top(), rect.center_bottom()],
-                                    Stroke::new(1.0, BORDER),
+                                    Stroke::new(1.0, palette.border),
                                 );
                             }
                         });
@@ -794,15 +887,16 @@ impl VersusApp {
     }
 
     fn footer(&self, ui: &mut egui::Ui) {
+        let palette = Palette::for_context(ui.ctx());
         ui.horizontal(|ui| {
-            ui.label(RichText::new(&self.message).size(11.0).color(MUTED));
+            ui.label(RichText::new(&self.message).size(11.0).color(palette.muted));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if let Some(elapsed) = self.elapsed {
                     ui.label(
                         RichText::new(format!("{:.2}s", elapsed.as_secs_f64()))
                             .monospace()
                             .size(11.0)
-                            .color(MUTED),
+                            .color(palette.muted),
                     );
                 }
             });
@@ -813,12 +907,12 @@ impl VersusApp {
                     RichText::new(path.display().to_string())
                         .monospace()
                         .size(11.0)
-                        .color(TEXT),
+                        .color(palette.text),
                 )
                 .truncate(),
             );
         } else {
-            ui.label(RichText::new("Click a folder to expand both trees.  •  Double-click a file to compare.  •  Symlinks are not traversed.").size(10.0).color(MUTED));
+            ui.label(RichText::new("Click a folder to expand both trees.  •  Double-click a file to compare.  •  Symlinks are not traversed.").size(10.0).color(palette.muted));
         }
     }
 }
@@ -832,8 +926,10 @@ impl Drop for VersusApp {
 }
 
 impl eframe::App for VersusApp {
-    fn clear_color(&self, _: &egui::Visuals) -> [f32; 4] {
-        BACKGROUND.to_normalized_gamma_f32()
+    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+        Palette::new(visuals.dark_mode)
+            .background
+            .to_normalized_gamma_f32()
     }
     fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         self.poll_comparison(ctx);
@@ -873,15 +969,16 @@ fn paint_file_line(
     state: &DirectoryEntryState,
     alternate: bool,
 ) {
+    let palette = Palette::for_context(painter.ctx());
     let painter = painter.with_clip_rect(rect);
-    let color = state_color(state);
+    let color = state_color(state, palette);
     painter.rect_filled(
         rect,
         0,
         if alternate {
-            Color32::from_rgb(26, 34, 45)
+            palette.alternate
         } else {
-            PANEL
+            palette.panel
         },
     );
     if *state != DirectoryEntryState::Same {
@@ -897,7 +994,7 @@ fn paint_file_line(
             Align2::LEFT_CENTER,
             "—",
             FontId::monospace(11.0),
-            MUTED,
+            palette.muted,
         );
         return;
     };
@@ -906,7 +1003,7 @@ fn paint_file_line(
         Align2::RIGHT_CENTER,
         number.to_string(),
         FontId::monospace(10.0),
-        MUTED,
+        palette.muted,
     );
     if let Some(icon) = status_icon(state) {
         paint_status_icon(&painter, rect.left_center() + egui::vec2(54.0, 0.0), icon);
@@ -957,12 +1054,12 @@ impl StatusIcon {
             Self::Error => "Read error",
         }
     }
-    fn color(self) -> Color32 {
+    fn color(self, palette: Palette) -> Color32 {
         match self {
-            Self::Different => CHANGED,
-            Self::LeftOnly => LEFT_ONLY,
-            Self::RightOnly => RIGHT_ONLY,
-            Self::TypeMismatch | Self::Error => ERROR,
+            Self::Different => palette.changed,
+            Self::LeftOnly => palette.left_only,
+            Self::RightOnly => palette.right_only,
+            Self::TypeMismatch | Self::Error => palette.error,
         }
     }
 }
@@ -981,12 +1078,13 @@ fn status_icon(state: &DirectoryEntryState) -> Option<StatusIcon> {
 fn state_label(state: &DirectoryEntryState) -> &'static str {
     status_icon(state).map_or("Identical", StatusIcon::label)
 }
-fn state_color(state: &DirectoryEntryState) -> Color32 {
-    status_icon(state).map_or(MUTED, StatusIcon::color)
+fn state_color(state: &DirectoryEntryState, palette: Palette) -> Color32 {
+    status_icon(state).map_or(palette.muted, |icon| icon.color(palette))
 }
 
 fn paint_status_icon(painter: &egui::Painter, center: Pos2, icon: StatusIcon) {
-    let stroke = Stroke::new(1.3, icon.color());
+    let palette = Palette::for_context(painter.ctx());
+    let stroke = Stroke::new(1.3, icon.color(palette));
     let point = |x, y| center + egui::vec2(x, y);
     match icon {
         StatusIcon::Different => {
@@ -1027,7 +1125,7 @@ fn paint_status_icon(painter: &egui::Painter, center: Pos2, icon: StatusIcon) {
                 stroke,
             ));
             painter.line_segment([point(0.0, -2.0), point(0.0, 1.0)], stroke);
-            painter.circle_filled(point(0.0, 3.0), 0.7, icon.color());
+            painter.circle_filled(point(0.0, 3.0), 0.7, icon.color(palette));
         }
     }
 }
@@ -1039,23 +1137,26 @@ enum ToolbarIcon {
     Collapse,
     Browse,
     Cancel,
+    Sun,
+    Moon,
 }
 
 fn icon_button(ui: &mut egui::Ui, icon: ToolbarIcon, enabled: bool, label: &str) -> egui::Response {
+    let palette = Palette::for_context(ui.ctx());
     ui.add_enabled_ui(enabled, |ui| {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), Sense::hover());
         let response = ui.interact(rect, egui::Id::new(label), Sense::click());
         response
             .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
         let color = if !enabled {
-            MUTED.gamma_multiply(0.4)
+            palette.muted.gamma_multiply(0.4)
         } else if response.hovered() || response.has_focus() {
-            ACCENT
+            palette.accent
         } else {
-            TEXT
+            palette.text
         };
         if response.hovered() || response.has_focus() {
-            ui.painter().rect_filled(rect, 3, BORDER);
+            ui.painter().rect_filled(rect, 3, palette.border);
         }
         let center = rect.center();
         let point = |x, y| center + egui::vec2(x, y);
@@ -1088,7 +1189,7 @@ fn icon_button(ui: &mut egui::Ui, icon: ToolbarIcon, enabled: bool, label: &str)
                     Stroke::new(1.0, color.gamma_multiply(0.65)),
                     egui::StrokeKind::Inside,
                 );
-                ui.painter().rect_filled(front, 2, PANEL);
+                ui.painter().rect_filled(front, 2, palette.panel);
                 ui.painter()
                     .rect_stroke(front, 2, stroke, egui::StrokeKind::Inside);
                 let center = front.center();
@@ -1109,6 +1210,28 @@ fn icon_button(ui: &mut egui::Ui, icon: ToolbarIcon, enabled: bool, label: &str)
                 Some(&DirectoryEntryKind::Directory),
                 color,
             ),
+            ToolbarIcon::Sun => {
+                ui.painter().circle_stroke(center, 3.5, stroke);
+                for index in 0..8 {
+                    let angle = index as f32 * std::f32::consts::TAU / 8.0;
+                    let direction = egui::vec2(angle.cos(), angle.sin());
+                    ui.painter()
+                        .line_segment([center + direction * 5.5, center + direction * 8.0], stroke);
+                }
+            }
+            ToolbarIcon::Moon => {
+                let arc: Vec<_> = (0..=24)
+                    .map(|step| {
+                        let angle = (60.0 + step as f32 * 240.0 / 24.0).to_radians();
+                        point(angle.cos() * 7.0, angle.sin() * 7.0)
+                    })
+                    .chain((0..=16).map(|step| {
+                        let angle = (-90.0 - step as f32 * 180.0 / 16.0).to_radians();
+                        point(3.5 + angle.cos() * 5.0, angle.sin() * 6.0)
+                    }))
+                    .collect();
+                ui.painter().add(egui::Shape::closed_line(arc, stroke));
+            }
             ToolbarIcon::Cancel => {
                 ui.painter()
                     .line_segment([point(-4.0, -4.0), point(4.0, 4.0)], stroke);
@@ -1150,6 +1273,7 @@ struct RowAppearance {
 }
 
 fn paint_row(ui: &egui::Ui, rect: Rect, node: &TreeNode, side: usize, appearance: RowAppearance) {
+    let palette = Palette::for_context(ui.ctx());
     let entry = if side == 0 { &node.left } else { &node.right };
     let kind = entry.kind.as_ref();
     let present = entry.exists;
@@ -1162,15 +1286,15 @@ fn paint_row(ui: &egui::Ui, rect: Rect, node: &TreeNode, side: usize, appearance
         hovered,
     } = appearance;
     let painter = ui.painter().with_clip_rect(rect);
-    let color = state_color(state);
+    let color = state_color(state, palette);
     let fill = if selected {
-        ACCENT.gamma_multiply(0.16)
+        palette.accent.gamma_multiply(0.16)
     } else if hovered {
-        Color32::from_rgb(34, 44, 58)
+        palette.hover
     } else if alternate {
-        Color32::from_rgb(26, 34, 45)
+        palette.alternate
     } else {
-        PANEL
+        palette.panel
     };
     painter.rect_filled(rect, 0, fill);
     if present && *state != DirectoryEntryState::Same {
@@ -1189,7 +1313,7 @@ fn paint_row(ui: &egui::Ui, rect: Rect, node: &TreeNode, side: usize, appearance
             Align2::LEFT_CENTER,
             "—",
             FontId::monospace(11.0),
-            MUTED.gamma_multiply(0.55),
+            palette.muted.gamma_multiply(0.55),
         );
         return;
     }
@@ -1203,7 +1327,7 @@ fn paint_row(ui: &egui::Ui, rect: Rect, node: &TreeNode, side: usize, appearance
             Align2::LEFT_CENTER,
             if expanded { "▾" } else { "▸" },
             FontId::monospace(15.0),
-            MUTED,
+            palette.muted,
         );
     }
     paint_icon(&name_painter, egui::pos2(x + 19.0, y), kind, color);
@@ -1219,7 +1343,7 @@ fn paint_row(ui: &egui::Ui, rect: Rect, node: &TreeNode, side: usize, appearance
         Align2::RIGHT_CENTER,
         format_size(entry.size),
         FontId::monospace(10.0),
-        MUTED,
+        palette.muted,
     );
     if let Some(icon) = status_icon(state) {
         paint_status_icon(&painter, egui::pos2(rect.right() - 15.0, y), icon);
@@ -1260,13 +1384,14 @@ fn paint_icon(
 }
 
 fn empty_display(ui: &mut egui::Ui, height: f32, title: &str, subtitle: &str) {
+    let palette = Palette::for_context(ui.ctx());
     let (rect, _) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), height.max(80.0)),
         Sense::hover(),
     );
     ui.painter().line_segment(
         [rect.center_top(), rect.center_bottom()],
-        Stroke::new(1.0, BORDER.gamma_multiply(0.5)),
+        Stroke::new(1.0, palette.border.gamma_multiply(0.5)),
     );
     let painter = ui.painter().with_clip_rect(rect);
     let center = rect.center();
@@ -1275,26 +1400,35 @@ fn empty_display(ui: &mut egui::Ui, height: f32, title: &str, subtitle: &str) {
         Align2::CENTER_CENTER,
         title,
         FontId::proportional(21.0),
-        TEXT,
+        palette.text,
     );
     painter.text(
         center + egui::vec2(0.0, 8.0),
         Align2::CENTER_CENTER,
         subtitle,
         FontId::proportional(11.0),
-        MUTED,
+        palette.muted,
     );
 }
 
 fn apply_theme(ctx: &egui::Context) {
-    ctx.set_theme(egui::Theme::Dark);
-    let mut visuals = egui::Visuals::dark();
-    visuals.panel_fill = BACKGROUND;
-    visuals.window_fill = PANEL;
-    visuals.extreme_bg_color = BACKGROUND;
-    visuals.override_text_color = Some(TEXT);
-    visuals.selection.bg_fill = ACCENT.gamma_multiply(0.3);
-    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, BORDER);
+    set_theme(ctx, egui::Theme::Dark);
+}
+
+fn set_theme(ctx: &egui::Context, theme: egui::Theme) {
+    let palette = Palette::new(theme == egui::Theme::Dark);
+    ctx.set_theme(theme);
+    let mut visuals = if theme == egui::Theme::Dark {
+        egui::Visuals::dark()
+    } else {
+        egui::Visuals::light()
+    };
+    visuals.panel_fill = palette.background;
+    visuals.window_fill = palette.panel;
+    visuals.extreme_bg_color = palette.background;
+    visuals.override_text_color = Some(palette.text);
+    visuals.selection.bg_fill = palette.accent.gamma_multiply(0.3);
+    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, palette.border);
     ctx.set_visuals(visuals);
     ctx.all_styles_mut(|style| {
         style.spacing.item_spacing = egui::vec2(6.0, 3.0);
@@ -1879,12 +2013,15 @@ mod tests {
         for shape in &output.shapes {
             if let egui::Shape::Text(text) = &shape.shape {
                 if text.galley.text() == "unchanged" {
-                    assert_eq!(text.fallback_color, MUTED);
+                    assert_eq!(text.fallback_color, Palette::new(true).muted);
                 }
             }
         }
         assert!(status_icon(&DirectoryEntryState::Same).is_none());
-        assert_eq!(state_color(&DirectoryEntryState::Same), MUTED);
+        assert_eq!(
+            state_color(&DirectoryEntryState::Same, Palette::new(true)),
+            Palette::new(true).muted
+        );
         output.drop_without_applying_deltas();
     }
 
@@ -1942,6 +2079,88 @@ mod tests {
                 output.drop_without_applying_deltas();
             }
             assert!(app.file_view.as_ref().unwrap().scroll_y > 0.0);
+        }
+    }
+
+    #[test]
+    fn back_button_sits_to_the_left_of_the_legend() {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut app = loaded_app();
+        app.file_view = Some(loaded_file_view());
+        let output = render(&mut app, &ctx, vec![]);
+        let back = text_centers(&output, "← Back")[0];
+        let legend = text_centers(&output, "Different  1")[0];
+        let title = text_centers(&output, "Versus")[0];
+        assert!(back.x < legend.x);
+        assert!((back.y - legend.y).abs() < 1.0);
+        assert!(back.y > title.y);
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn theme_toggle_updates_both_views_without_losing_state() {
+        for file_mode in [false, true] {
+            let ctx = egui::Context::default();
+            apply_theme(&ctx);
+            let mut app = loaded_app();
+            app.tree.as_mut().unwrap().expand_all();
+            app.selected = Some("assembly/model.step".into());
+            if file_mode {
+                app.file_view = Some(loaded_file_view());
+            }
+            let generation = app.scroll_generation;
+            for (action, expected_dark) in [
+                ("Switch to light mode", false),
+                ("Switch to dark mode", true),
+            ] {
+                let output = render(&mut app, &ctx, vec![]);
+                let toggle = ctx.read_response(egui::Id::new(action)).unwrap().rect;
+                assert!(
+                    toggle.right() <= 1190.0 && toggle.left() > 1100.0 && toggle.bottom() < 45.0
+                );
+                assert!(
+                    text_positions(&output, action).is_empty(),
+                    "Theme action must use only an icon"
+                );
+                output.drop_without_applying_deltas();
+                click(&mut app, &ctx, toggle.center());
+                let output = render(&mut app, &ctx, vec![]);
+                assert_eq!(ctx.theme() == egui::Theme::Dark, expected_dark);
+                assert_eq!(app.logo_texture.as_ref().unwrap().0, expected_dark);
+                assert_eq!(app.file_view.is_some(), file_mode);
+                assert!(app.tree.as_ref().unwrap().is_expanded("assembly"));
+                assert_eq!(
+                    app.selected.as_deref(),
+                    Some(std::path::Path::new("assembly/model.step"))
+                );
+                assert_eq!(app.scroll_generation, generation);
+                let neutral = if file_mode { "unchanged" } else { "model.step" };
+                let palette = Palette::new(expected_dark);
+                for shape in &output.shapes {
+                    if let egui::Shape::Text(text) = &shape.shape {
+                        if text.galley.text() == neutral {
+                            assert_eq!(text.fallback_color, palette.muted);
+                        }
+                    }
+                }
+                output.drop_without_applying_deltas();
+            }
+        }
+    }
+
+    #[test]
+    fn theme_changes_send_matching_icon_to_native_window() {
+        let ctx = egui::Context::default();
+        let mut app = loaded_app();
+        for theme in [egui::Theme::Dark, egui::Theme::Light, egui::Theme::Dark] {
+            set_theme(&ctx, theme);
+            let output = render(&mut app, &ctx, vec![]);
+            let expected = crate::logo::themed_icon(theme == egui::Theme::Dark);
+            assert!(output.viewport_output.values().flat_map(|viewport| &viewport.commands).any(|command| {
+                matches!(command,egui::ViewportCommand::Icon(Some(icon)) if icon.rgba == expected.rgba)
+            }), "Native window must receive the matching theme icon");
+            output.drop_without_applying_deltas();
         }
     }
 
