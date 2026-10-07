@@ -1863,6 +1863,19 @@ mod tests {
     use super::*;
     use versus::{DirectoryDiff, DirectoryEntry};
 
+    fn engineering_path(relative: &str) -> String {
+        // Windows needs a drive-qualified root to avoid resolving fixtures
+        // relative to the CI checkout. Build components with native separators.
+        let mut path = PathBuf::from(if cfg!(windows) {
+            r"C:\engineering"
+        } else {
+            "/engineering"
+        });
+        path.extend(relative.split('/'));
+        assert!(path.is_absolute());
+        path.display().to_string()
+    }
+
     fn fixture() -> FolderTree {
         FolderTree::from_diff(&DirectoryDiff {
             cancelled: false,
@@ -2123,11 +2136,13 @@ mod tests {
                 |ui| app.render(ui),
             );
             output.textures_delta.clear();
+            let selected_path = PathBuf::from("assembly").join("model.step");
+            let selected_text = selected_path.display().to_string();
             let (shape, text) = output
                 .shapes
                 .iter()
                 .find_map(|shape| match &shape.shape {
-                    egui::Shape::Text(text) if text.galley.text() == "assembly/model.step" => {
+                    egui::Shape::Text(text) if text.galley.text() == selected_text => {
                         Some((shape, text))
                     }
                     _ => None,
@@ -2152,7 +2167,7 @@ mod tests {
         let ctx = egui::Context::default();
         apply_theme(&ctx);
         let mut app = loaded_app();
-        app.paths = [String::new(), "/engineering/release/designs".into()];
+        app.paths = [String::new(), engineering_path("release/designs")];
         let original_paths = app.paths.clone();
         let mut requests = Vec::new();
         {
@@ -2174,7 +2189,7 @@ mod tests {
                     },
                 )
             };
-            for (side, path_text) in [(0, "Choose a folder"), (1, "/engineering/release/designs")] {
+            for (side, path_text) in [(0, "Choose a folder"), (1, original_paths[1].as_str())] {
                 for path_area in [true, false] {
                     let output = render_inputs(vec![]);
                     let target = if path_area {
@@ -2230,8 +2245,8 @@ mod tests {
         apply_theme(&ctx);
         let mut app = loaded_app();
         app.paths = [
-            format!("/engineering/{}release", "long-folder/".repeat(12)),
-            "/engineering/release".into(),
+            engineering_path(&format!("{}release", "long-folder/".repeat(12))),
+            engineering_path("release"),
         ];
         let output = render(&mut app, &ctx, vec![]);
         let mut centers = Vec::new();
@@ -2290,8 +2305,8 @@ mod tests {
         apply_theme(&ctx);
         let mut app = loaded_app();
         app.paths = [
-            "/engineering/current/designs".into(),
-            "/engineering/release/designs".into(),
+            engineering_path("current/designs"),
+            engineering_path("release/designs"),
         ];
         let output = render(&mut app, &ctx, vec![]);
         let legend = text_positions(&output, "Different  0")[0];
@@ -2314,7 +2329,7 @@ mod tests {
         let ctx = egui::Context::default();
         apply_theme(&ctx);
         let mut app = loaded_app();
-        app.paths[0] = format!("/engineering/{}/release", "long-folder-name/".repeat(12));
+        app.paths[0] = engineering_path(&format!("{}release", "long-folder-name/".repeat(12)));
         let mut output = ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(900.0, 650.0))),
