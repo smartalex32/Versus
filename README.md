@@ -1,19 +1,32 @@
 # Versus
 
-Versus is an offline engineering workspace for comparing two folders in linked,
-side-by-side trees. It uses operating-system filesystem paths, so
+Versus is an offline engineering workspace for comparing two files or two folders
+in side-by-side panes. It uses operating-system filesystem paths, so
 mapped drives and UNC paths on Windows and mounted network filesystems on Linux
 work through the same local APIs as other paths. Versus does not implement network
 authentication or make outbound network requests at runtime.
 
 ## Use
 
-Click the path area or folder icon in either pane header to select its folder.
-Selecting the second folder starts comparison automatically; the refresh icon at the upper right
-compares the same folders again. Each header shows the full selected path once as
-text, wrapping when needed, with LEFT/RIGHT and the browse button centered beside
-it. Local paths, mapped drives, UNC shares, and mounted Linux paths all use the
-same filesystem APIs; paths can be entered through the native folder dialog.
+Click the path area or browse icon in either pane header to select a file or
+folder. The first selection opens the corresponding workspace; choosing a
+matching type on the other side starts comparison automatically. Two files open
+the line comparison directly, with no Back button. A file and a folder show an
+incompatible-types explanation until you choose matching types. The comparison
+title appears after a selection and is centered beside the main logo.
+
+The **+** button at the right of the legend has the tooltip **New comparison**.
+It clears both selections, results, and pending work while keeping the theme.
+Both pane headers remain available for browsing in directly selected file views.
+Folder paths wrap to show the full path; file paths use a leading ellipsis with
+the full path on hover. LEFT/RIGHT and browse stay centered beside the path.
+The refresh icon at the upper right compares the same folders again.
+
+macOS offers a combined file/folder picker. On Linux, choose File or Folder before
+the native picker opens. On Windows, the initial native prompt uses Yes for a
+file, No for a folder, and Cancel to keep the current selection. Local paths,
+mapped drives, UNC shares, and mounted Linux paths all use the same filesystem
+APIs; paths can be entered through the native dialog.
 
 Click a folder in either tree to expand or collapse the corresponding relative
 path in both. Scrolling is linked, and a dash marks the empty position opposite
@@ -42,8 +55,8 @@ Files are compared by content, not timestamps. Symlinks are compared by their
 targets and are never recursively followed. Empty folders are included. Changing
 a path clears the prior result so it cannot be mistaken for the new selection.
 
-Double-click a regular file on either side to open a read-only, line-by-line file
-comparison. The same legend colors and icons identify changed, left-only, and
+When comparing folders, double-click a regular file on either side to open a
+read-only, line-by-line file comparison. The same legend colors and icons identify changed, left-only, and
 right-only lines; line numbers and empty placeholders keep both sides aligned.
 File headers use the same LEFT/RIGHT styling as folder headers. Long file paths
 show a leading ellipsis so the filename remains visible; hover for the full path.
@@ -55,8 +68,9 @@ focused file also opens it.
 File contents load in the background. Missing files show an empty side; binary or
 non-UTF-8 files, files above the 32 MiB text limit, and comparisons exceeding the
 two-second diff processing limit show an explanation. Type mismatches do not open
-folders or symlink targets. Read errors are shown in the file view, where Back remains available. Line endings are
-normalized for text comparison. Merge, editing, saving, and other workflows remain
+folders or symlink targets. Read errors are shown in the file view; Back remains
+available for files opened from a folder comparison. Line endings are normalized
+for text comparison. Merge, editing, saving, and other workflows remain
 deferred. Compared files and folders are never modified.
 
 The sun/moon icon at the upper right switches between light and dark themes in

@@ -2,11 +2,12 @@
 
 mod app;
 mod logo;
+mod selection;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_title("Versus — Folder Compare")
+            .with_title("Versus — Compare")
             .with_icon(logo::themed_icon(true))
             .with_inner_size([1200.0, 800.0])
             .with_min_inner_size([900.0, 650.0]),

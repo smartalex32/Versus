@@ -1,3 +1,4 @@
+use crate::selection::{self, SelectionMode, SourceKind};
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 use std::{
     path::PathBuf,
@@ -82,7 +83,19 @@ struct FileJob {
     cancellation: Arc<AtomicBool>,
 }
 
+struct SourceJob {
+    receiver: Receiver<Result<SourceKind, String>>,
+    cancellation: Arc<AtomicBool>,
+}
+
+impl Drop for SourceJob {
+    fn drop(&mut self) {
+        self.cancellation.store(true, Ordering::Relaxed);
+    }
+}
+
 struct FileView {
+    from_folders: bool,
     paths: [PathBuf; 2],
     sources: [Option<PathBuf>; 2],
     job: Option<FileJob>,
@@ -105,6 +118,9 @@ impl Drop for FileView {
 pub struct VersusApp {
     file_view: Option<FileView>,
     paths: [String; 2],
+    source_kinds: [Option<SourceKind>; 2],
+    source_jobs: [Option<SourceJob>; 2],
+    source_errors: [Option<String>; 2],
     roots: Option<[PathBuf; 2]>,
     tree: Option<FolderTree>,
     job: Option<ComparisonJob>,
@@ -122,11 +138,14 @@ impl Default for VersusApp {
         Self {
             file_view: None,
             paths: Default::default(),
+            source_kinds: [None; 2],
+            source_jobs: [None, None],
+            source_errors: [None, None],
             roots: None,
             tree: None,
             job: None,
             selected: None,
-            message: "Choose two folders to begin.".into(),
+            message: "Choose a file or folder on each side to begin.".into(),
             error: None,
             elapsed: None,
             counts: [0; 6],
@@ -153,8 +172,119 @@ impl VersusApp {
         self.error = None;
         self.elapsed = None;
         self.counts = [0; 6];
-        self.message = "Folder selection changed. Compare to load the trees.".into();
+        self.message = "Source selection changed.".into();
         self.scroll_generation += 1;
+    }
+
+    fn select_path(&mut self, side: usize, path: PathBuf) {
+        self.invalidate();
+        self.paths[side] = path.to_string_lossy().into_owned();
+        self.source_kinds[side] = None;
+        self.source_errors[side] = None;
+        self.source_jobs[side] = None;
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let worker_cancellation = cancellation.clone();
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            if !worker_cancellation.load(Ordering::Relaxed) {
+                let _ = sender.send(selection::classify_path(&path));
+            }
+        });
+        self.source_jobs[side] = Some(SourceJob {
+            receiver,
+            cancellation,
+        });
+        self.message = "Opening selected source…".into();
+    }
+
+    fn poll_sources(&mut self, ctx: &egui::Context) {
+        let mut changed = false;
+        for side in 0..2 {
+            let Some(job) = &self.source_jobs[side] else {
+                continue;
+            };
+            let result = match job.receiver.try_recv() {
+                Ok(result) => Some(result),
+                Err(TryRecvError::Disconnected) => {
+                    Some(Err("The source worker stopped unexpectedly.".into()))
+                }
+                Err(TryRecvError::Empty) => None,
+            };
+            if let Some(result) = result {
+                self.source_jobs[side] = None;
+                match result {
+                    Ok(kind) => self.source_kinds[side] = Some(kind),
+                    Err(error) => self.source_errors[side] = Some(error),
+                }
+                changed = true;
+            }
+        }
+        if changed {
+            self.start_selected_comparison();
+        }
+        if self.source_jobs.iter().any(Option::is_some) {
+            ctx.request_repaint_after(Duration::from_millis(60));
+        }
+    }
+
+    fn mode(&self) -> SelectionMode {
+        if self.file_view.is_some() {
+            SelectionMode::File
+        } else if self.tree.is_some() || self.job.is_some() {
+            SelectionMode::Folder
+        } else {
+            selection::selection_mode(self.source_kinds)
+        }
+    }
+
+    fn new_comparison(&mut self) {
+        self.invalidate();
+        self.paths = Default::default();
+        self.source_kinds = [None; 2];
+        self.source_jobs = [None, None];
+        self.source_errors = [None, None];
+        self.message = "Choose a file or folder on each side to begin.".into();
+    }
+
+    fn start_selected_comparison(&mut self) {
+        self.error = self.source_errors.iter().flatten().next().cloned();
+        if self.error.is_some() {
+            self.message = "Cannot open selected source. Choose another file or folder.".into();
+            return;
+        }
+        if self.source_jobs.iter().any(Option::is_some) {
+            return;
+        }
+        match selection::selection_mode(self.source_kinds) {
+            SelectionMode::File => {
+                let paths = self.paths.clone().map(|path| absolute_path(&path));
+                let sources = std::array::from_fn(|side| {
+                    (self.source_kinds[side] == Some(SourceKind::File)).then(|| paths[side].clone())
+                });
+                let ready = sources.iter().all(Option::is_some);
+                self.file_view = Some(Self::create_file_view(paths, sources, false, false, ready));
+                self.message = "Choose a file on the other side to compare.".into();
+            }
+            SelectionMode::Folder => {
+                if self
+                    .source_kinds
+                    .iter()
+                    .all(|kind| *kind == Some(SourceKind::Folder))
+                {
+                    self.start_comparison();
+                } else {
+                    self.message = "Choose a folder on the other side to compare.".into();
+                }
+            }
+            SelectionMode::Incompatible => {
+                self.message = if self.source_kinds.contains(&Some(SourceKind::Other)) {
+                    "No comparison can be made with this source type. Select regular files or folders."
+                } else {
+                    "No comparison can be made between a file and a folder. Select matching types."
+                }.into();
+            }
+            SelectionMode::Empty => {}
+        }
     }
 
     fn start_comparison(&mut self) {
@@ -233,20 +363,37 @@ impl VersusApp {
         let Some(roots) = &self.roots else { return };
         let paths = roots.clone().map(|root| root.join(&relative_path));
         let sources = std::array::from_fn(|side| present[side].then(|| paths[side].clone()));
+        self.file_view = Some(Self::create_file_view(
+            paths,
+            sources,
+            true,
+            type_mismatch,
+            true,
+        ));
+    }
+
+    fn create_file_view(
+        paths: [PathBuf; 2],
+        sources: [Option<PathBuf>; 2],
+        from_folders: bool,
+        type_mismatch: bool,
+        ready: bool,
+    ) -> FileView {
         let cancellation = Arc::new(AtomicBool::new(false));
         let worker_cancellation = cancellation.clone();
         let worker_sources = sources.clone();
         let (sender, receiver) = mpsc::channel();
-        if !type_mismatch {
+        if ready && !type_mismatch {
             std::thread::spawn(move || {
                 let result = load_file_comparison(&worker_sources, &worker_cancellation);
                 let _ = sender.send(result);
             });
         }
-        self.file_view = Some(FileView {
+        FileView {
+            from_folders,
             paths,
             sources,
-            job: (!type_mismatch).then_some(FileJob {
+            job: (ready && !type_mismatch).then_some(FileJob {
                 receiver,
                 cancellation,
             }),
@@ -256,7 +403,7 @@ impl VersusApp {
             scroll_y: 0.0,
             content_widths: [0.0; 2],
             counts: [0; 6],
-        });
+        }
     }
 
     fn poll_file_comparison(&mut self, ctx: &egui::Context) {
@@ -371,88 +518,94 @@ impl VersusApp {
 
     fn header(&mut self, ui: &mut egui::Ui) {
         let palette = Palette::for_context(ui.ctx());
-        ui.horizontal(|ui| {
-            if let Some((_, logo)) = &self.logo_texture {
-                ui.image((logo.id(), egui::vec2(28.0, 28.0)));
-            }
-            ui.label(RichText::new("Versus").size(18.0).strong());
-            ui.label(
-                RichText::new(if self.file_view.is_some() {
-                    "/  FILE COMPARE"
-                } else {
-                    "/  FOLDER COMPARE"
-                })
-                .monospace()
-                .size(10.0)
-                .color(palette.muted),
-            );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let dark = ui.visuals().dark_mode;
-                if icon_button(
-                    ui,
-                    if dark {
-                        ToolbarIcon::Sun
-                    } else {
-                        ToolbarIcon::Moon
-                    },
-                    true,
-                    if dark {
-                        "Switch to light mode"
-                    } else {
-                        "Switch to dark mode"
-                    },
-                )
-                .clicked()
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), 32.0),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                if let Some((_, logo)) = &self.logo_texture {
+                    ui.image((logo.id(), egui::vec2(28.0, 28.0)));
+                }
+                ui.label(RichText::new("Versus").size(18.0).strong());
+                if self.paths.iter().any(|path| !path.is_empty())
+                    || self.tree.is_some()
+                    || self.file_view.is_some()
                 {
-                    set_theme(
-                        ui.ctx(),
+                    let title = match self.mode() {
+                        SelectionMode::File => "File compare",
+                        SelectionMode::Folder => "Folder compare",
+                        _ => "Comparison",
+                    };
+                    ui.label(RichText::new(title).size(16.0).strong().color(palette.text));
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let dark = ui.visuals().dark_mode;
+                    if icon_button(
+                        ui,
                         if dark {
-                            egui::Theme::Light
+                            ToolbarIcon::Sun
                         } else {
-                            egui::Theme::Dark
+                            ToolbarIcon::Moon
                         },
-                    );
-                    ui.ctx().request_repaint();
-                }
-                if self.file_view.is_none() {
-                    self.controls(ui);
-                }
-            });
-        });
+                        true,
+                        if dark {
+                            "Switch to light mode"
+                        } else {
+                            "Switch to dark mode"
+                        },
+                    )
+                    .clicked()
+                    {
+                        set_theme(
+                            ui.ctx(),
+                            if dark {
+                                egui::Theme::Light
+                            } else {
+                                egui::Theme::Dark
+                            },
+                        );
+                        ui.ctx().request_repaint();
+                    }
+                    if self.mode() == SelectionMode::Folder {
+                        self.controls(ui);
+                    }
+                });
+            },
+        );
     }
 
     fn folder_inputs(&mut self, ui: &mut egui::Ui) {
+        let kinds = self.source_kinds;
         self.folder_inputs_with_picker(ui, |side, current_path| {
-            let mut dialog = rfd::FileDialog::new().set_title(if side == 0 {
-                "Select left folder"
-            } else {
-                "Select right folder"
-            });
-            if !current_path.is_empty() {
-                dialog = dialog.set_directory(current_path);
-            }
-            dialog.pick_folder()
+            selection::pick_path(side, current_path, kinds[side])
         });
     }
 
     fn folder_inputs_with_picker(
         &mut self,
         ui: &mut egui::Ui,
-        mut pick_folder: impl FnMut(usize, &str) -> Option<PathBuf>,
+        mut pick_source: impl FnMut(usize, &str) -> Option<PathBuf>,
     ) {
         let palette = Palette::for_context(ui.ctx());
         let full_paths = self.paths.clone().map(|path| {
             if path.is_empty() {
-                "Choose a folder".into()
+                "Choose a file or folder".into()
             } else {
                 absolute_path(&path).display().to_string()
             }
         });
         let width = ui.available_width();
         let path_width = (width / 2.0 - 84.0).max(40.0);
-        let galleys = full_paths.clone().map(|path| {
-            ui.painter()
-                .layout(path, FontId::monospace(11.0), palette.text, path_width)
+        let galleys = std::array::from_fn::<_, 2, _>(|side| {
+            if self.source_kinds[side] == Some(SourceKind::File) {
+                left_elided_path(ui.painter(), &full_paths[side], path_width, palette.text)
+            } else {
+                ui.painter().layout(
+                    full_paths[side].clone(),
+                    FontId::monospace(11.0),
+                    palette.text,
+                    path_width,
+                )
+            }
         });
         let height = galleys
             .iter()
@@ -460,7 +613,6 @@ impl VersusApp {
             .fold(24.0, f32::max)
             + 14.0;
         let (header, _) = ui.allocate_exact_size(egui::vec2(width, height), Sense::hover());
-        let mut picked = false;
         for (side, half) in split_rect(header).into_iter().enumerate() {
             let rect = half.shrink(7.0);
             let painter = ui.painter().with_clip_rect(rect);
@@ -480,7 +632,7 @@ impl VersusApp {
                 )
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                 .on_hover_text(format!(
-                    "{}\nClick to browse for a folder",
+                    "{}\nClick to browse for a file or folder",
                     full_paths[side]
                 ));
             path_response.widget_info(|| {
@@ -488,9 +640,9 @@ impl VersusApp {
                     egui::WidgetType::Button,
                     true,
                     if side == 0 {
-                        "Browse left folder path"
+                        "Browse left file or folder path"
                     } else {
-                        "Browse right folder path"
+                        "Browse right file or folder path"
                     },
                 )
             });
@@ -508,22 +660,22 @@ impl VersusApp {
                 ToolbarIcon::Browse,
                 true,
                 if side == 0 {
-                    "Browse left folder"
+                    "Browse left file or folder"
                 } else {
-                    "Browse right folder"
+                    "Browse right file or folder"
                 },
             );
             if browse.clicked() || path_response.clicked() {
-                if let Some(path) = pick_folder(side, &self.paths[side]) {
-                    self.paths[side] = path.to_string_lossy().into_owned();
-                    picked = true;
+                if let Some(path) = pick_source(side, &self.paths[side]) {
+                    self.select_path(side, path);
+                    ui.ctx().request_repaint();
                 }
             }
         }
-        if picked {
-            self.invalidate();
-            self.start_comparison();
-        }
+        ui.painter().line_segment(
+            [header.center_top(), header.center_bottom()],
+            Stroke::new(1.0, palette.border),
+        );
     }
 
     fn controls(&mut self, ui: &mut egui::Ui) {
@@ -540,7 +692,9 @@ impl VersusApp {
         if icon_button(ui, ToolbarIcon::Expand, self.tree.is_some(), "Expand all").clicked() {
             self.tree.as_mut().unwrap().expand_all();
         }
-        let ready = self.paths.iter().all(|path| !path.trim().is_empty());
+        let ready = self.paths.iter().all(|path| !path.trim().is_empty())
+            && self.source_jobs.iter().all(Option::is_none)
+            && self.source_errors.iter().all(Option::is_none);
         if icon_button(
             ui,
             ToolbarIcon::Refresh,
@@ -577,72 +731,105 @@ impl VersusApp {
 
     fn legend(&mut self, ui: &mut egui::Ui) {
         let palette = Palette::for_context(ui.ctx());
-        let back = self.file_view.is_some();
+        let back = self
+            .file_view
+            .as_ref()
+            .is_some_and(|view| view.from_folders);
         let counts = if let Some(view) = &self.file_view {
             view.comparison.as_ref().map(|_| view.counts)
         } else {
             self.tree.as_ref().map(|_| self.counts)
         };
-        ui.horizontal_wrapped(|ui| {
-            if back && icon_button(ui, ToolbarIcon::Back, true, "Back to folders").clicked() {
-                self.file_view = None;
-            }
-            for (index, icon) in [
-                StatusIcon::Different,
-                StatusIcon::LeftOnly,
-                StatusIcon::RightOnly,
-                StatusIcon::TypeMismatch,
-                StatusIcon::Error,
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                let (rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::hover());
-                paint_status_icon(ui.painter(), rect.center(), icon);
-                let label = counts.map_or_else(
-                    || icon.label().into(),
-                    |counts| format!("{}  {}", icon.label(), counts[index + 1]),
-                );
-                ui.label(RichText::new(label).size(10.0).color(icon.color(palette)));
-                ui.add_space(5.0);
+        ui.horizontal(|ui| {
+            let legend_width = (ui.available_width() - 32.0).max(0.0);
+            ui.allocate_ui_with_layout(
+                egui::vec2(legend_width, 24.0),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        if back
+                            && icon_button(ui, ToolbarIcon::Back, true, "Back to folders").clicked()
+                        {
+                            self.file_view = None;
+                        }
+                        for (index, icon) in [
+                            StatusIcon::Different,
+                            StatusIcon::LeftOnly,
+                            StatusIcon::RightOnly,
+                            StatusIcon::TypeMismatch,
+                            StatusIcon::Error,
+                        ]
+                        .into_iter()
+                        .enumerate()
+                        {
+                            let (rect, _) =
+                                ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::hover());
+                            paint_status_icon(ui.painter(), rect.center(), icon);
+                            let label = counts.map_or_else(
+                                || icon.label().into(),
+                                |counts| format!("{}  {}", icon.label(), counts[index + 1]),
+                            );
+                            ui.label(RichText::new(label).size(10.0).color(icon.color(palette)));
+                            ui.add_space(5.0);
+                        }
+                    });
+                },
+            );
+            if icon_button(ui, ToolbarIcon::New, true, "New comparison").clicked() {
+                self.new_comparison();
+                ui.ctx().request_repaint();
             }
         });
     }
 
     fn file_area(&mut self, ui: &mut egui::Ui) {
         let palette = Palette::for_context(ui.ctx());
-        let view = self.file_view.as_mut().unwrap();
+        let from_folders = self.file_view.as_ref().unwrap().from_folders;
         egui::Frame::default()
             .fill(palette.panel)
             .stroke(Stroke::new(1.0, palette.border))
             .corner_radius(6)
             .show(ui, |ui| {
-                let (header, _) =
-                    ui.allocate_exact_size(egui::vec2(ui.available_width(), 38.0), Sense::hover());
-                for (side, half) in split_rect(header).into_iter().enumerate() {
-                    let rect = half.shrink(7.0);
-                    let painter = ui.painter().with_clip_rect(rect);
-                    paint_side_label(&painter, rect, side, palette);
-                    let path = view.paths[side].display().to_string();
-                    let path_rect = Rect::from_min_max(rect.min + egui::vec2(40.0, 0.0), rect.max);
-                    let galley = left_elided_path(&painter, &path, path_rect.width(), palette.text);
-                    let position =
-                        egui::pos2(path_rect.left(), rect.center().y - galley.size().y / 2.0);
-                    painter.galley(position, galley, palette.text);
-                    ui.interact(path_rect, ui.id().with(("file-path", side)), Sense::hover())
-                        .on_hover_text(path);
+                ui.set_min_height((ui.available_height() - 2.0).max(0.0));
+                if !from_folders {
+                    self.folder_inputs(ui);
                 }
-                ui.painter().line_segment(
-                    [header.center_top(), header.center_bottom()],
-                    Stroke::new(1.0, palette.border),
-                );
+                let Some(view) = self.file_view.as_mut() else {
+                    ui.label("Opening selected source…");
+                    return;
+                };
+                if from_folders {
+                    let (header, _) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), 38.0),
+                        Sense::hover(),
+                    );
+                    for (side, half) in split_rect(header).into_iter().enumerate() {
+                        let rect = half.shrink(7.0);
+                        let painter = ui.painter().with_clip_rect(rect);
+                        paint_side_label(&painter, rect, side, palette);
+                        let path = view.paths[side].display().to_string();
+                        let path_rect =
+                            Rect::from_min_max(rect.min + egui::vec2(40.0, 0.0), rect.max);
+                        let galley =
+                            left_elided_path(&painter, &path, path_rect.width(), palette.text);
+                        let position =
+                            egui::pos2(path_rect.left(), rect.center().y - galley.size().y / 2.0);
+                        painter.galley(position, galley, palette.text);
+                        ui.interact(path_rect, ui.id().with(("file-path", side)), Sense::hover())
+                            .on_hover_text(path);
+                    }
+                    ui.painter().line_segment(
+                        [header.center_top(), header.center_bottom()],
+                        Stroke::new(1.0, palette.border),
+                    );
+                }
                 let (divider, _) =
                     ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), Sense::hover());
                 ui.painter().line_segment(
                     [divider.left_center(), divider.right_center()],
                     Stroke::new(1.0, palette.border),
                 );
-                if view.sources.iter().any(Option::is_none) {
+                if from_folders && view.sources.iter().any(Option::is_none) {
                     ui.columns(2, |columns| {
                         for (side, column) in columns.iter_mut().enumerate() {
                             if view.sources[side].is_none() {
@@ -664,8 +851,12 @@ impl VersusApp {
                 }
                 let Some(comparison) = &view.comparison else {
                     ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label("Loading file comparison…");
+                        if view.job.is_some() {
+                            ui.spinner();
+                            ui.label("Loading file comparison…");
+                        } else {
+                            ui.label("Choose a file on the other side to compare.");
+                        }
                     });
                     return;
                 };
@@ -755,13 +946,6 @@ impl VersusApp {
                     ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), Sense::hover());
                 ui.painter().line_segment(
                     [divider.left_center(), divider.right_center()],
-                    Stroke::new(1.0, palette.border),
-                );
-                ui.painter().line_segment(
-                    [
-                        egui::pos2(divider.center().x, header_top),
-                        divider.center_bottom(),
-                    ],
                     Stroke::new(1.0, palette.border),
                 );
                 let body_height = (height - header_height - 2.0).max(60.0);
@@ -900,20 +1084,20 @@ impl VersusApp {
                         self.selected = Some(path);
                     }
                 } else {
-                    empty_display(
-                        ui,
-                        body_height,
-                        if self.job.is_some() {
-                            "Comparing folders…"
-                        } else {
-                            "Two folders. One clear view."
-                        },
-                        if self.job.is_some() {
-                            "The trees will appear when the comparison finishes."
-                        } else {
-                            "Choose a folder on each side to see what matches and what changed."
-                        },
-                    );
+                    let title = if self.job.is_some() {
+                        "Comparing folders…"
+                    } else if self.source_jobs.iter().any(Option::is_some) {
+                        "Opening selected source…"
+                    } else if self.mode() == SelectionMode::Incompatible {
+                        "Incompatible source types"
+                    } else if self.error.is_some() {
+                        "Cannot open selected source"
+                    } else if self.mode() == SelectionMode::Folder {
+                        "Choose another folder"
+                    } else {
+                        "Choose files or folders to compare"
+                    };
+                    empty_display(ui, body_height, title, &self.message);
                 }
             });
         if let Some((path, present, type_mismatch)) = open {
@@ -967,6 +1151,7 @@ impl eframe::App for VersusApp {
             .to_normalized_gamma_f32()
     }
     fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        self.poll_sources(ctx);
         self.poll_comparison(ctx);
         self.poll_file_comparison(ctx);
     }
@@ -1213,6 +1398,7 @@ fn paint_status_icon(painter: &egui::Painter, center: Pos2, icon: StatusIcon) {
 
 #[derive(Clone, Copy)]
 enum ToolbarIcon {
+    New,
     Back,
     Refresh,
     Expand,
@@ -1244,6 +1430,16 @@ fn icon_button(ui: &mut egui::Ui, icon: ToolbarIcon, enabled: bool, label: &str)
         let point = |x, y| center + egui::vec2(x, y);
         let stroke = Stroke::new(1.4, color);
         match icon {
+            ToolbarIcon::New => {
+                ui.painter().line_segment(
+                    [center - egui::vec2(6.0, 0.0), center + egui::vec2(6.0, 0.0)],
+                    stroke,
+                );
+                ui.painter().line_segment(
+                    [center - egui::vec2(0.0, 6.0), center + egui::vec2(0.0, 6.0)],
+                    stroke,
+                );
+            }
             ToolbarIcon::Back => {
                 ui.painter()
                     .line_segment([point(6.0, 0.0), point(-6.0, 0.0)], stroke);
@@ -1738,7 +1934,7 @@ mod tests {
                 .iter()
                 .all(|rect| rect.right() <= 890.0 && rect.left() > 700.0 && rect.bottom() <= 45.0)
         );
-        for text in ["Choose two folders to begin."] {
+        for text in ["Choose a file or folder on each side to begin."] {
             let positions = text_positions(&output, text);
             assert!(!positions.is_empty(), "Missing {text}");
             assert!(
@@ -1853,16 +2049,19 @@ mod tests {
                     },
                 )
             };
-            for (side, path_text) in [(0, "Choose a folder"), (1, "/engineering/release/designs")] {
+            for (side, path_text) in [
+                (0, "Choose a file or folder"),
+                (1, "/engineering/release/designs"),
+            ] {
                 for path_area in [true, false] {
                     let output = render_inputs(vec![]);
                     let target = if path_area {
                         text_centers(&output, path_text)[0]
                     } else {
                         ctx.read_response(egui::Id::new(if side == 0 {
-                            "Browse left folder"
+                            "Browse left file or folder"
                         } else {
-                            "Browse right folder"
+                            "Browse right file or folder"
                         }))
                         .unwrap()
                         .rect
@@ -1920,9 +2119,9 @@ mod tests {
             let side_label = text_centers(&output, label)[0];
             let browse = ctx
                 .read_response(egui::Id::new(if side == 0 {
-                    "Browse left folder"
+                    "Browse left file or folder"
                 } else {
-                    "Browse right folder"
+                    "Browse right file or folder"
                 }))
                 .unwrap();
             assert_eq!(side_label.y, paths[0].y);
@@ -2069,6 +2268,7 @@ mod tests {
 
     fn loaded_file_view() -> FileView {
         FileView {
+            from_folders: true,
             paths: ["/left/model.step".into(), "/right/model.step".into()],
             sources: [
                 Some("/left/model.step".into()),
@@ -2551,5 +2751,334 @@ mod tests {
         assert!(app.error.as_ref().unwrap().contains("worker stopped"));
         assert!(app.tree.is_some());
         assert_eq!(app.roots.as_ref().unwrap()[0], PathBuf::from("left"));
+    }
+
+    struct SourceFixture(PathBuf);
+
+    impl SourceFixture {
+        fn new() -> Self {
+            let unique = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!("versus-source-ui-{unique}"));
+            std::fs::create_dir_all(root.join("left")).unwrap();
+            std::fs::create_dir_all(root.join("right")).unwrap();
+            std::fs::write(root.join("left/model.txt"), "common\nold\n").unwrap();
+            std::fs::write(root.join("right/model.txt"), "common\nnew\n").unwrap();
+            Self(root)
+        }
+        fn path(&self, relative: &str) -> PathBuf {
+            self.0.join(relative)
+        }
+    }
+
+    impl Drop for SourceFixture {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    fn settle_sources(app: &mut VersusApp, ctx: &egui::Context) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            app.poll_sources(ctx);
+            app.poll_comparison(ctx);
+            app.poll_file_comparison(ctx);
+            if app.source_jobs.iter().all(Option::is_none)
+                && app.job.is_none()
+                && app.file_view.as_ref().is_none_or(|view| view.job.is_none())
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "Comparison worker did not complete"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn browse_results_replace_folder_state_and_open_the_file_workspace() {
+        let sources = SourceFixture::new();
+        for (side, path_area) in [(0, false), (1, true)] {
+            let ctx = egui::Context::default();
+            let mut app = loaded_app();
+            let picked = sources.path(if side == 0 {
+                "left/model.txt"
+            } else {
+                "right/model.txt"
+            });
+            let mut requests = Vec::new();
+            {
+                let mut draw = |events| {
+                    ctx.run_ui(
+                        egui::RawInput {
+                            events,
+                            ..Default::default()
+                        },
+                        |ui| {
+                            app.folder_inputs_with_picker(ui, |requested_side, _| {
+                                requests.push(requested_side);
+                                Some(picked.clone())
+                            })
+                        },
+                    )
+                };
+                let output = draw(vec![]);
+                let target = if path_area {
+                    text_centers(&output, "Choose a file or folder")[side]
+                } else {
+                    ctx.read_response(egui::Id::new("Browse left file or folder"))
+                        .unwrap()
+                        .rect
+                        .center()
+                };
+                output.drop_without_applying_deltas();
+                for pressed in [true, false] {
+                    draw(vec![
+                        egui::Event::PointerMoved(target),
+                        egui::Event::PointerButton {
+                            pos: target,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: Default::default(),
+                        },
+                    ])
+                    .drop_without_applying_deltas();
+                }
+            }
+            assert_eq!(requests, vec![side]);
+            assert_eq!(app.paths[side], picked.display().to_string());
+            assert!(app.tree.is_none() && app.roots.is_none());
+            settle_sources(&mut app, &ctx);
+            assert_eq!(app.mode(), SelectionMode::File);
+            assert!(!app.file_view.as_ref().unwrap().from_folders);
+        }
+    }
+
+    #[test]
+    fn selected_sources_switch_views_and_compare_only_matching_types() {
+        let sources = SourceFixture::new();
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut app = VersusApp::default();
+        // Starting on the right must work just as starting on the left does.
+        app.select_path(1, sources.path("right/model.txt"));
+        settle_sources(&mut app, &ctx);
+        assert_eq!(app.mode(), SelectionMode::File);
+        let view = app.file_view.as_ref().unwrap();
+        assert!(!view.from_folders && view.comparison.is_none() && view.job.is_none());
+        let output = render(&mut app, &ctx, vec![]);
+        assert_eq!(text_positions(&output, "File compare").len(), 1);
+        assert!(
+            ctx.read_response(egui::Id::new("Back to folders"))
+                .is_none()
+        );
+        assert!(
+            ctx.read_response(egui::Id::new("Browse left file or folder"))
+                .is_some()
+        );
+        assert!(
+            ctx.read_response(egui::Id::new("Browse right file or folder"))
+                .is_some()
+        );
+        output.drop_without_applying_deltas();
+        app.select_path(0, sources.path("left/model.txt"));
+        settle_sources(&mut app, &ctx);
+        assert!(app.file_view.as_ref().unwrap().comparison.is_some());
+        assert_eq!(app.file_view.as_ref().unwrap().counts[1], 1);
+        let output = render(&mut app, &ctx, vec![]);
+        assert_eq!(text_positions(&output, "old").len(), 1);
+        assert_eq!(text_positions(&output, "new").len(), 1);
+        assert!(
+            ctx.read_response(egui::Id::new("Back to folders"))
+                .is_none()
+        );
+        output.drop_without_applying_deltas();
+        // Replacing the right file with a folder rejects the mixed pair.
+        app.select_path(1, sources.path("right"));
+        settle_sources(&mut app, &ctx);
+        assert_eq!(app.mode(), SelectionMode::Incompatible);
+        assert!(app.file_view.is_none() && app.tree.is_none() && app.job.is_none());
+        let output = render(&mut app, &ctx, vec![]);
+        assert_eq!(
+            text_positions(&output, "Incompatible source types").len(),
+            1
+        );
+        assert!(text_positions(&output, &app.message).len() >= 1);
+        assert!(
+            app.message
+                .contains("No comparison can be made between a file and a folder")
+        );
+        output.drop_without_applying_deltas();
+        // Replacing the left side with a folder restores automatic comparison.
+        app.select_path(0, sources.path("left"));
+        settle_sources(&mut app, &ctx);
+        assert_eq!(app.mode(), SelectionMode::Folder);
+        assert!(app.file_view.is_none() && app.tree.is_some());
+        assert_eq!(app.counts[1], 1);
+    }
+
+    #[test]
+    fn first_folder_selection_opens_folder_workspace_without_comparing() {
+        let sources = SourceFixture::new();
+        let ctx = egui::Context::default();
+        let mut app = VersusApp::default();
+        app.select_path(0, sources.path("left"));
+        settle_sources(&mut app, &ctx);
+        assert_eq!(app.mode(), SelectionMode::Folder);
+        assert!(app.tree.is_none() && app.job.is_none() && app.file_view.is_none());
+        let output = render(&mut app, &ctx, vec![]);
+        assert_eq!(text_positions(&output, "Folder compare").len(), 1);
+        assert_eq!(text_positions(&output, "Choose another folder").len(), 1);
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn comparison_title_is_hidden_until_selection_and_centered_with_logo() {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut app = VersusApp::default();
+        let output = render(&mut app, &ctx, vec![]);
+        assert!(text_positions(&output, "Folder compare").is_empty());
+        assert!(text_positions(&output, "File compare").is_empty());
+        assert!(text_positions(&output, "Comparison").is_empty());
+        output.drop_without_applying_deltas();
+        app.paths[0] = "/selected/folder".into();
+        app.source_kinds[0] = Some(SourceKind::Folder);
+        let output = render(&mut app, &ctx, vec![]);
+        let title = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text() == "Folder compare" => Some(text),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(title.galley.job.sections[0].format.font_id.size, 16.0);
+        let texture = app.logo_texture.as_ref().unwrap().1.id();
+        let logo = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Rect(rect) if rect.fill_texture_id() == texture => Some(rect.rect),
+                _ => None,
+            })
+            .unwrap();
+        let title_center = title.pos.y + title.galley.size().y / 2.0;
+        assert!((title_center - logo.center().y).abs() < 1.0);
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn new_comparison_button_clears_both_sides_and_preserves_theme() {
+        let ctx = egui::Context::default();
+        set_theme(&ctx, egui::Theme::Light);
+        let mut app = VersusApp::default();
+        app.paths = ["/left/model.step".into(), "/right/model.step".into()];
+        app.source_kinds = [Some(SourceKind::File); 2];
+        let mut view = loaded_file_view();
+        view.from_folders = false;
+        app.file_view = Some(view);
+        let output = render(&mut app, &ctx, vec![]);
+        let new = ctx
+            .read_response(egui::Id::new("New comparison"))
+            .unwrap()
+            .rect;
+        let legend = text_centers(&output, "Different  1")[0];
+        assert!(new.center().x > legend.x);
+        assert!((new.center().y - legend.y).abs() < 6.0);
+        output.drop_without_applying_deltas();
+        click(&mut app, &ctx, new.center());
+        assert_eq!(app.paths, [String::new(), String::new()]);
+        assert_eq!(app.mode(), SelectionMode::Empty);
+        assert!(app.file_view.is_none() && app.tree.is_none() && app.roots.is_none());
+        assert_eq!(ctx.theme(), egui::Theme::Light);
+        let output = render(&mut app, &ctx, vec![]);
+        assert!(text_positions(&output, "File compare").is_empty());
+        assert_eq!(text_positions(&output, "Choose a file or folder").len(), 2);
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn new_comparison_cancels_all_jobs_and_discards_late_results() {
+        let mut app = loaded_app();
+        let folder_sender = attach_job(&mut app);
+        let folder_flag = app.job.as_ref().unwrap().cancellation.clone();
+        let (file_sender, file_receiver) = mpsc::channel();
+        let file_flag = Arc::new(AtomicBool::new(false));
+        let mut view = loaded_file_view();
+        view.job = Some(FileJob {
+            receiver: file_receiver,
+            cancellation: file_flag.clone(),
+        });
+        app.file_view = Some(view);
+        let (source_sender, source_receiver) = mpsc::channel();
+        let source_flag = Arc::new(AtomicBool::new(false));
+        app.source_jobs[0] = Some(SourceJob {
+            receiver: source_receiver,
+            cancellation: source_flag.clone(),
+        });
+        app.source_errors[1] = Some("old error".into());
+        app.paths = ["/old/left".into(), "/old/right".into()];
+        app.source_kinds = [Some(SourceKind::Folder); 2];
+        app.new_comparison();
+        for flag in [folder_flag, file_flag, source_flag] {
+            assert!(flag.load(Ordering::Relaxed));
+        }
+        assert!(folder_sender.send(Ok(fixture())).is_err());
+        assert!(file_sender.send(Ok(None)).is_err());
+        assert!(source_sender.send(Ok(SourceKind::File)).is_err());
+        settle_sources(&mut app, &egui::Context::default());
+        assert_eq!(app.mode(), SelectionMode::Empty);
+        assert_eq!(app.source_kinds, [None; 2]);
+        assert!(app.source_errors.iter().all(Option::is_none));
+        assert!(app.error.is_none());
+    }
+
+    #[test]
+    fn replacing_a_source_discards_pending_classification_and_prior_results() {
+        let sources = SourceFixture::new();
+        let mut app = loaded_app();
+        let (sender, receiver) = mpsc::channel();
+        let cancellation = Arc::new(AtomicBool::new(false));
+        app.source_jobs[0] = Some(SourceJob {
+            receiver,
+            cancellation: cancellation.clone(),
+        });
+        app.select_path(0, sources.path("left/model.txt"));
+        assert!(cancellation.load(Ordering::Relaxed));
+        assert!(sender.send(Ok(SourceKind::Folder)).is_err());
+        assert!(app.tree.is_none() && app.roots.is_none());
+        settle_sources(&mut app, &egui::Context::default());
+        assert_eq!(app.source_kinds[0], Some(SourceKind::File));
+        assert_eq!(app.mode(), SelectionMode::File);
+    }
+
+    #[test]
+    fn unavailable_selected_source_shows_error_and_keeps_browse_available() {
+        let sources = SourceFixture::new();
+        let ctx = egui::Context::default();
+        let mut app = loaded_app();
+        app.select_path(0, sources.path("missing"));
+        settle_sources(&mut app, &ctx);
+        assert!(app.error.as_deref().unwrap().contains("Cannot inspect"));
+        assert!(app.tree.is_none() && app.file_view.is_none());
+        let output = render(&mut app, &ctx, vec![]);
+        assert_eq!(
+            text_positions(&output, "Cannot open selected source").len(),
+            1
+        );
+        assert!(
+            ctx.read_response(egui::Id::new("Browse left file or folder"))
+                .is_some()
+        );
+        output.drop_without_applying_deltas();
+        app.select_path(0, sources.path("left"));
+        settle_sources(&mut app, &ctx);
+        assert!(app.error.is_none());
+        assert_eq!(app.mode(), SelectionMode::Folder);
     }
 }

@@ -2,9 +2,11 @@
 
 ## Purpose
 
-Versus is an offline native engineering workspace for two-folder comparison on
-Windows and Linux. Linked folder trees open read-only, aligned text comparisons
-on file double-click; Back preserves folder-view state. Merge primitives remain
+Versus is an offline native engineering workspace for file or folder comparison
+on Windows and Linux. Native selectors choose either source type; matching pairs
+compare automatically and mixed types show an explanation. Linked folder trees
+open read-only, aligned text comparisons on file double-click; Back preserves
+folder-view state and is omitted for directly selected files. Merge primitives remain
 in the core for future work. Runtime behavior must
 not rely on Internet services, telemetry, automatic updates, a managed runtime, or
 background services. Network-mounted paths are handled through normal filesystem
@@ -17,6 +19,8 @@ APIs and must fail cleanly when unavailable.
 - `src/app.rs` renders linked folder trees and file comparison panes, with
   cancellable background loading; `src/core/` owns filesystem comparison,
   text diff, merge, and saving. The core library is independent from UI rendering.
+- `src/selection.rs` classifies sources without following symlinks and configures
+  native file/folder pickers. New comparison clears both sources and pending work.
 - `src/core/tree.rs` builds aligned folder trees with per-side types, ancestor
   status aggregation, and shared expansion state.
 - `src/core/file_view.rs` loads bounded text inputs and aligns numbered line rows.
