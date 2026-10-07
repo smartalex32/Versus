@@ -9,6 +9,7 @@ use std::{
 pub struct TreeSide {
     pub exists: bool,
     pub kind: Option<DirectoryEntryKind>,
+    pub size: Option<u64>,
 }
 
 impl TreeSide {
@@ -16,6 +17,7 @@ impl TreeSide {
         Self {
             exists: false,
             kind: None,
+            size: None,
         }
     }
 
@@ -23,6 +25,7 @@ impl TreeSide {
         Self {
             exists: true,
             kind: Some(DirectoryEntryKind::Directory),
+            size: None,
         }
     }
 }
@@ -69,8 +72,28 @@ impl FolderTree {
         for entry in &diff.entries {
             draft.insert(entry);
         }
+        let mut root = draft.finish(PathBuf::new(), OsString::new());
+        // The compared roots are valid directories even though they are not part
+        // of DirectoryDiff.entries. Exposing their totals keeps the tree model
+        // internally consistent, including for empty folders.
+        let left_had_root_error = root.left.exists && root.left.kind.is_none();
+        let right_had_root_error = root.right.exists && root.right.kind.is_none();
+        root.left = TreeSide {
+            exists: true,
+            kind: Some(DirectoryEntryKind::Directory),
+            size: (!left_had_root_error)
+                .then(|| aggregate_child_size(&root.children, |child| &child.left))
+                .flatten(),
+        };
+        root.right = TreeSide {
+            exists: true,
+            kind: Some(DirectoryEntryKind::Directory),
+            size: (!right_had_root_error)
+                .then(|| aggregate_child_size(&root.children, |child| &child.right))
+                .flatten(),
+        };
         Self {
-            root: draft.finish(PathBuf::new(), OsString::new()),
+            root,
             expanded: BTreeSet::new(),
         }
     }
@@ -131,6 +154,26 @@ impl FolderTree {
             }
         }
     }
+}
+
+fn aggregate_child_size(
+    children: &[TreeNode],
+    side: impl Fn(&TreeNode) -> &TreeSide,
+) -> Option<u64> {
+    children.iter().try_fold(0_u64, |total, child| {
+        let side = side(child);
+        match (&side.kind, side.size) {
+            (Some(DirectoryEntryKind::File | DirectoryEntryKind::Directory), Some(size)) => {
+                total.checked_add(size)
+            }
+            (Some(DirectoryEntryKind::File | DirectoryEntryKind::Directory), None) | (None, _)
+                if side.exists =>
+            {
+                None
+            }
+            _ => Some(total),
+        }
+    })
 }
 
 fn collect_expandable_paths(node: &TreeNode, paths: &mut Vec<PathBuf>) {
@@ -195,10 +238,12 @@ fn sides_from_entry(entry: &DirectoryEntry) -> (TreeSide, TreeSide, Option<Direc
         TreeSide {
             exists: entry.left_exists,
             kind: entry.left_kind.clone(),
+            size: entry.left_size,
         },
         TreeSide {
             exists: entry.right_exists,
             kind: entry.right_kind.clone(),
+            size: entry.right_size,
         },
         Some(entry.state.clone()),
     )

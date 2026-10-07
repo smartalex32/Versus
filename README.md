@@ -8,25 +8,37 @@ authentication or make outbound network requests at runtime.
 
 ## Use
 
-Choose **Browse…** on each side, or enter/paste both folder paths and choose
-**Compare folders**. Selecting the second folder with the picker starts comparison
+Use the folder icon in each pane header, or enter/paste both folder paths and use
+the refresh icon at the upper right to compare them. Selecting the second folder
+with the picker starts comparison
 automatically; pressing Enter in a path field also starts comparison when both
-paths are supplied. Local paths, mapped drives, UNC shares, and mounted Linux
-paths all use the same filesystem APIs.
+paths are supplied. The full selected path is shown above each tree, wrapping when
+needed. Local paths, mapped drives, UNC shares, and mounted Linux paths all use the
+same filesystem APIs.
 
 Click a folder in either tree to expand or collapse the corresponding relative
 path in both. Scrolling is linked, and a dash marks the empty position opposite
 a one-sided item so matching paths stay aligned. **Expand all** and **Collapse
-all** control both trees. Tab focuses tree rows; Enter or Space toggles a folder,
-and the left/right arrow keys collapse/expand a focused folder.
+all** are the double-chevron icons at the upper right and control both trees. Hover
+over an action icon for its label. Tab focuses tree rows; Enter or Space toggles a
+folder, and the left/right arrow keys collapse/expand a focused folder.
 
-- Green: identical entries.
-- Amber: changed files or shared folders containing differences.
-- Cyan: files and folders present only on the left.
-- Violet: files and folders present only on the right.
-- Red: different entry types or a filesystem read error. Hover for details.
+- Green checkmark: identical entries.
+- Amber unequal sign: changed files or shared folders containing differences.
+- Cyan left arrow: files and folders present only on the left.
+- Violet right arrow: files and folders present only on the right.
+- Red boxed cross: different entry types.
+- Red warning triangle: a filesystem read error. Hover for details.
 
-Comparison runs in the background with **Cancel** and **Refresh comparison**.
+The legend sits above the two panes; the same icons replace status words in each
+compact tree row. File sizes and recursive folder totals appear beside the status
+icon, independently for each side, using binary units (KiB, MiB, and so on). Sizes
+reflect filesystem metadata collected during the scan. Folder
+totals count regular-file bytes and exclude symlink targets. Empty folders show
+zero bytes; unknown sizes or incomplete totals show a dash. Hover for status and
+error details. The cursor becomes a pointer over files and folders.
+
+Comparison runs in the background with refresh and cancel icons in the header.
 Files are compared by content, not timestamps. Symlinks are compared by their
 targets and are never recursively followed. Empty folders are included. Changing
 a path clears the prior result so it cannot be mistaken for the new selection.

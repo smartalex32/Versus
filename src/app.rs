@@ -24,7 +24,7 @@ const LEFT_ONLY: Color32 = Color32::from_rgb(94, 211, 221);
 const RIGHT_ONLY: Color32 = Color32::from_rgb(189, 157, 255);
 const ERROR: Color32 = Color32::from_rgb(255, 127, 137);
 const SAME: Color32 = Color32::from_rgb(133, 187, 157);
-const ROW_HEIGHT: f32 = 30.0;
+const ROW_HEIGHT: f32 = 22.0;
 
 struct ComparisonJob {
     receiver: Receiver<Result<FolderTree, CompareError>>,
@@ -42,7 +42,8 @@ pub struct VersusApp {
     message: String,
     error: Option<String>,
     elapsed: Option<Duration>,
-    counts: [usize; 5],
+    counts: [usize; 6],
+    logo_texture: Option<egui::TextureHandle>,
     scroll_generation: u64,
 }
 
@@ -57,7 +58,8 @@ impl Default for VersusApp {
             message: "Choose two folders to begin.".into(),
             error: None,
             elapsed: None,
-            counts: [0; 5],
+            counts: [0; 6],
+            logo_texture: None,
             scroll_generation: 0,
         }
     }
@@ -78,7 +80,7 @@ impl VersusApp {
         self.selected = None;
         self.error = None;
         self.elapsed = None;
-        self.counts = [0; 5];
+        self.counts = [0; 6];
         self.message = "Folder selection changed. Compare to load the trees.".into();
         self.scroll_generation += 1;
     }
@@ -90,7 +92,7 @@ impl VersusApp {
         if let Some(job) = self.job.take() {
             job.cancellation.store(true, Ordering::Relaxed);
         }
-        let roots = self.paths.clone().map(PathBuf::from);
+        let roots = self.paths.clone().map(|path| absolute_path(&path));
         let worker_roots = roots.clone();
         let cancellation = Arc::new(AtomicBool::new(false));
         let worker_cancellation = cancellation.clone();
@@ -156,60 +158,52 @@ impl VersusApp {
     }
 
     fn render(&mut self, ui: &mut egui::Ui) {
+        if self.logo_texture.is_none() {
+            let image: egui::ColorImage = (&crate::logo::icon_data()).into();
+            self.logo_texture = Some(ui.ctx().load_texture(
+                "versus-mark",
+                image,
+                egui::TextureOptions::LINEAR,
+            ));
+        }
         egui::Frame::default()
             .fill(BACKGROUND)
-            .inner_margin(egui::Margin::same(18))
+            .inner_margin(egui::Margin::same(10))
             .show(ui, |ui| {
                 self.header(ui);
-                ui.add_space(14.0);
-                self.folder_inputs(ui);
-                ui.add_space(12.0);
-                self.controls(ui);
-                ui.add_space(8.0);
+                ui.add_space(5.0);
                 self.legend(ui);
-                ui.add_space(10.0);
+                ui.add_space(5.0);
                 if let Some(error) = &self.error {
                     egui::Frame::default()
                         .fill(ERROR.gamma_multiply(0.12))
-                        .inner_margin(egui::Margin::same(10))
+                        .inner_margin(egui::Margin::same(6))
                         .show(ui, |ui| {
                             ui.colored_label(ERROR, error);
                         });
-                    ui.add_space(8.0);
+                    ui.add_space(4.0);
                 }
-                let height = (ui.available_height() - 44.0).max(120.0);
+                let height = (ui.available_height() - 36.0).max(120.0);
                 self.tree_area(ui, height);
-                ui.add_space(10.0);
+                ui.add_space(5.0);
                 self.footer(ui);
             });
     }
 
-    fn header(&self, ui: &mut egui::Ui) {
+    fn header(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
+            if let Some(logo) = &self.logo_texture {
+                ui.image((logo.id(), egui::vec2(28.0, 28.0)));
+            }
+            ui.label(RichText::new("Versus").size(18.0).strong());
             ui.label(
-                RichText::new("V / V")
+                RichText::new("/  FOLDER COMPARE")
                     .monospace()
-                    .size(23.0)
-                    .color(ACCENT)
-                    .strong(),
+                    .size(10.0)
+                    .color(MUTED),
             );
-            ui.add_space(8.0);
-            ui.vertical(|ui| {
-                ui.label(RichText::new("VERSUS").size(20.0).strong());
-                ui.label(
-                    RichText::new("ENGINEERING WORKSPACE  /  FOLDER COMPARE")
-                        .monospace()
-                        .size(10.0)
-                        .color(MUTED),
-                );
-            });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(
-                    RichText::new("2-WAY  /  READ ONLY")
-                        .monospace()
-                        .size(11.0)
-                        .color(MUTED),
-                );
+                self.controls(ui)
             });
         });
     }
@@ -221,29 +215,18 @@ impl VersusApp {
             for (side, column) in columns.iter_mut().enumerate() {
                 let color = if side == 0 { LEFT_ONLY } else { RIGHT_ONLY };
                 egui::Frame::default()
-                    .fill(PANEL)
-                    .stroke(Stroke::new(1.0, BORDER))
-                    .corner_radius(6)
-                    .inner_margin(egui::Margin::same(12))
+                    .inner_margin(egui::Margin::same(7))
                     .show(column, |ui| {
                         ui.horizontal(|ui| {
                             ui.label(
-                                RichText::new(if side == 0 {
-                                    "01  LEFT FOLDER"
-                                } else {
-                                    "02  RIGHT FOLDER"
-                                })
-                                .monospace()
-                                .size(11.0)
-                                .color(color)
-                                .strong(),
+                                RichText::new(if side == 0 { "LEFT" } else { "RIGHT" })
+                                    .monospace()
+                                    .size(10.0)
+                                    .color(color),
                             );
-                        });
-                        ui.add_space(6.0);
-                        ui.horizontal(|ui| {
-                            let width = (ui.available_width() - 90.0).max(100.0);
+                            let width = (ui.available_width() - 30.0).max(80.0);
                             let response = ui.add_sized(
-                                [width, 30.0],
+                                [width, 24.0],
                                 egui::TextEdit::singleline(&mut self.paths[side])
                                     .font(egui::TextStyle::Monospace)
                                     .hint_text("Enter or paste a folder path")
@@ -255,9 +238,17 @@ impl VersusApp {
                             {
                                 picked = true;
                             }
-                            if ui
-                                .add_sized([78.0, 30.0], egui::Button::new("Browse…"))
-                                .clicked()
+                            if icon_button(
+                                ui,
+                                ToolbarIcon::Browse,
+                                true,
+                                if side == 0 {
+                                    "Browse left folder"
+                                } else {
+                                    "Browse right folder"
+                                },
+                            )
+                            .clicked()
                             {
                                 let mut dialog = rfd::FileDialog::new().set_title(if side == 0 {
                                     "Select left folder"
@@ -274,6 +265,21 @@ impl VersusApp {
                                 }
                             }
                         });
+                        let full_path = if self.paths[side].is_empty() {
+                            if side == 0 {
+                                "Choose a left folder".into()
+                            } else {
+                                "Choose a right folder".into()
+                            }
+                        } else {
+                            absolute_path(&self.paths[side]).display().to_string()
+                        };
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(full_path).monospace().size(10.0).color(MUTED),
+                            )
+                            .wrap(),
+                        );
                     });
             }
         });
@@ -286,86 +292,76 @@ impl VersusApp {
     }
 
     fn controls(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            let ready = self.paths.iter().all(|path| !path.trim().is_empty());
-            if ui
-                .add_enabled(
-                    ready && self.job.is_none(),
-                    egui::Button::new(
-                        RichText::new(if self.tree.is_some() {
-                            "Refresh comparison"
-                        } else {
-                            "Compare folders"
-                        })
-                        .strong(),
-                    )
-                    .fill(ACCENT.gamma_multiply(0.3))
-                    .min_size(egui::vec2(150.0, 32.0)),
-                )
-                .clicked()
+        if icon_button(
+            ui,
+            ToolbarIcon::Collapse,
+            self.tree.is_some(),
+            "Collapse all",
+        )
+        .clicked()
+        {
+            self.tree.as_mut().unwrap().collapse_all();
+        }
+        if icon_button(ui, ToolbarIcon::Expand, self.tree.is_some(), "Expand all").clicked() {
+            self.tree.as_mut().unwrap().expand_all();
+        }
+        let ready = self.paths.iter().all(|path| !path.trim().is_empty());
+        if icon_button(
+            ui,
+            ToolbarIcon::Refresh,
+            ready && self.job.is_none(),
+            if self.tree.is_some() {
+                "Refresh comparison"
+            } else {
+                "Compare folders"
+            },
+        )
+        .clicked()
+        {
+            self.start_comparison();
+        }
+        if let Some(job) = &self.job {
+            let cancelling = job.cancellation.load(Ordering::Relaxed);
+            if icon_button(
+                ui,
+                ToolbarIcon::Cancel,
+                !cancelling,
+                if cancelling {
+                    "Cancelling…"
+                } else {
+                    "Cancel comparison"
+                },
+            )
+            .clicked()
             {
-                self.start_comparison();
+                job.cancellation.store(true, Ordering::Relaxed);
             }
-            if let Some(job) = &self.job {
-                ui.spinner();
-                let cancelling = job.cancellation.load(Ordering::Relaxed);
-                if ui
-                    .add_enabled(
-                        !cancelling,
-                        egui::Button::new(if cancelling {
-                            "Cancelling…"
-                        } else {
-                            "Cancel"
-                        }),
-                    )
-                    .clicked()
-                {
-                    job.cancellation.store(true, Ordering::Relaxed);
-                }
-            }
-            ui.separator();
-            if ui
-                .add_enabled(self.tree.is_some(), egui::Button::new("Expand all"))
-                .clicked()
-            {
-                self.tree.as_mut().unwrap().expand_all();
-            }
-            if ui
-                .add_enabled(self.tree.is_some(), egui::Button::new("Collapse all"))
-                .clicked()
-            {
-                self.tree.as_mut().unwrap().collapse_all();
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(
-                    RichText::new("LINKED EXPANSION + SCROLL")
-                        .monospace()
-                        .size(10.0)
-                        .color(MUTED),
-                );
-            });
-        });
+            ui.spinner();
+        }
     }
 
     fn legend(&self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
-            for (index, (label, color)) in [
-                ("● Identical", SAME),
-                ("● Different", CHANGED),
-                ("● Left only", LEFT_ONLY),
-                ("● Right only", RIGHT_ONLY),
-                ("● Type / read error", ERROR),
+            for (index, icon) in [
+                StatusIcon::Same,
+                StatusIcon::Different,
+                StatusIcon::LeftOnly,
+                StatusIcon::RightOnly,
+                StatusIcon::TypeMismatch,
+                StatusIcon::Error,
             ]
             .into_iter()
             .enumerate()
             {
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::hover());
+                paint_status_icon(ui.painter(), rect.center(), icon);
                 let label = if self.tree.is_some() {
-                    format!("{label}  {}", self.counts[index])
+                    format!("{}  {}", icon.label(), self.counts[index])
                 } else {
-                    label.into()
+                    icon.label().into()
                 };
-                ui.label(RichText::new(label).size(11.0).color(color));
-                ui.add_space(8.0);
+                ui.label(RichText::new(label).size(10.0).color(icon.color()));
+                ui.add_space(5.0);
             }
         });
     }
@@ -379,61 +375,29 @@ impl VersusApp {
                 ui.set_min_height(height);
                 ui.set_max_height(height);
                 ui.spacing_mut().item_spacing = Vec2::ZERO;
-                let width = ui.available_width();
-                let (header, _) = ui.allocate_exact_size(egui::vec2(width, 44.0), Sense::hover());
-                let halves = split_rect(header);
-                for (side, rect) in halves.into_iter().enumerate() {
-                    let name = self
-                        .roots
-                        .as_ref()
-                        .map(|roots| root_name(&roots[side]))
-                        .unwrap_or_else(|| {
-                            if side == 0 {
-                                "Left folder".into()
-                            } else {
-                                "Right folder".into()
-                            }
-                        });
-                    let painter = ui.painter().with_clip_rect(rect.shrink(10.0));
-                    let name_painter = painter.with_clip_rect(Rect::from_min_max(
-                        rect.min,
-                        egui::pos2(rect.right() - 120.0, rect.bottom()),
-                    ));
-                    name_painter.text(
-                        rect.left_center() + egui::vec2(14.0, -3.0),
-                        Align2::LEFT_CENTER,
-                        name,
-                        FontId::monospace(13.0),
-                        TEXT,
-                    );
-                    painter.text(
-                        rect.right_center() + egui::vec2(-14.0, -3.0),
-                        Align2::RIGHT_CENTER,
-                        self.tree
-                            .as_ref()
-                            .map(|tree| state_label(&tree.root().state))
-                            .unwrap_or(if side == 0 { "LEFT" } else { "RIGHT" }),
-                        FontId::monospace(10.0),
-                        self.tree
-                            .as_ref()
-                            .map(|tree| state_color(&tree.root().state))
-                            .unwrap_or(MUTED),
-                    );
-                }
+                let header_top = ui.cursor().top();
+                self.folder_inputs(ui);
+                let header_height = ui.cursor().top() - header_top;
+                let (divider, _) =
+                    ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), Sense::hover());
                 ui.painter().line_segment(
-                    [header.center_top(), header.center_bottom()],
+                    [divider.left_center(), divider.right_center()],
                     Stroke::new(1.0, BORDER),
                 );
                 ui.painter().line_segment(
-                    [header.left_bottom(), header.right_bottom()],
+                    [
+                        egui::pos2(divider.center().x, header_top),
+                        divider.center_bottom(),
+                    ],
                     Stroke::new(1.0, BORDER),
                 );
+                let body_height = (height - header_height - 2.0).max(60.0);
                 if let Some(tree) = &mut self.tree {
                     let rows = tree.visible_rows();
                     if rows.is_empty() {
                         empty_display(
                             ui,
-                            height - 46.0,
+                            body_height,
                             "Both folders are empty",
                             "There are no files or folders to compare.",
                         );
@@ -444,7 +408,7 @@ impl VersusApp {
                     egui::ScrollArea::vertical()
                         .id_salt(("linked-trees", self.scroll_generation))
                         .auto_shrink([false, false])
-                        .max_height(height - 46.0)
+                        .max_height(body_height)
                         .show_rows(ui, ROW_HEIGHT, rows.len(), |ui, range| {
                             for index in range {
                                 let row = &rows[index];
@@ -463,6 +427,11 @@ impl VersusApp {
                                         ui.id().with((&node.relative_path, side)),
                                         Sense::click(),
                                     );
+                                    let response = if present {
+                                        response.on_hover_cursor(egui::CursorIcon::PointingHand)
+                                    } else {
+                                        response
+                                    };
                                     response.widget_info(|| {
                                         egui::WidgetInfo::selected(
                                             egui::WidgetType::SelectableLabel,
@@ -548,7 +517,7 @@ impl VersusApp {
                 } else {
                     empty_display(
                         ui,
-                        height - 46.0,
+                        body_height,
                         if self.job.is_some() {
                             "Comparing folders…"
                         } else {
@@ -614,15 +583,19 @@ impl eframe::App for VersusApp {
     }
 }
 
-fn root_name(path: &std::path::Path) -> String {
-    path.file_name()
-        .unwrap_or(path.as_os_str())
-        .to_string_lossy()
-        .into_owned()
+fn absolute_path(path: &str) -> PathBuf {
+    let path = PathBuf::from(path);
+    if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(&path))
+            .unwrap_or(path)
+    }
 }
 
-fn count_entries(tree: &FolderTree) -> [usize; 5] {
-    let mut counts = [0; 5];
+fn count_entries(tree: &FolderTree) -> [usize; 6] {
+    let mut counts = [0; 6];
     let mut nodes: Vec<_> = tree.root().children.iter().collect();
     while let Some(node) = nodes.pop() {
         let index = match node.state {
@@ -630,7 +603,8 @@ fn count_entries(tree: &FolderTree) -> [usize; 5] {
             DirectoryEntryState::Different => 1,
             DirectoryEntryState::LeftOnly => 2,
             DirectoryEntryState::RightOnly => 3,
-            DirectoryEntryState::TypeMismatch | DirectoryEntryState::Error(_) => 4,
+            DirectoryEntryState::TypeMismatch => 4,
+            DirectoryEntryState::Error(_) => 5,
         };
         counts[index] += 1;
         nodes.extend(&node.children);
@@ -645,25 +619,209 @@ fn split_rect(rect: Rect) -> [Rect; 2] {
     ]
 }
 
-fn state_label(state: &DirectoryEntryState) -> &'static str {
-    match state {
-        DirectoryEntryState::Same => "Identical",
-        DirectoryEntryState::Different => "Different",
-        DirectoryEntryState::LeftOnly => "Left only",
-        DirectoryEntryState::RightOnly => "Right only",
-        DirectoryEntryState::TypeMismatch => "Type mismatch",
-        DirectoryEntryState::Error(_) => "Read error",
+#[derive(Clone, Copy)]
+enum StatusIcon {
+    Same,
+    Different,
+    LeftOnly,
+    RightOnly,
+    TypeMismatch,
+    Error,
+}
+
+impl StatusIcon {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Same => "Identical",
+            Self::Different => "Different",
+            Self::LeftOnly => "Left only",
+            Self::RightOnly => "Right only",
+            Self::TypeMismatch => "Type mismatch",
+            Self::Error => "Read error",
+        }
+    }
+    fn color(self) -> Color32 {
+        match self {
+            Self::Same => SAME,
+            Self::Different => CHANGED,
+            Self::LeftOnly => LEFT_ONLY,
+            Self::RightOnly => RIGHT_ONLY,
+            Self::TypeMismatch | Self::Error => ERROR,
+        }
     }
 }
 
-fn state_color(state: &DirectoryEntryState) -> Color32 {
+fn status_icon(state: &DirectoryEntryState) -> StatusIcon {
     match state {
-        DirectoryEntryState::Same => SAME,
-        DirectoryEntryState::Different => CHANGED,
-        DirectoryEntryState::LeftOnly => LEFT_ONLY,
-        DirectoryEntryState::RightOnly => RIGHT_ONLY,
-        DirectoryEntryState::TypeMismatch | DirectoryEntryState::Error(_) => ERROR,
+        DirectoryEntryState::Same => StatusIcon::Same,
+        DirectoryEntryState::Different => StatusIcon::Different,
+        DirectoryEntryState::LeftOnly => StatusIcon::LeftOnly,
+        DirectoryEntryState::RightOnly => StatusIcon::RightOnly,
+        DirectoryEntryState::TypeMismatch => StatusIcon::TypeMismatch,
+        DirectoryEntryState::Error(_) => StatusIcon::Error,
     }
+}
+
+fn state_label(state: &DirectoryEntryState) -> &'static str {
+    status_icon(state).label()
+}
+fn state_color(state: &DirectoryEntryState) -> Color32 {
+    status_icon(state).color()
+}
+
+fn paint_status_icon(painter: &egui::Painter, center: Pos2, icon: StatusIcon) {
+    let stroke = Stroke::new(1.3, icon.color());
+    let point = |x, y| center + egui::vec2(x, y);
+    match icon {
+        StatusIcon::Same => {
+            painter.line(
+                vec![point(-5.0, 0.0), point(-1.0, 4.0), point(5.0, -4.0)],
+                stroke,
+            );
+        }
+        StatusIcon::Different => {
+            for y in [-2.0, 2.0] {
+                painter.line_segment([point(-5.0, y), point(5.0, y)], stroke);
+            }
+            painter.line_segment([point(3.0, -6.0), point(-3.0, 6.0)], stroke);
+        }
+        StatusIcon::LeftOnly | StatusIcon::RightOnly => {
+            let direction = if matches!(icon, StatusIcon::LeftOnly) {
+                -1.0
+            } else {
+                1.0
+            };
+            painter.line_segment([point(-5.0, 0.0), point(5.0, 0.0)], stroke);
+            painter.line(
+                vec![
+                    point(direction, -4.0),
+                    point(direction * 5.0, 0.0),
+                    point(direction, 4.0),
+                ],
+                stroke,
+            );
+        }
+        StatusIcon::TypeMismatch => {
+            painter.rect_stroke(
+                Rect::from_center_size(center, egui::vec2(12.0, 12.0)),
+                1,
+                stroke,
+                egui::StrokeKind::Inside,
+            );
+            painter.line_segment([point(-3.0, -3.0), point(3.0, 3.0)], stroke);
+            painter.line_segment([point(-3.0, 3.0), point(3.0, -3.0)], stroke);
+        }
+        StatusIcon::Error => {
+            painter.add(egui::Shape::closed_line(
+                vec![point(0.0, -6.0), point(6.0, 5.0), point(-6.0, 5.0)],
+                stroke,
+            ));
+            painter.line_segment([point(0.0, -2.0), point(0.0, 1.0)], stroke);
+            painter.circle_filled(point(0.0, 3.0), 0.7, icon.color());
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ToolbarIcon {
+    Refresh,
+    Expand,
+    Collapse,
+    Browse,
+    Cancel,
+}
+
+fn icon_button(ui: &mut egui::Ui, icon: ToolbarIcon, enabled: bool, label: &str) -> egui::Response {
+    ui.add_enabled_ui(enabled, |ui| {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), Sense::hover());
+        let response = ui.interact(rect, egui::Id::new(label), Sense::click());
+        response
+            .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
+        let color = if !enabled {
+            MUTED.gamma_multiply(0.4)
+        } else if response.hovered() || response.has_focus() {
+            ACCENT
+        } else {
+            TEXT
+        };
+        if response.hovered() || response.has_focus() {
+            ui.painter().rect_filled(rect, 3, BORDER);
+        }
+        let center = rect.center();
+        let point = |x, y| center + egui::vec2(x, y);
+        let stroke = Stroke::new(1.4, color);
+        match icon {
+            ToolbarIcon::Refresh => {
+                let arc: Vec<_> = (0..=24)
+                    .map(|step| {
+                        let angle = (50.0 + step as f32 * 270.0 / 24.0).to_radians();
+                        point(angle.cos() * 6.0, angle.sin() * 6.0)
+                    })
+                    .collect();
+                let end = *arc.last().unwrap();
+                ui.painter().line(arc, stroke);
+                ui.painter().line(
+                    vec![
+                        end + egui::vec2(-4.0, -0.5),
+                        end,
+                        end + egui::vec2(0.0, -4.0),
+                    ],
+                    stroke,
+                );
+            }
+            ToolbarIcon::Expand | ToolbarIcon::Collapse => {
+                let direction = if matches!(icon, ToolbarIcon::Expand) {
+                    1.0
+                } else {
+                    -1.0
+                };
+                for y in [-3.0, 3.0] {
+                    ui.painter().line(
+                        vec![
+                            point(-5.0, y - direction * 2.0),
+                            point(0.0, y + direction * 2.0),
+                            point(5.0, y - direction * 2.0),
+                        ],
+                        stroke,
+                    );
+                }
+            }
+            ToolbarIcon::Browse => paint_icon(
+                ui.painter(),
+                center,
+                Some(&DirectoryEntryKind::Directory),
+                color,
+            ),
+            ToolbarIcon::Cancel => {
+                ui.painter()
+                    .line_segment([point(-4.0, -4.0), point(4.0, 4.0)], stroke);
+                ui.painter()
+                    .line_segment([point(-4.0, 4.0), point(4.0, -4.0)], stroke);
+            }
+        }
+        response
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text(label)
+    })
+    .inner
+}
+
+fn format_size(size: Option<u64>) -> String {
+    let Some(bytes) = size else {
+        return "—".into();
+    };
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    let mut value = bytes as f64;
+    let units = ["KiB", "MiB", "GiB", "TiB", "PiB", "EiB"];
+    let mut unit = 0;
+    value /= 1024.0;
+    while value >= 1024.0 && unit < units.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    format!("{value:.1} {}", units[unit])
 }
 
 struct RowAppearance {
@@ -705,15 +863,15 @@ fn paint_row(ui: &egui::Ui, rect: Rect, node: &TreeNode, side: usize, appearance
             color,
         );
     }
-    let x = rect.left() + 14.0 + depth as f32 * 18.0;
+    let x = rect.left() + 8.0 + depth as f32 * 14.0;
     let y = rect.center().y;
-    let name_right = rect.right() - 120.0;
+    let name_right = rect.right() - 98.0;
     if !present {
         painter.text(
             egui::pos2(x + 36.0, y),
             Align2::LEFT_CENTER,
             "—",
-            FontId::monospace(12.0),
+            FontId::monospace(11.0),
             MUTED.gamma_multiply(0.55),
         );
         return;
@@ -736,7 +894,7 @@ fn paint_row(ui: &egui::Ui, rect: Rect, node: &TreeNode, side: usize, appearance
         egui::pos2(x + 40.0, y),
         Align2::LEFT_CENTER,
         node.name.to_string_lossy(),
-        FontId::monospace(12.0),
+        FontId::monospace(11.0),
         if *state == DirectoryEntryState::Same {
             TEXT
         } else {
@@ -744,11 +902,16 @@ fn paint_row(ui: &egui::Ui, rect: Rect, node: &TreeNode, side: usize, appearance
         },
     );
     painter.text(
-        egui::pos2(rect.right() - 14.0, y),
+        egui::pos2(rect.right() - 32.0, y),
         Align2::RIGHT_CENTER,
-        state_label(state),
+        format_size(entry.size),
         FontId::monospace(10.0),
-        color,
+        MUTED,
+    );
+    paint_status_icon(
+        &painter,
+        egui::pos2(rect.right() - 15.0, y),
+        status_icon(state),
     );
 }
 
@@ -807,7 +970,7 @@ fn empty_display(ui: &mut egui::Ui, height: f32, title: &str, subtitle: &str) {
         center + egui::vec2(0.0, 8.0),
         Align2::CENTER_CENTER,
         subtitle,
-        FontId::proportional(12.0),
+        FontId::proportional(11.0),
         MUTED,
     );
 }
@@ -823,17 +986,17 @@ fn apply_theme(ctx: &egui::Context) {
     visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, BORDER);
     ctx.set_visuals(visuals);
     ctx.all_styles_mut(|style| {
-        style.spacing.item_spacing = egui::vec2(10.0, 5.0);
-        style.spacing.interact_size.y = 30.0;
+        style.spacing.item_spacing = egui::vec2(6.0, 3.0);
+        style.spacing.interact_size.y = 24.0;
         style
             .text_styles
-            .insert(egui::TextStyle::Body, FontId::proportional(13.0));
+            .insert(egui::TextStyle::Body, FontId::proportional(11.0));
         style
             .text_styles
-            .insert(egui::TextStyle::Button, FontId::proportional(12.0));
+            .insert(egui::TextStyle::Button, FontId::proportional(11.0));
         style
             .text_styles
-            .insert(egui::TextStyle::Monospace, FontId::monospace(12.0));
+            .insert(egui::TextStyle::Monospace, FontId::monospace(11.0));
     });
 }
 
@@ -852,6 +1015,8 @@ mod tests {
             .into_iter()
             .map(|(path, kind)| DirectoryEntry {
                 relative_path: path.into(),
+                left_size: Some(0),
+                right_size: Some(0),
                 left_exists: true,
                 right_exists: true,
                 left_kind: Some(kind.clone()),
@@ -875,14 +1040,16 @@ mod tests {
         ctx: &egui::Context,
         events: Vec<egui::Event>,
     ) -> egui::FullOutput {
-        ctx.run_ui(
+        let mut output = ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0))),
                 events,
                 ..Default::default()
             },
             |ui| app.render(ui),
-        )
+        );
+        output.textures_delta.clear();
+        output
     }
 
     fn text_positions(output: &egui::FullOutput, value: &str) -> Vec<Pos2> {
@@ -891,6 +1058,19 @@ mod tests {
             .iter()
             .filter_map(|shape| match &shape.shape {
                 egui::Shape::Text(text) if text.galley.text() == value => Some(text.pos),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn text_centers(output: &egui::FullOutput, value: &str) -> Vec<Pos2> {
+        output
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text() == value => {
+                    Some(text.pos + text.galley.size() / 2.0)
+                }
                 _ => None,
             })
             .collect()
@@ -948,6 +1128,8 @@ mod tests {
             cancelled: false,
             entries: vec![DirectoryEntry {
                 relative_path: "left-only.step".into(),
+                left_size: Some(1024),
+                right_size: None,
                 left_exists: true,
                 right_exists: false,
                 left_kind: Some(DirectoryEntryKind::File),
@@ -975,6 +1157,8 @@ mod tests {
             cancelled: false,
             entries: vec![DirectoryEntry {
                 relative_path: "empty-folder".into(),
+                left_size: Some(0),
+                right_size: Some(0),
                 left_exists: true,
                 right_exists: true,
                 left_kind: Some(DirectoryEntryKind::Directory),
@@ -1000,14 +1184,24 @@ mod tests {
         let ctx = egui::Context::default();
         apply_theme(&ctx);
         let mut app = loaded_app();
-        let output = ctx.run_ui(
+        let mut output = ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(900.0, 650.0))),
                 ..Default::default()
             },
             |ui| app.render(ui),
         );
-        for text in ["Collapse all", "Choose two folders to begin."] {
+        output.textures_delta.clear();
+        let controls: Vec<_> = ["Collapse all", "Expand all", "Refresh comparison"]
+            .into_iter()
+            .map(|label| ctx.read_response(egui::Id::new(label)).unwrap().rect)
+            .collect();
+        assert!(
+            controls
+                .iter()
+                .all(|rect| rect.right() <= 890.0 && rect.left() > 700.0 && rect.bottom() <= 45.0)
+        );
+        for text in ["Choose two folders to begin."] {
             let positions = text_positions(&output, text);
             assert!(!positions.is_empty(), "Missing {text}");
             assert!(
@@ -1019,6 +1213,140 @@ mod tests {
             );
         }
         output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn toolbar_icons_expand_collapse_and_refresh_the_comparison() {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut app = loaded_app();
+        app.paths = ["left".into(), "right".into()];
+        render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+        let expand = ctx
+            .read_response(egui::Id::new("Expand all"))
+            .unwrap()
+            .rect
+            .center();
+        click(&mut app, &ctx, expand);
+        assert!(app.tree.as_ref().unwrap().is_expanded("assembly"));
+        let collapse = ctx
+            .read_response(egui::Id::new("Collapse all"))
+            .unwrap()
+            .rect
+            .center();
+        click(&mut app, &ctx, collapse);
+        assert!(!app.tree.as_ref().unwrap().is_expanded("assembly"));
+        let refresh = ctx
+            .read_response(egui::Id::new("Refresh comparison"))
+            .unwrap()
+            .rect
+            .center();
+        click(&mut app, &ctx, refresh);
+        assert!(app.job.is_some());
+    }
+
+    #[test]
+    fn full_paths_follow_the_legend_and_precede_tree_rows() {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut app = loaded_app();
+        app.paths = [
+            "/engineering/current/designs".into(),
+            "/engineering/release/designs".into(),
+        ];
+        let output = render(&mut app, &ctx, vec![]);
+        let legend = text_positions(&output, "Identical  0")[0];
+        let rows = text_positions(&output, "assembly");
+        for path in &app.paths {
+            let positions = text_positions(&output, path);
+            assert!(!positions.is_empty());
+            assert!(
+                positions
+                    .iter()
+                    .all(|position| position.y > legend.y && position.y < rows[0].y)
+            );
+        }
+        assert!(rows[0].y < 160.0, "Compact tree should begin near the top");
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn long_selected_path_wraps_without_truncation() {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut app = loaded_app();
+        app.paths[0] = format!("/engineering/{}/release", "long-folder-name/".repeat(12));
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(900.0, 650.0))),
+                ..Default::default()
+            },
+            |ui| app.render(ui),
+        );
+        output.textures_delta.clear();
+        let wrapped = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text)
+                    if text.galley.text() == app.paths[0] && text.galley.rows.len() > 1 =>
+                {
+                    Some(text)
+                }
+                _ => None,
+            })
+            .expect("Full selected path should wrap in the pane header");
+        assert!(wrapped.pos.x + wrapped.galley.size().x < 450.0);
+        assert!(text_positions(&output, "assembly")[0].y > wrapped.pos.y + wrapped.galley.size().y);
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn hovering_files_and_folders_uses_the_pointer_cursor() {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut app = loaded_app();
+        app.tree.as_mut().unwrap().expand_all();
+        let output = render(&mut app, &ctx, vec![]);
+        let targets = [
+            text_positions(&output, "assembly")[0],
+            text_positions(&output, "model.step")[1],
+        ];
+        output.drop_without_applying_deltas();
+        for position in targets {
+            let output = render(
+                &mut app,
+                &ctx,
+                vec![egui::Event::PointerMoved(position + egui::vec2(3.0, 5.0))],
+            );
+            assert_eq!(
+                output.platform_output.cursor_icon,
+                egui::CursorIcon::PointingHand
+            );
+            output.drop_without_applying_deltas();
+        }
+    }
+
+    #[test]
+    fn row_shows_size_beside_status_icon_without_a_status_word() {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut app = loaded_app();
+        let output = render(&mut app, &ctx, vec![]);
+        let names = text_centers(&output, "assembly");
+        let sizes = text_centers(&output, "0 B");
+        assert_eq!(sizes.len(), 2);
+        assert!(
+            sizes
+                .iter()
+                .zip(names)
+                .all(|(size, name)| size.y == name.y && size.x > name.x)
+        );
+        assert!(text_positions(&output, "Identical").is_empty());
+        output.drop_without_applying_deltas();
+        assert_eq!(format_size(Some(1024)), "1.0 KiB");
+        assert_eq!(format_size(Some(1024 * 1024)), "1.0 MiB");
+        assert_eq!(format_size(None), "—");
     }
 
     fn attach_job(app: &mut VersusApp) -> mpsc::Sender<Result<FolderTree, CompareError>> {

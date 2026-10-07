@@ -47,6 +47,10 @@ pub struct DirectoryEntry {
     pub right_exists: bool,
     pub left_kind: Option<DirectoryEntryKind>,
     pub right_kind: Option<DirectoryEntryKind>,
+    /// The byte size on each side. Files use their metadata length and directories
+    /// use the sum of all regular files below them. Symlinks are never followed.
+    pub left_size: Option<u64>,
+    pub right_size: Option<u64>,
     pub kind: DirectoryEntryKind,
     pub state: DirectoryEntryState,
 }
@@ -102,20 +106,32 @@ pub fn compare_directories(
         let right_exists = right_item.is_some();
         let left_kind = left_item
             .as_ref()
-            .and_then(|item| item.as_ref().ok().cloned());
+            .and_then(|item| item.as_ref().ok().map(|item| item.kind.clone()));
         let right_kind = right_item
             .as_ref()
-            .and_then(|item| item.as_ref().ok().cloned());
+            .and_then(|item| item.as_ref().ok().map(|item| item.kind.clone()));
+        let left_size = left_item
+            .as_ref()
+            .and_then(|item| item.as_ref().ok().and_then(|item| item.size));
+        let right_size = right_item
+            .as_ref()
+            .and_then(|item| item.as_ref().ok().and_then(|item| item.size));
         let (kind, state) = match (left_item, right_item) {
             (Some(Err(error)), _) | (_, Some(Err(error))) => {
                 (DirectoryEntryKind::Other, DirectoryEntryState::Error(error))
             }
-            (Some(Ok(left_kind)), None) => (left_kind, DirectoryEntryState::LeftOnly),
-            (None, Some(Ok(right_kind))) => (right_kind, DirectoryEntryState::RightOnly),
-            (Some(Ok(left_kind)), Some(Ok(right_kind))) if left_kind != right_kind => {
-                (left_kind, DirectoryEntryState::TypeMismatch)
+            (Some(Ok(left_item)), None) => (left_item.kind, DirectoryEntryState::LeftOnly),
+            (None, Some(Ok(right_item))) => (right_item.kind, DirectoryEntryState::RightOnly),
+            (Some(Ok(left_item)), Some(Ok(right_item))) if left_item.kind != right_item.kind => {
+                (left_item.kind, DirectoryEntryState::TypeMismatch)
             }
-            (Some(Ok(kind @ DirectoryEntryKind::File)), Some(Ok(_))) => {
+            (
+                Some(Ok(CollectedEntry {
+                    kind: DirectoryEntryKind::File,
+                    ..
+                })),
+                Some(Ok(_)),
+            ) => {
                 let state = match buffered_files_equal_cancellable(
                     left.join(&relative_path),
                     right.join(&relative_path),
@@ -132,9 +148,15 @@ pub fn compare_directories(
                     }
                     Err(error) => DirectoryEntryState::Error(error),
                 };
-                (kind, state)
+                (DirectoryEntryKind::File, state)
             }
-            (Some(Ok(kind @ DirectoryEntryKind::Symlink)), Some(Ok(_))) => {
+            (
+                Some(Ok(CollectedEntry {
+                    kind: DirectoryEntryKind::Symlink,
+                    ..
+                })),
+                Some(Ok(_)),
+            ) => {
                 let state = match (
                     fs::read_link(left.join(&relative_path)),
                     fs::read_link(right.join(&relative_path)),
@@ -148,9 +170,9 @@ pub fn compare_directories(
                         DirectoryEntryState::Error(CompareError::io(right.join(&relative_path), e))
                     }
                 };
-                (kind, state)
+                (DirectoryEntryKind::Symlink, state)
             }
-            (Some(Ok(kind)), Some(Ok(_))) => (kind, DirectoryEntryState::Same),
+            (Some(Ok(item)), Some(Ok(_))) => (item.kind, DirectoryEntryState::Same),
             (None, None) => unreachable!(),
         };
         entries.push(DirectoryEntry {
@@ -159,6 +181,8 @@ pub fn compare_directories(
             right_exists,
             left_kind,
             right_kind,
+            left_size,
+            right_size,
             kind,
             state,
         });
@@ -180,10 +204,16 @@ fn validate_directory(path: &Path) -> Result<(), CompareError> {
         })
     }
 }
+#[derive(Clone, Debug)]
+struct CollectedEntry {
+    kind: DirectoryEntryKind,
+    size: Option<u64>,
+}
+
 fn collect(
     root: &Path,
     options: &DirectoryCompareOptions,
-) -> Result<BTreeMap<PathBuf, Result<DirectoryEntryKind, CompareError>>, CompareError> {
+) -> Result<BTreeMap<PathBuf, Result<CollectedEntry, CompareError>>, CompareError> {
     let mut entries = BTreeMap::new();
     let mut todo = vec![PathBuf::new()];
     while let Some(relative) = todo.pop() {
@@ -229,14 +259,86 @@ fn collect(
                             if kind == DirectoryEntryKind::Directory {
                                 todo.push(child_relative.clone());
                             }
-                            entries.insert(child_relative, Ok(kind));
+                            let size = match kind {
+                                DirectoryEntryKind::File => Some(metadata.len()),
+                                DirectoryEntryKind::Directory => None,
+                                DirectoryEntryKind::Symlink | DirectoryEntryKind::Other => None,
+                            };
+                            entries.insert(child_relative, Ok(CollectedEntry { kind, size }));
                         }
                     }
                 }
             }
         }
     }
+    calculate_directory_sizes(&mut entries, options);
     Ok(entries)
+}
+
+/// Calculate totals only when every descendant was scanned successfully. This
+/// prevents an unreadable child from being shown as a deceptively partial total.
+fn calculate_directory_sizes(
+    entries: &mut BTreeMap<PathBuf, Result<CollectedEntry, CompareError>>,
+    options: &DirectoryCompareOptions,
+) {
+    let mut totals = BTreeMap::new();
+    let mut directories = Vec::new();
+    for (path, entry) in entries.iter() {
+        if cancelled(options) {
+            return;
+        }
+        if matches!(
+            entry,
+            Ok(CollectedEntry {
+                kind: DirectoryEntryKind::Directory,
+                ..
+            })
+        ) {
+            totals.insert(path.clone(), Some(0));
+            directories.push(path.clone());
+        }
+    }
+    directories.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+
+    // Seed each directory with its direct regular-file sizes, and mark a parent
+    // unknown as soon as one of its children could not be scanned.
+    for (path, entry) in entries.iter() {
+        if cancelled(options) {
+            return;
+        }
+        let parent = path.parent().unwrap_or_else(|| Path::new(""));
+        let Some(parent_total) = totals.get_mut(parent) else {
+            continue;
+        };
+        match entry {
+            Ok(CollectedEntry {
+                kind: DirectoryEntryKind::File,
+                size: Some(size),
+            }) => add_to_total(parent_total, Some(*size)),
+            Err(_) => *parent_total = None,
+            Ok(_) => {}
+        }
+    }
+
+    // Every child directory has already been finalized when it is added to its
+    // parent, so this makes one post-order pass over the collected entries.
+    for directory in directories {
+        if cancelled(options) {
+            return;
+        }
+        let total = totals.remove(&directory).unwrap_or(None);
+        if let Some(Ok(entry)) = entries.get_mut(&directory) {
+            entry.size = total;
+        }
+        let parent = directory.parent().unwrap_or_else(|| Path::new(""));
+        if let Some(parent_total) = totals.get_mut(parent) {
+            add_to_total(parent_total, total);
+        }
+    }
+}
+
+fn add_to_total(total: &mut Option<u64>, value: Option<u64>) {
+    *total = total.and_then(|total| value.and_then(|value| total.checked_add(value)));
 }
 fn cancelled(options: &DirectoryCompareOptions) -> bool {
     options

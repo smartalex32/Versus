@@ -10,6 +10,8 @@ fn entry(path: &str, kind: DirectoryEntryKind, state: DirectoryEntryState) -> Di
         right_exists,
         left_kind: left_exists.then(|| kind.clone()),
         right_kind: right_exists.then(|| kind.clone()),
+        left_size: None,
+        right_size: None,
         kind,
         state,
     }
@@ -26,6 +28,8 @@ fn type_mismatch(
         right_exists: true,
         left_kind: Some(left_kind.clone()),
         right_kind: Some(right_kind),
+        left_size: None,
+        right_size: None,
         kind: left_kind,
         state: DirectoryEntryState::TypeMismatch,
     }
@@ -230,4 +234,117 @@ fn filesystem_comparison_preserves_empty_folders_and_mismatched_side_types() {
         b"file opposite an empty folder"
     );
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn filesystem_comparison_reports_recursive_sizes_per_side() {
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+    let root = std::env::temp_dir().join(format!(
+        "versus-tree-sizes-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let left = root.join("left");
+    let right = root.join("right");
+    fs::create_dir_all(left.join("nested")).unwrap();
+    fs::create_dir_all(right.join("nested")).unwrap();
+    fs::create_dir_all(left.join("empty")).unwrap();
+    fs::create_dir_all(right.join("empty")).unwrap();
+    fs::create_dir_all(right.join("mismatch")).unwrap();
+    fs::write(left.join("nested/shared.bin"), b"abc").unwrap();
+    fs::write(right.join("nested/shared.bin"), b"abc").unwrap();
+    fs::write(left.join("nested/left.bin"), b"wxyz").unwrap();
+    fs::write(right.join("right.bin"), b"12").unwrap();
+    fs::write(left.join("mismatch"), b"12345").unwrap();
+
+    let diff = compare_directories(&left, &right, &DirectoryCompareOptions::default()).unwrap();
+    let tree = FolderTree::from_diff(&diff);
+    let nested = node(tree.root(), "nested");
+    assert_eq!(nested.left.size, Some(7));
+    assert_eq!(nested.right.size, Some(3));
+    assert_eq!(node(tree.root(), "empty").left.size, Some(0));
+    assert_eq!(node(tree.root(), "empty").right.size, Some(0));
+    let mismatch = node(tree.root(), "mismatch");
+    assert_eq!(mismatch.left.size, Some(5));
+    assert_eq!(mismatch.right.size, Some(0));
+    assert_eq!(tree.root().left.size, Some(12));
+    assert_eq!(tree.root().right.size, Some(5));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn filesystem_comparison_does_not_count_symlink_targets_in_folder_sizes() {
+    use std::{
+        fs,
+        os::unix::fs::symlink,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+    let root = std::env::temp_dir().join(format!(
+        "versus-tree-links-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let left = root.join("left");
+    let right = root.join("right");
+    fs::create_dir_all(&left).unwrap();
+    fs::create_dir_all(&right).unwrap();
+    fs::write(left.join("file"), b"abc").unwrap();
+    fs::write(right.join("file"), b"abc").unwrap();
+    symlink("file", left.join("file-link")).unwrap();
+    symlink("file", right.join("file-link")).unwrap();
+
+    let diff = compare_directories(&left, &right, &DirectoryCompareOptions::default()).unwrap();
+    let tree = FolderTree::from_diff(&diff);
+    assert_eq!(node(tree.root(), "file-link").left.size, None);
+    assert_eq!(node(tree.root(), "file-link").right.size, None);
+    assert_eq!(tree.root().left.size, Some(3));
+    assert_eq!(tree.root().right.size, Some(3));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn unknown_directory_size_propagates_only_on_its_own_side() {
+    let mut directory = entry(
+        "unreadable-child",
+        DirectoryEntryKind::Directory,
+        DirectoryEntryState::Same,
+    );
+    directory.left_size = None;
+    directory.right_size = Some(0);
+
+    let tree = tree(vec![directory]);
+    assert_eq!(tree.root().left.size, None);
+    assert_eq!(tree.root().right.size, Some(0));
+}
+
+#[test]
+fn root_scan_error_does_not_get_replaced_with_an_empty_folder_size() {
+    let error = CompareError {
+        path: Some(PathBuf::from("left")),
+        kind: CompareErrorKind::Io,
+        message: "directory iteration failed".into(),
+    };
+    let tree = tree(vec![DirectoryEntry {
+        relative_path: PathBuf::new(),
+        left_exists: true,
+        right_exists: false,
+        left_kind: None,
+        right_kind: None,
+        left_size: None,
+        right_size: None,
+        kind: DirectoryEntryKind::Other,
+        state: DirectoryEntryState::Error(error),
+    }]);
+    assert_eq!(tree.root().left.size, None);
+    assert_eq!(tree.root().right.size, Some(0));
 }
