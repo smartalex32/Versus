@@ -183,10 +183,32 @@ impl VersusApp {
                         });
                     ui.add_space(4.0);
                 }
-                let height = (ui.available_height() - 36.0).max(120.0);
-                self.tree_area(ui, height);
-                ui.add_space(5.0);
-                self.footer(ui);
+                let available = ui.available_rect_before_wrap();
+                let footer_height = ui.spacing().interact_size.y
+                    + ui.text_style_height(&egui::TextStyle::Monospace).ceil()
+                    + ui.spacing().item_spacing.y;
+                let footer_rect = Rect::from_min_max(
+                    egui::pos2(
+                        available.left(),
+                        (available.bottom() - footer_height).max(available.top()),
+                    ),
+                    available.max,
+                );
+                let tree_rect = Rect::from_min_max(
+                    available.min,
+                    egui::pos2(
+                        available.right(),
+                        (footer_rect.top() - 5.0).max(available.top()),
+                    ),
+                );
+                ui.scope_builder(egui::UiBuilder::new().max_rect(tree_rect), |ui| {
+                    ui.set_clip_rect(ui.clip_rect().intersect(tree_rect));
+                    self.tree_area(ui, (tree_rect.height() - 2.0).max(0.0));
+                });
+                ui.scope_builder(egui::UiBuilder::new().max_rect(footer_rect), |ui| {
+                    ui.set_clip_rect(ui.clip_rect().intersect(footer_rect));
+                    self.footer(ui);
+                });
             });
     }
 
@@ -209,84 +231,83 @@ impl VersusApp {
     }
 
     fn folder_inputs(&mut self, ui: &mut egui::Ui) {
-        let mut edited = false;
-        let mut picked = false;
-        ui.columns(2, |columns| {
-            for (side, column) in columns.iter_mut().enumerate() {
-                let color = if side == 0 { LEFT_ONLY } else { RIGHT_ONLY };
-                egui::Frame::default()
-                    .inner_margin(egui::Margin::same(7))
-                    .show(column, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new(if side == 0 { "LEFT" } else { "RIGHT" })
-                                    .monospace()
-                                    .size(10.0)
-                                    .color(color),
-                            );
-                            let width = (ui.available_width() - 30.0).max(80.0);
-                            let response = ui.add_sized(
-                                [width, 24.0],
-                                egui::TextEdit::singleline(&mut self.paths[side])
-                                    .font(egui::TextStyle::Monospace)
-                                    .hint_text("Enter or paste a folder path")
-                                    .id_salt(("folder-path", side)),
-                            );
-                            edited |= response.changed();
-                            if response.lost_focus()
-                                && ui.input(|input| input.key_pressed(egui::Key::Enter))
-                            {
-                                picked = true;
-                            }
-                            if icon_button(
-                                ui,
-                                ToolbarIcon::Browse,
-                                true,
-                                if side == 0 {
-                                    "Browse left folder"
-                                } else {
-                                    "Browse right folder"
-                                },
-                            )
-                            .clicked()
-                            {
-                                let mut dialog = rfd::FileDialog::new().set_title(if side == 0 {
-                                    "Select left folder"
-                                } else {
-                                    "Select right folder"
-                                });
-                                if !self.paths[side].is_empty() {
-                                    dialog = dialog.set_directory(&self.paths[side]);
-                                }
-                                if let Some(path) = dialog.pick_folder() {
-                                    self.paths[side] = path.to_string_lossy().into_owned();
-                                    edited = true;
-                                    picked = true;
-                                }
-                            }
-                        });
-                        let full_path = if self.paths[side].is_empty() {
-                            if side == 0 {
-                                "Choose a left folder".into()
-                            } else {
-                                "Choose a right folder".into()
-                            }
-                        } else {
-                            absolute_path(&self.paths[side]).display().to_string()
-                        };
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(full_path).monospace().size(10.0).color(MUTED),
-                            )
-                            .wrap(),
-                        );
-                    });
+        let full_paths = self.paths.clone().map(|path| {
+            if path.is_empty() {
+                "Choose a folder".into()
+            } else {
+                absolute_path(&path).display().to_string()
             }
         });
-        if edited {
-            self.invalidate();
+        let width = ui.available_width();
+        let path_width = (width / 2.0 - 84.0).max(40.0);
+        let galleys = full_paths.clone().map(|path| {
+            ui.painter()
+                .layout(path, FontId::monospace(11.0), TEXT, path_width)
+        });
+        let height = galleys
+            .iter()
+            .map(|galley| galley.size().y)
+            .fold(24.0, f32::max)
+            + 14.0;
+        let (header, _) = ui.allocate_exact_size(egui::vec2(width, height), Sense::hover());
+        let mut picked = false;
+        for (side, half) in split_rect(header).into_iter().enumerate() {
+            let rect = half.shrink(7.0);
+            let color = if side == 0 { LEFT_ONLY } else { RIGHT_ONLY };
+            let painter = ui.painter().with_clip_rect(rect);
+            painter.text(
+                rect.left_center(),
+                Align2::LEFT_CENTER,
+                if side == 0 { "LEFT" } else { "RIGHT" },
+                FontId::monospace(10.0),
+                color,
+            );
+            let galley = galleys[side].clone();
+            let position = egui::pos2(rect.left() + 40.0, rect.center().y - galley.size().y / 2.0);
+            let path_rect = Rect::from_min_size(position, egui::vec2(path_width, galley.size().y));
+            painter.galley(position, galley, TEXT);
+            ui.interact(
+                path_rect,
+                ui.id().with(("selected-folder", side)),
+                Sense::hover(),
+            )
+            .on_hover_text(&full_paths[side]);
+            let browse_rect = Rect::from_center_size(
+                rect.right_center() - egui::vec2(12.0, 0.0),
+                egui::vec2(24.0, 24.0),
+            );
+            let mut browse_ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(browse_rect)
+                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            );
+            let browse = icon_button(
+                &mut browse_ui,
+                ToolbarIcon::Browse,
+                true,
+                if side == 0 {
+                    "Browse left folder"
+                } else {
+                    "Browse right folder"
+                },
+            );
+            if browse.clicked() {
+                let mut dialog = rfd::FileDialog::new().set_title(if side == 0 {
+                    "Select left folder"
+                } else {
+                    "Select right folder"
+                });
+                if !self.paths[side].is_empty() {
+                    dialog = dialog.set_directory(&self.paths[side]);
+                }
+                if let Some(path) = dialog.pick_folder() {
+                    self.paths[side] = path.to_string_lossy().into_owned();
+                    picked = true;
+                }
+            }
         }
         if picked {
+            self.invalidate();
             self.start_comparison();
         }
     }
@@ -770,18 +791,25 @@ fn icon_button(ui: &mut egui::Ui, icon: ToolbarIcon, enabled: bool, label: &str)
                 );
             }
             ToolbarIcon::Expand | ToolbarIcon::Collapse => {
-                let direction = if matches!(icon, ToolbarIcon::Expand) {
-                    1.0
-                } else {
-                    -1.0
-                };
-                for y in [-3.0, 3.0] {
-                    ui.painter().line(
-                        vec![
-                            point(-5.0, y - direction * 2.0),
-                            point(0.0, y + direction * 2.0),
-                            point(5.0, y - direction * 2.0),
-                        ],
+                let back = Rect::from_center_size(point(-2.0, 2.0), egui::vec2(12.0, 12.0));
+                let front = Rect::from_center_size(point(1.0, -1.0), egui::vec2(12.0, 12.0));
+                ui.painter().rect_stroke(
+                    back,
+                    2,
+                    Stroke::new(1.0, color.gamma_multiply(0.65)),
+                    egui::StrokeKind::Inside,
+                );
+                ui.painter().rect_filled(front, 2, PANEL);
+                ui.painter()
+                    .rect_stroke(front, 2, stroke, egui::StrokeKind::Inside);
+                let center = front.center();
+                ui.painter().line_segment(
+                    [center - egui::vec2(3.0, 0.0), center + egui::vec2(3.0, 0.0)],
+                    stroke,
+                );
+                if matches!(icon, ToolbarIcon::Expand) {
+                    ui.painter().line_segment(
+                        [center - egui::vec2(0.0, 3.0), center + egui::vec2(0.0, 3.0)],
                         stroke,
                     );
                 }
@@ -1212,6 +1240,110 @@ mod tests {
                 "{text} outside viewport: {positions:?}"
             );
         }
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn clicked_item_footer_is_fully_visible_at_supported_window_sizes() {
+        for (width, height) in [(900.0, 650.0), (1200.0, 800.0)] {
+            let ctx = egui::Context::default();
+            apply_theme(&ctx);
+            let mut app = loaded_app();
+            app.tree.as_mut().unwrap().expand_all();
+            let screen = Rect::from_min_size(Pos2::ZERO, egui::vec2(width, height));
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ui| app.render(ui),
+            );
+            output.textures_delta.clear();
+            let file = text_positions(&output, "model.step")[1];
+            output.drop_without_applying_deltas();
+            for pressed in [true, false] {
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(screen),
+                        events: vec![
+                            egui::Event::PointerMoved(file + egui::vec2(3.0, 5.0)),
+                            egui::Event::PointerButton {
+                                pos: file + egui::vec2(3.0, 5.0),
+                                button: egui::PointerButton::Primary,
+                                pressed,
+                                modifiers: Default::default(),
+                            },
+                        ],
+                        ..Default::default()
+                    },
+                    |ui| app.render(ui),
+                );
+                output.textures_delta.clear();
+                output.drop_without_applying_deltas();
+            }
+            assert_eq!(
+                app.selected.as_deref(),
+                Some(std::path::Path::new("assembly/model.step"))
+            );
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ui| app.render(ui),
+            );
+            output.textures_delta.clear();
+            let (shape, text) = output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.text() == "assembly/model.step" => {
+                        Some((shape, text))
+                    }
+                    _ => None,
+                })
+                .expect("Clicked item should appear in footer");
+            let bounds = Rect::from_min_size(text.pos, text.galley.size());
+            assert!(bounds.top() > height - 55.0);
+            assert!(
+                screen.shrink(10.0).contains_rect(bounds),
+                "Footer outside window: {bounds:?}"
+            );
+            assert!(
+                shape.clip_rect.contains_rect(bounds),
+                "Footer clipped: {bounds:?}"
+            );
+            output.drop_without_applying_deltas();
+        }
+    }
+
+    #[test]
+    fn single_path_headers_center_side_labels_and_browse_buttons() {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut app = loaded_app();
+        app.paths = [
+            format!("/engineering/{}release", "long-folder/".repeat(12)),
+            "/engineering/release".into(),
+        ];
+        let output = render(&mut app, &ctx, vec![]);
+        let mut centers = Vec::new();
+        for (side, label) in ["LEFT", "RIGHT"].into_iter().enumerate() {
+            let paths = text_centers(&output, &app.paths[side]);
+            assert_eq!(paths.len(), 1, "Selected path must only appear once");
+            let side_label = text_centers(&output, label)[0];
+            let browse = ctx
+                .read_response(egui::Id::new(if side == 0 {
+                    "Browse left folder"
+                } else {
+                    "Browse right folder"
+                }))
+                .unwrap();
+            assert_eq!(side_label.y, paths[0].y);
+            assert_eq!(side_label.y, browse.rect.center().y);
+            centers.push(side_label.y);
+        }
+        assert_eq!(centers[0], centers[1]);
         output.drop_without_applying_deltas();
     }
 

@@ -8,18 +8,17 @@ authentication or make outbound network requests at runtime.
 
 ## Use
 
-Use the folder icon in each pane header, or enter/paste both folder paths and use
-the refresh icon at the upper right to compare them. Selecting the second folder
-with the picker starts comparison
-automatically; pressing Enter in a path field also starts comparison when both
-paths are supplied. The full selected path is shown above each tree, wrapping when
-needed. Local paths, mapped drives, UNC shares, and mounted Linux paths all use the
-same filesystem APIs.
+Use the folder icon in each pane header to select its folder. Selecting the second
+folder starts comparison automatically; the refresh icon at the upper right
+compares the same folders again. Each header shows the full selected path once as
+text, wrapping when needed, with LEFT/RIGHT and the browse button centered beside
+it. Local paths, mapped drives, UNC shares, and mounted Linux paths all use the
+same filesystem APIs; paths can be entered through the native folder dialog.
 
 Click a folder in either tree to expand or collapse the corresponding relative
 path in both. Scrolling is linked, and a dash marks the empty position opposite
 a one-sided item so matching paths stay aligned. **Expand all** and **Collapse
-all** are the double-chevron icons at the upper right and control both trees. Hover
+all** are the stacked plus/minus icons at the upper right and control both trees. Hover
 over an action icon for its label. Tab focuses tree rows; Enter or Space toggles a
 folder, and the left/right arrow keys collapse/expand a focused folder.
 
