@@ -8,8 +8,8 @@ authentication or make outbound network requests at runtime.
 
 ## Use
 
-Use the folder icon in each pane header to select its folder. Selecting the second
-folder starts comparison automatically; the refresh icon at the upper right
+Click the path area or folder icon in either pane header to select its folder.
+Selecting the second folder starts comparison automatically; the refresh icon at the upper right
 compares the same folders again. Each header shows the full selected path once as
 text, wrapping when needed, with LEFT/RIGHT and the browse button centered beside
 it. Local paths, mapped drives, UNC shares, and mounted Linux paths all use the

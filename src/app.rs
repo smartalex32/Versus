@@ -417,6 +417,24 @@ impl VersusApp {
     }
 
     fn folder_inputs(&mut self, ui: &mut egui::Ui) {
+        self.folder_inputs_with_picker(ui, |side, current_path| {
+            let mut dialog = rfd::FileDialog::new().set_title(if side == 0 {
+                "Select left folder"
+            } else {
+                "Select right folder"
+            });
+            if !current_path.is_empty() {
+                dialog = dialog.set_directory(current_path);
+            }
+            dialog.pick_folder()
+        });
+    }
+
+    fn folder_inputs_with_picker(
+        &mut self,
+        ui: &mut egui::Ui,
+        mut pick_folder: impl FnMut(usize, &str) -> Option<PathBuf>,
+    ) {
         let palette = Palette::for_context(ui.ctx());
         let full_paths = self.paths.clone().map(|path| {
             if path.is_empty() {
@@ -455,14 +473,33 @@ impl VersusApp {
             );
             let galley = galleys[side].clone();
             let position = egui::pos2(rect.left() + 40.0, rect.center().y - galley.size().y / 2.0);
-            let path_rect = Rect::from_min_size(position, egui::vec2(path_width, galley.size().y));
+            let path_rect = Rect::from_min_size(
+                egui::pos2(position.x, rect.top()),
+                egui::vec2(path_width, rect.height()),
+            );
             painter.galley(position, galley, palette.text);
-            ui.interact(
-                path_rect,
-                ui.id().with(("selected-folder", side)),
-                Sense::hover(),
-            )
-            .on_hover_text(&full_paths[side]);
+            let path_response = ui
+                .interact(
+                    path_rect,
+                    ui.id().with(("selected-folder", side)),
+                    Sense::click(),
+                )
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text(format!(
+                    "{}\nClick to browse for a folder",
+                    full_paths[side]
+                ));
+            path_response.widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::Button,
+                    true,
+                    if side == 0 {
+                        "Browse left folder path"
+                    } else {
+                        "Browse right folder path"
+                    },
+                )
+            });
             let browse_rect = Rect::from_center_size(
                 rect.right_center() - egui::vec2(12.0, 0.0),
                 egui::vec2(24.0, 24.0),
@@ -482,16 +519,8 @@ impl VersusApp {
                     "Browse right folder"
                 },
             );
-            if browse.clicked() {
-                let mut dialog = rfd::FileDialog::new().set_title(if side == 0 {
-                    "Select left folder"
-                } else {
-                    "Select right folder"
-                });
-                if !self.paths[side].is_empty() {
-                    dialog = dialog.set_directory(&self.paths[side]);
-                }
-                if let Some(path) = dialog.pick_folder() {
+            if browse.clicked() || path_response.clicked() {
+                if let Some(path) = pick_folder(side, &self.paths[side]) {
                     self.paths[side] = path.to_string_lossy().into_owned();
                     picked = true;
                 }
@@ -1211,12 +1240,14 @@ fn icon_button(ui: &mut egui::Ui, icon: ToolbarIcon, enabled: bool, label: &str)
                 color,
             ),
             ToolbarIcon::Sun => {
-                ui.painter().circle_stroke(center, 3.5, stroke);
+                ui.painter().circle_filled(center, 4.0, color);
                 for index in 0..8 {
                     let angle = index as f32 * std::f32::consts::TAU / 8.0;
                     let direction = egui::vec2(angle.cos(), angle.sin());
-                    ui.painter()
-                        .line_segment([center + direction * 5.5, center + direction * 8.0], stroke);
+                    ui.painter().line_segment(
+                        [center + direction * 7.2, center + direction * 10.2],
+                        Stroke::new(1.2, color),
+                    );
                 }
             }
             ToolbarIcon::Moon => {
@@ -1732,6 +1763,83 @@ mod tests {
             );
             output.drop_without_applying_deltas();
         }
+    }
+
+    #[test]
+    fn clicking_path_or_browse_opens_picker_for_the_correct_side() {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut app = loaded_app();
+        app.paths = [String::new(), "/engineering/release/designs".into()];
+        let original_paths = app.paths.clone();
+        let mut requests = Vec::new();
+        {
+            let mut render_inputs = |events| {
+                ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(
+                            Pos2::ZERO,
+                            egui::vec2(1200.0, 800.0),
+                        )),
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| {
+                        app.folder_inputs_with_picker(ui, |side, path| {
+                            requests.push((side, path.to_owned()));
+                            None // Closing the dialog should preserve the current comparison.
+                        })
+                    },
+                )
+            };
+            for (side, path_text) in [(0, "Choose a folder"), (1, "/engineering/release/designs")] {
+                for path_area in [true, false] {
+                    let output = render_inputs(vec![]);
+                    let target = if path_area {
+                        text_centers(&output, path_text)[0]
+                    } else {
+                        ctx.read_response(egui::Id::new(if side == 0 {
+                            "Browse left folder"
+                        } else {
+                            "Browse right folder"
+                        }))
+                        .unwrap()
+                        .rect
+                        .center()
+                    };
+                    output.drop_without_applying_deltas();
+                    let output = render_inputs(vec![egui::Event::PointerMoved(target)]);
+                    assert_eq!(
+                        output.platform_output.cursor_icon,
+                        egui::CursorIcon::PointingHand
+                    );
+                    output.drop_without_applying_deltas();
+                    for pressed in [true, false] {
+                        render_inputs(vec![
+                            egui::Event::PointerMoved(target),
+                            egui::Event::PointerButton {
+                                pos: target,
+                                button: egui::PointerButton::Primary,
+                                pressed,
+                                modifiers: Default::default(),
+                            },
+                        ])
+                        .drop_without_applying_deltas();
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            requests,
+            vec![
+                (0, String::new()),
+                (0, String::new()),
+                (1, original_paths[1].clone()),
+                (1, original_paths[1].clone())
+            ]
+        );
+        assert_eq!(app.paths, original_paths);
+        assert!(app.tree.is_some());
     }
 
     #[test]
