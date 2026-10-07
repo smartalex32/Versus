@@ -2,8 +2,9 @@
 
 ## Purpose
 
-Versus is an offline native desktop tool for directory comparison, two-way text
-comparison, and three-way text merge on Windows and Linux. Runtime behavior must
+Versus is an offline native engineering workspace for two-folder comparison on
+Windows and Linux. Text comparison and merge primitives remain in the core for
+future work; the rebuilt UI exposes only linked folder trees. Runtime behavior must
 not rely on Internet services, telemetry, automatic updates, a managed runtime, or
 background services. Network-mounted paths are handled through normal filesystem
 APIs and must fail cleanly when unavailable.
@@ -14,6 +15,8 @@ APIs and must fail cleanly when unavailable.
 - `similar` for text differences and `rfd` for native path pickers.
 - `src/app.rs` renders the desktop UI; `src/core/` owns filesystem comparison,
   text diff, merge, and saving. The core library is independent from UI rendering.
+- `src/core/tree.rs` builds aligned folder trees with per-side types, ancestor
+  status aggregation, and shared expansion state.
 - `tests/` covers externally observable comparison and filesystem behavior.
 - `.cargo/config.toml` replaces crates.io with the checked-in `vendor/` tree and
   forces Cargo offline.
@@ -34,8 +37,8 @@ APIs and must fail cleanly when unavailable.
 - Keep slow filesystem work off the UI thread and support cancellation where the UI
   exposes it.
 - Support direct entry and paste of Windows drive and UNC paths alongside native
-  dialogs. Preserve useful comparison results when opening a file from a directory
-  result.
+  dialogs. Tree rows align by relative path, with placeholders for missing entries;
+  expanding or collapsing either pane updates the shared expansion state.
 - Keep dependencies small, locked, vendorable, and compatible with offline builds.
 
 ## Commands

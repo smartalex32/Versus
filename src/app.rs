@@ -1,1837 +1,1074 @@
-use eframe::egui::{self, Color32, RichText, TextEdit};
+use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 use std::{
-    path::{Path, PathBuf},
-    sync::{Arc, atomic::AtomicBool, mpsc},
-    thread,
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver, TryRecvError},
+    },
+    time::{Duration, Instant},
 };
 use versus::{
-    DirectoryCompareOptions, DirectoryDiff, DirectoryEntry, DirectoryEntryKind,
-    DirectoryEntryState, FileCompareOptions, FileDiff, FileDiffKind, LineEnding, MergeChoice,
-    MergeHunkKind, SaveOptions, TextDiff, ThreeWayDiff, compare_directories, compare_files,
-    compare_texts, compare_three_texts, save_text_safely,
+    CompareError, DirectoryCompareOptions, DirectoryEntryKind, DirectoryEntryState, FolderTree,
+    TreeNode,
 };
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Mode {
-    Directory,
-    TwoWay,
-    ThreeWay,
-}
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum DirectoryFilter {
-    All,
-    Different,
-    Same,
-    LeftOnly,
-    RightOnly,
-}
-struct DirectoryJob {
-    receiver: mpsc::Receiver<Result<DirectoryDiff, String>>,
-    cancelled: Arc<AtomicBool>,
-    left_root: String,
-    right_root: String,
-}
-enum FileJobResult {
-    Two(FileDiff, String, String, String, String),
-    Three(String, String, String, ThreeWayDiff, String, String, String),
-}
-struct FileJob {
-    receiver: mpsc::Receiver<Result<FileJobResult, String>>,
-}
-#[derive(Default)]
-struct TextUndo {
-    undo: Vec<String>,
-    redo: Vec<String>,
-}
-impl TextUndo {
-    fn changed(&mut self, before: String) {
-        self.undo.push(before);
-        self.redo.clear();
-    }
-    fn undo(&mut self, value: &mut String) {
-        if let Some(previous) = self.undo.pop() {
-            self.redo.push(std::mem::replace(value, previous));
-        }
-    }
-    fn redo(&mut self, value: &mut String) {
-        if let Some(next) = self.redo.pop() {
-            self.undo.push(std::mem::replace(value, next));
-        }
-    }
+const BACKGROUND: Color32 = Color32::from_rgb(16, 21, 29);
+const PANEL: Color32 = Color32::from_rgb(23, 30, 40);
+const BORDER: Color32 = Color32::from_rgb(48, 59, 74);
+const MUTED: Color32 = Color32::from_rgb(145, 161, 181);
+const TEXT: Color32 = Color32::from_rgb(221, 230, 240);
+const ACCENT: Color32 = Color32::from_rgb(95, 163, 255);
+const CHANGED: Color32 = Color32::from_rgb(244, 191, 98);
+const LEFT_ONLY: Color32 = Color32::from_rgb(94, 211, 221);
+const RIGHT_ONLY: Color32 = Color32::from_rgb(189, 157, 255);
+const ERROR: Color32 = Color32::from_rgb(255, 127, 137);
+const SAME: Color32 = Color32::from_rgb(133, 187, 157);
+const ROW_HEIGHT: f32 = 30.0;
+
+struct ComparisonJob {
+    receiver: Receiver<Result<FolderTree, CompareError>>,
+    cancellation: Arc<AtomicBool>,
+    roots: [PathBuf; 2],
+    started: Instant,
 }
 
 pub struct VersusApp {
-    logo_texture: egui::TextureHandle,
-    mode: Mode,
-    left_path: String,
-    right_path: String,
-    base_path: String,
-    directory_left_path: String,
-    directory_right_path: String,
-    compared_directory_left: String,
-    compared_directory_right: String,
-    two_loaded_left_path: String,
-    two_loaded_right_path: String,
-    three_loaded_base_path: String,
-    three_loaded_left_path: String,
-    three_loaded_right_path: String,
-    directory: Option<DirectoryDiff>,
-    directory_job: Option<DirectoryJob>,
-    file_job: Option<FileJob>,
-    directory_filter: DirectoryFilter,
-    two_diff: Option<TextDiff>,
-    two_kind: Option<FileDiffKind>,
-    two_equal: Option<bool>,
-    two_left_ending: LineEnding,
-    two_right_ending: LineEnding,
-    three_result_ending: LineEnding,
-    left_text: String,
-    right_text: String,
-    two_selected: usize,
-    left_undo: TextUndo,
-    right_undo: TextUndo,
-    three_diff: Option<ThreeWayDiff>,
-    resolved_merge_hunks: Vec<bool>,
-    three_selected: usize,
-    base_text: String,
-    merge_left: String,
-    merge_right: String,
-    merged_text: String,
-    merged_undo: TextUndo,
-    ignore_line_endings: bool,
-    ignore_whitespace: bool,
-    confirm_overwrite: bool,
-    dark_mode: bool,
-    status: String,
-    save_as_open: bool,
-    save_as_path: String,
-    save_as_contents: String,
-    save_as_line_ending: LineEnding,
-    pending_overwrite: Option<(PathBuf, String, LineEnding)>,
-    two_scroll: f32,
-    two_edit_open: bool,
-    two_diff_dirty: bool,
+    paths: [String; 2],
+    roots: Option<[PathBuf; 2]>,
+    tree: Option<FolderTree>,
+    job: Option<ComparisonJob>,
+    selected: Option<PathBuf>,
+    message: String,
+    error: Option<String>,
+    elapsed: Option<Duration>,
+    counts: [usize; 5],
+    scroll_generation: u64,
+}
+
+impl Default for VersusApp {
+    fn default() -> Self {
+        Self {
+            paths: Default::default(),
+            roots: None,
+            tree: None,
+            job: None,
+            selected: None,
+            message: "Choose two folders to begin.".into(),
+            error: None,
+            elapsed: None,
+            counts: [0; 5],
+            scroll_generation: 0,
+        }
+    }
 }
 
 impl VersusApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let settings = load_settings();
-        apply_theme(&cc.egui_ctx, settings.dark_mode);
-        let logo_image: egui::ColorImage = (&crate::logo::icon_data()).into();
-        let logo_texture =
-            cc.egui_ctx
-                .load_texture("versus-mark", logo_image, egui::TextureOptions::LINEAR);
-        Self {
-            logo_texture,
-            mode: Mode::Directory,
-            left_path: String::new(),
-            right_path: String::new(),
-            base_path: String::new(),
-            directory_left_path: String::new(),
-            directory_right_path: String::new(),
-            compared_directory_left: String::new(),
-            compared_directory_right: String::new(),
-            two_loaded_left_path: String::new(),
-            two_loaded_right_path: String::new(),
-            three_loaded_base_path: String::new(),
-            three_loaded_left_path: String::new(),
-            three_loaded_right_path: String::new(),
-            directory: None,
-            directory_job: None,
-            file_job: None,
-            directory_filter: DirectoryFilter::Different,
-            two_diff: None,
-            two_kind: None,
-            two_equal: None,
-            two_left_ending: LineEnding::Lf,
-            two_right_ending: LineEnding::Lf,
-            three_result_ending: LineEnding::Lf,
-            left_text: String::new(),
-            right_text: String::new(),
-            two_selected: 0,
-            left_undo: TextUndo::default(),
-            right_undo: TextUndo::default(),
-            three_diff: None,
-            resolved_merge_hunks: Vec::new(),
-            three_selected: 0,
-            base_text: String::new(),
-            merge_left: String::new(),
-            merge_right: String::new(),
-            merged_text: String::new(),
-            merged_undo: TextUndo::default(),
-            ignore_line_endings: settings.ignore_line_endings,
-            ignore_whitespace: settings.ignore_whitespace,
-            confirm_overwrite: settings.confirm_overwrite,
-            dark_mode: settings.dark_mode,
-            status: "Choose paths and compare.".into(),
-            save_as_open: false,
-            save_as_path: String::new(),
-            save_as_contents: String::new(),
-            save_as_line_ending: LineEnding::Lf,
-            pending_overwrite: None,
-            two_scroll: 0.0,
-            two_edit_open: false,
-            two_diff_dirty: false,
-        }
+        apply_theme(&cc.egui_ctx);
+        Self::default()
     }
-    fn options(&self) -> FileCompareOptions {
-        FileCompareOptions {
-            ignore_line_endings: self.ignore_line_endings,
-            ignore_whitespace: self.ignore_whitespace,
-            ..Default::default()
+
+    fn invalidate(&mut self) {
+        if let Some(job) = self.job.take() {
+            job.cancellation.store(true, Ordering::Relaxed);
         }
+        self.tree = None;
+        self.roots = None;
+        self.selected = None;
+        self.error = None;
+        self.elapsed = None;
+        self.counts = [0; 5];
+        self.message = "Folder selection changed. Compare to load the trees.".into();
+        self.scroll_generation += 1;
     }
-    fn persist_settings(&mut self) {
-        if let Err(error) = save_settings(Settings {
-            ignore_line_endings: self.ignore_line_endings,
-            ignore_whitespace: self.ignore_whitespace,
-            confirm_overwrite: self.confirm_overwrite,
-            dark_mode: self.dark_mode,
-        }) {
-            self.status = format!("Unable to save settings: {error}");
-        }
-    }
-    fn selected_hunk_scroll(&mut self) {
-        if let Some(diff) = &self.two_diff {
-            if let Some(hunk) = diff.hunks.get(self.two_selected) {
-                self.two_scroll = hunk.left_range.start.min(hunk.right_range.start) as f32 * 18.0;
-            }
-        }
-    }
-    fn poll_file_job(&mut self, ctx: &egui::Context) {
-        if let Some(job) = &self.file_job {
-            match job.receiver.try_recv() {
-                Ok(Ok(FileJobResult::Two(file, left, right, left_path, right_path))) => {
-                    self.two_kind = Some(file.kind.clone());
-                    self.two_equal = Some(file.equal);
-                    self.two_diff = file.text;
-                    if file.kind == FileDiffKind::Text {
-                        self.left_text = left;
-                        self.right_text = right;
-                        self.two_left_ending = detected_line_ending(&self.left_text);
-                        self.two_right_ending = detected_line_ending(&self.right_text);
-                        self.left_undo = TextUndo::default();
-                        self.right_undo = TextUndo::default();
-                        self.two_selected = 0;
-                        self.two_diff_dirty = false;
-                    } else {
-                        self.left_text.clear();
-                        self.right_text.clear();
-                        self.left_undo = TextUndo::default();
-                        self.right_undo = TextUndo::default();
-                        self.two_diff_dirty = false;
-                        self.two_edit_open = false;
-                    }
-                    self.two_loaded_left_path = left_path;
-                    self.two_loaded_right_path = right_path;
-                    self.status = if file.equal {
-                        "Files match.".into()
-                    } else {
-                        "File comparison ready.".into()
-                    };
-                    self.file_job = None;
-                }
-                Ok(Ok(FileJobResult::Three(
-                    base,
-                    left,
-                    right,
-                    diff,
-                    base_path,
-                    left_path,
-                    right_path,
-                ))) => {
-                    self.three_result_ending = detected_line_ending(&right);
-                    self.base_text = base;
-                    self.merge_left = left;
-                    self.merge_right = right;
-                    self.merged_text = diff.merged.clone();
-                    self.three_diff = Some(diff);
-                    self.three_loaded_base_path = base_path;
-                    self.three_loaded_left_path = left_path;
-                    self.three_loaded_right_path = right_path;
-                    self.resolved_merge_hunks =
-                        vec![false; self.three_diff.as_ref().map_or(0, |diff| diff.hunks.len())];
-                    self.merged_undo = TextUndo::default();
-                    self.three_selected = self
-                        .three_diff
-                        .as_ref()
-                        .and_then(|diff| {
-                            diff.hunks
-                                .iter()
-                                .position(|h| h.kind == MergeHunkKind::Conflict)
-                        })
-                        .unwrap_or(0);
-                    self.status = "Three-way merge ready.".into();
-                    self.file_job = None;
-                }
-                Ok(Err(error)) => {
-                    self.status = error;
-                    self.file_job = None;
-                }
-                Err(mpsc::TryRecvError::Empty) => {
-                    ctx.request_repaint_after(std::time::Duration::from_millis(100))
-                }
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    self.status = "File comparison worker stopped unexpectedly.".into();
-                    self.file_job = None;
-                }
-            }
-        }
-    }
-    fn poll_directory_job(&mut self, ctx: &egui::Context) {
-        if let Some(job) = &self.directory_job {
-            match job.receiver.try_recv() {
-                Ok(Ok(result)) => {
-                    self.status = if result.cancelled {
-                        "Directory comparison cancelled.".into()
-                    } else {
-                        format!("Compared {} entries.", result.entries.len())
-                    };
-                    self.directory = Some(result);
-                    self.compared_directory_left = job.left_root.clone();
-                    self.compared_directory_right = job.right_root.clone();
-                    self.directory_job = None;
-                }
-                Ok(Err(error)) => {
-                    self.status = error;
-                    self.directory_job = None;
-                }
-                Err(mpsc::TryRecvError::Empty) => {
-                    ctx.request_repaint_after(std::time::Duration::from_millis(100))
-                }
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    self.status = "Directory comparison worker stopped unexpectedly.".into();
-                    self.directory_job = None;
-                }
-            }
-        }
-    }
-    fn start_directory_compare(&mut self) {
-        let left = PathBuf::from(self.directory_left_path.trim());
-        let right = PathBuf::from(self.directory_right_path.trim());
-        if left.as_os_str().is_empty() || right.as_os_str().is_empty() {
-            self.status = "Enter both directory paths.".into();
+
+    fn start_comparison(&mut self) {
+        if self.paths.iter().any(|path| path.trim().is_empty()) {
             return;
         }
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let worker_cancel = Arc::clone(&cancelled);
+        if let Some(job) = self.job.take() {
+            job.cancellation.store(true, Ordering::Relaxed);
+        }
+        let roots = self.paths.clone().map(PathBuf::from);
+        let worker_roots = roots.clone();
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let worker_cancellation = cancellation.clone();
         let (sender, receiver) = mpsc::channel();
-        thread::spawn(move || {
-            let options = DirectoryCompareOptions {
-                cancellation: Some(worker_cancel),
-                ..Default::default()
-            };
-            let _ =
-                sender.send(compare_directories(left, right, &options).map_err(|e| e.to_string()));
+        std::thread::spawn(move || {
+            let result = versus::compare_directories(
+                &worker_roots[0],
+                &worker_roots[1],
+                &DirectoryCompareOptions {
+                    cancellation: Some(worker_cancellation),
+                    ..Default::default()
+                },
+            )
+            .map(|diff| FolderTree::from_diff(&diff));
+            let _ = sender.send(result);
         });
-        self.directory_job = Some(DirectoryJob {
+        self.job = Some(ComparisonJob {
             receiver,
-            cancelled,
-            left_root: self.directory_left_path.trim().to_owned(),
-            right_root: self.directory_right_path.trim().to_owned(),
+            cancellation,
+            roots,
+            started: Instant::now(),
         });
-        self.status = "Scanning directories…".into();
+        self.error = None;
+        self.message = "Scanning folders and comparing file contents…".into();
     }
-    fn compare_two_paths(&mut self) {
-        self.two_diff = None;
-        self.two_kind = None;
-        self.two_equal = None;
-        self.two_loaded_left_path.clear();
-        self.two_loaded_right_path.clear();
-        let left = self.left_path.trim().to_owned();
-        let right = self.right_path.trim().to_owned();
-        let options = self.options();
-        let (sender, receiver) = mpsc::channel();
-        thread::spawn(move || {
-            let result = compare_files(&left, &right, &options)
-                .map_err(|e| e.to_string())
-                .and_then(|file| {
-                    if file.kind != FileDiffKind::Text {
-                        return Ok(FileJobResult::Two(
-                            file,
-                            String::new(),
-                            String::new(),
-                            left,
-                            right,
-                        ));
-                    }
-                    let read = |p: &str| {
-                        let metadata = std::fs::metadata(p).map_err(|e| e.to_string())?;
-                        if metadata.len() > versus::DEFAULT_TEXT_SIZE_LIMIT {
-                            return Err(format!(
-                                "{p}: file exceeds the text limit of {} bytes",
-                                versus::DEFAULT_TEXT_SIZE_LIMIT
-                            ));
-                        }
-                        std::fs::read_to_string(p)
-                            .map(|s| s.strip_prefix('\u{feff}').unwrap_or(&s).to_owned())
-                            .map_err(|e| e.to_string())
-                    };
-                    Ok(FileJobResult::Two(
-                        file,
-                        read(&left)?,
-                        read(&right)?,
-                        left,
-                        right,
-                    ))
-                });
-            let _ = sender.send(result);
-        });
-        self.file_job = Some(FileJob { receiver });
-        self.status = "Comparing files…".into();
-    }
-    fn refresh_two_diff(&mut self) {
-        self.two_diff = Some(compare_texts(
-            &self.left_text,
-            &self.right_text,
-            &self.options(),
-        ));
-        self.two_diff_dirty = false;
-    }
-    fn compare_three_paths(&mut self) {
-        self.three_diff = None;
-        self.three_loaded_base_path.clear();
-        self.three_loaded_left_path.clear();
-        self.three_loaded_right_path.clear();
-        let base_path = self.base_path.trim().to_owned();
-        let left_path = self.left_path.trim().to_owned();
-        let right_path = self.right_path.trim().to_owned();
-        let options = self.options();
-        let (sender, receiver) = mpsc::channel();
-        thread::spawn(move || {
-            let read = |p: &str| {
-                let metadata = std::fs::metadata(p).map_err(|e| e.to_string())?;
-                if metadata.len() > versus::DEFAULT_TEXT_SIZE_LIMIT {
-                    return Err(format!(
-                        "{p}: file exceeds the text limit of {} bytes",
-                        versus::DEFAULT_TEXT_SIZE_LIMIT
-                    ));
+
+    fn poll_comparison(&mut self, ctx: &egui::Context) {
+        let Some(job) = &self.job else {
+            return;
+        };
+        let result = match job.receiver.try_recv() {
+            Ok(result) => Some(result.map_err(|error| error.to_string())),
+            Err(TryRecvError::Disconnected) => Some(Err(
+                "The comparison worker stopped unexpectedly. Try comparing again.".into(),
+            )),
+            Err(TryRecvError::Empty) => None,
+        };
+        if let Some(result) = result {
+            let job = self.job.take().unwrap();
+            if job.cancellation.load(Ordering::Relaxed) {
+                self.message = "Comparison cancelled.".into();
+                return;
+            }
+            match result {
+                Ok(tree) => {
+                    self.counts = count_entries(&tree);
+                    self.tree = Some(tree);
+                    self.roots = Some(job.roots);
+                    self.elapsed = Some(job.started.elapsed());
+                    self.selected = None;
+                    self.scroll_generation += 1;
+                    self.message = "Comparison complete.".into();
                 }
-                std::fs::read_to_string(p)
-                    .map(|s| s.strip_prefix('\u{feff}').unwrap_or(&s).to_owned())
-                    .map_err(|e| e.to_string())
-            };
-            let result = (|| {
-                let base = read(&base_path)?;
-                let left = read(&left_path)?;
-                let right = read(&right_path)?;
-                let diff = compare_three_texts(&base, &left, &right, &options)
-                    .map_err(|e| e.to_string())?;
-                Ok(FileJobResult::Three(
-                    base, left, right, diff, base_path, left_path, right_path,
-                ))
-            })();
-            let _ = sender.send(result);
-        });
-        self.file_job = Some(FileJob { receiver });
-        self.status = "Comparing three files…".into();
-    }
-    fn save(&mut self, target: &str, contents: &str, line_ending: LineEnding) {
-        let path = PathBuf::from(target.trim());
-        if path.as_os_str().is_empty() {
-            self.save_as_open = true;
-            return;
-        }
-        let target_exists = path.exists() || std::fs::symlink_metadata(&path).is_ok();
-        if target_exists && self.confirm_overwrite {
-            self.pending_overwrite = Some((path, contents.to_owned(), line_ending));
-            return;
-        }
-        match save_text_safely(
-            &path,
-            contents,
-            &SaveOptions {
-                overwrite: target_exists,
-                line_ending,
-            },
-        ) {
-            Ok(()) => self.status = format!("Saved {}.", path.display()),
-            Err(error) => self.status = error.to_string(),
+                Err(error) => {
+                    self.error = Some(error);
+                    self.message =
+                        "Comparison failed. Check the folder paths and access permissions.".into();
+                }
+            }
+        } else {
+            ctx.request_repaint_after(Duration::from_millis(60));
         }
     }
-    fn open_save_as(&mut self, contents: String, line_ending: LineEnding) {
-        self.save_as_contents = contents;
-        self.save_as_line_ending = line_ending;
-        self.save_as_open = true;
+
+    fn render(&mut self, ui: &mut egui::Ui) {
+        egui::Frame::default()
+            .fill(BACKGROUND)
+            .inner_margin(egui::Margin::same(18))
+            .show(ui, |ui| {
+                self.header(ui);
+                ui.add_space(14.0);
+                self.folder_inputs(ui);
+                ui.add_space(12.0);
+                self.controls(ui);
+                ui.add_space(8.0);
+                self.legend(ui);
+                ui.add_space(10.0);
+                if let Some(error) = &self.error {
+                    egui::Frame::default()
+                        .fill(ERROR.gamma_multiply(0.12))
+                        .inner_margin(egui::Margin::same(10))
+                        .show(ui, |ui| {
+                            ui.colored_label(ERROR, error);
+                        });
+                    ui.add_space(8.0);
+                }
+                let height = (ui.available_height() - 44.0).max(120.0);
+                self.tree_area(ui, height);
+                ui.add_space(10.0);
+                self.footer(ui);
+            });
     }
-    fn copy_hunk(&mut self, left_to_right: bool) {
-        let Some(diff) = &self.two_diff else { return };
-        let Some(hunk) = diff.hunks.get(self.two_selected) else {
-            return;
-        };
-        let source = if left_to_right {
-            &self.left_text
-        } else {
-            &self.right_text
-        };
-        let replacement: Vec<String> = source
-            .lines()
-            .skip(if left_to_right {
-                hunk.left_range.start
-            } else {
-                hunk.right_range.start
-            })
-            .take(if left_to_right {
-                hunk.left_range.len()
-            } else {
-                hunk.right_range.len()
-            })
-            .map(str::to_owned)
-            .collect();
-        let source_range = if left_to_right {
-            hunk.left_range.clone()
-        } else {
-            hunk.right_range.clone()
-        };
-        let source_line_count = source.lines().count();
-        let source_terminal_newline = source.ends_with('\n');
-        let target = if left_to_right {
-            &mut self.right_text
-        } else {
-            &mut self.left_text
-        };
-        let undo = if left_to_right {
-            &mut self.right_undo
-        } else {
-            &mut self.left_undo
-        };
-        let range = if left_to_right {
-            hunk.right_range.clone()
-        } else {
-            hunk.left_range.clone()
-        };
-        let terminal_newline =
-            if source_range.end == source_line_count && range.end == target.lines().count() {
-                source_terminal_newline
-            } else {
-                target.ends_with('\n')
-            };
-        let before = target.clone();
-        *target = replace_lines_preserving_style(target, range, replacement, terminal_newline);
-        undo.changed(before);
-        self.refresh_two_diff();
-        self.status = "Copied selected difference. Save explicitly to write the file.".into();
-    }
-    fn path_field(ui: &mut egui::Ui, label: &str, path: &mut String, directory: bool) {
-        ui.label(RichText::new(label).strong());
+
+    fn header(&self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            let width = (ui.available_width() - 60.0).max(80.0);
-            ui.add(
-                TextEdit::singleline(path)
-                    .desired_width(width)
-                    .background_color(if ui.visuals().dark_mode {
-                        Color32::from_rgb(37, 43, 52)
-                    } else {
-                        Color32::WHITE
-                    })
-                    .frame(egui::Frame::group(ui.style())),
+            ui.label(
+                RichText::new("V / V")
+                    .monospace()
+                    .size(23.0)
+                    .color(ACCENT)
+                    .strong(),
             );
-            if ui.button("…").on_hover_text("Browse for a path").clicked() {
-                let pick = if directory {
-                    rfd::FileDialog::new().pick_folder()
-                } else {
-                    rfd::FileDialog::new().pick_file()
-                };
-                if let Some(path_buf) = pick {
-                    *path = path_buf.display().to_string();
+            ui.add_space(8.0);
+            ui.vertical(|ui| {
+                ui.label(RichText::new("VERSUS").size(20.0).strong());
+                ui.label(
+                    RichText::new("ENGINEERING WORKSPACE  /  FOLDER COMPARE")
+                        .monospace()
+                        .size(10.0)
+                        .color(MUTED),
+                );
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(
+                    RichText::new("2-WAY  /  READ ONLY")
+                        .monospace()
+                        .size(11.0)
+                        .color(MUTED),
+                );
+            });
+        });
+    }
+
+    fn folder_inputs(&mut self, ui: &mut egui::Ui) {
+        let mut edited = false;
+        let mut picked = false;
+        ui.columns(2, |columns| {
+            for (side, column) in columns.iter_mut().enumerate() {
+                let color = if side == 0 { LEFT_ONLY } else { RIGHT_ONLY };
+                egui::Frame::default()
+                    .fill(PANEL)
+                    .stroke(Stroke::new(1.0, BORDER))
+                    .corner_radius(6)
+                    .inner_margin(egui::Margin::same(12))
+                    .show(column, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(if side == 0 {
+                                    "01  LEFT FOLDER"
+                                } else {
+                                    "02  RIGHT FOLDER"
+                                })
+                                .monospace()
+                                .size(11.0)
+                                .color(color)
+                                .strong(),
+                            );
+                        });
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            let width = (ui.available_width() - 90.0).max(100.0);
+                            let response = ui.add_sized(
+                                [width, 30.0],
+                                egui::TextEdit::singleline(&mut self.paths[side])
+                                    .font(egui::TextStyle::Monospace)
+                                    .hint_text("Enter or paste a folder path")
+                                    .id_salt(("folder-path", side)),
+                            );
+                            edited |= response.changed();
+                            if response.lost_focus()
+                                && ui.input(|input| input.key_pressed(egui::Key::Enter))
+                            {
+                                picked = true;
+                            }
+                            if ui
+                                .add_sized([78.0, 30.0], egui::Button::new("Browse…"))
+                                .clicked()
+                            {
+                                let mut dialog = rfd::FileDialog::new().set_title(if side == 0 {
+                                    "Select left folder"
+                                } else {
+                                    "Select right folder"
+                                });
+                                if !self.paths[side].is_empty() {
+                                    dialog = dialog.set_directory(&self.paths[side]);
+                                }
+                                if let Some(path) = dialog.pick_folder() {
+                                    self.paths[side] = path.to_string_lossy().into_owned();
+                                    edited = true;
+                                    picked = true;
+                                }
+                            }
+                        });
+                    });
+            }
+        });
+        if edited {
+            self.invalidate();
+        }
+        if picked {
+            self.start_comparison();
+        }
+    }
+
+    fn controls(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            let ready = self.paths.iter().all(|path| !path.trim().is_empty());
+            if ui
+                .add_enabled(
+                    ready && self.job.is_none(),
+                    egui::Button::new(
+                        RichText::new(if self.tree.is_some() {
+                            "Refresh comparison"
+                        } else {
+                            "Compare folders"
+                        })
+                        .strong(),
+                    )
+                    .fill(ACCENT.gamma_multiply(0.3))
+                    .min_size(egui::vec2(150.0, 32.0)),
+                )
+                .clicked()
+            {
+                self.start_comparison();
+            }
+            if let Some(job) = &self.job {
+                ui.spinner();
+                let cancelling = job.cancellation.load(Ordering::Relaxed);
+                if ui
+                    .add_enabled(
+                        !cancelling,
+                        egui::Button::new(if cancelling {
+                            "Cancelling…"
+                        } else {
+                            "Cancel"
+                        }),
+                    )
+                    .clicked()
+                {
+                    job.cancellation.store(true, Ordering::Relaxed);
                 }
+            }
+            ui.separator();
+            if ui
+                .add_enabled(self.tree.is_some(), egui::Button::new("Expand all"))
+                .clicked()
+            {
+                self.tree.as_mut().unwrap().expand_all();
+            }
+            if ui
+                .add_enabled(self.tree.is_some(), egui::Button::new("Collapse all"))
+                .clicked()
+            {
+                self.tree.as_mut().unwrap().collapse_all();
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(
+                    RichText::new("LINKED EXPANSION + SCROLL")
+                        .monospace()
+                        .size(10.0)
+                        .color(MUTED),
+                );
+            });
+        });
+    }
+
+    fn legend(&self, ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
+            for (index, (label, color)) in [
+                ("● Identical", SAME),
+                ("● Different", CHANGED),
+                ("● Left only", LEFT_ONLY),
+                ("● Right only", RIGHT_ONLY),
+                ("● Type / read error", ERROR),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let label = if self.tree.is_some() {
+                    format!("{label}  {}", self.counts[index])
+                } else {
+                    label.into()
+                };
+                ui.label(RichText::new(label).size(11.0).color(color));
+                ui.add_space(8.0);
             }
         });
     }
-    fn accept_drops(&mut self, ctx: &egui::Context) {
-        for file in ctx.input(|input| input.raw.dropped_files.clone()) {
-            let path = file.path();
-            let target = match self.mode {
-                Mode::Directory if self.directory_left_path.is_empty() => {
-                    &mut self.directory_left_path
+
+    fn tree_area(&mut self, ui: &mut egui::Ui, height: f32) {
+        egui::Frame::default()
+            .fill(PANEL)
+            .stroke(Stroke::new(1.0, BORDER))
+            .corner_radius(6)
+            .show(ui, |ui| {
+                ui.set_min_height(height);
+                ui.set_max_height(height);
+                ui.spacing_mut().item_spacing = Vec2::ZERO;
+                let width = ui.available_width();
+                let (header, _) = ui.allocate_exact_size(egui::vec2(width, 44.0), Sense::hover());
+                let halves = split_rect(header);
+                for (side, rect) in halves.into_iter().enumerate() {
+                    let name = self
+                        .roots
+                        .as_ref()
+                        .map(|roots| root_name(&roots[side]))
+                        .unwrap_or_else(|| {
+                            if side == 0 {
+                                "Left folder".into()
+                            } else {
+                                "Right folder".into()
+                            }
+                        });
+                    let painter = ui.painter().with_clip_rect(rect.shrink(10.0));
+                    let name_painter = painter.with_clip_rect(Rect::from_min_max(
+                        rect.min,
+                        egui::pos2(rect.right() - 120.0, rect.bottom()),
+                    ));
+                    name_painter.text(
+                        rect.left_center() + egui::vec2(14.0, -3.0),
+                        Align2::LEFT_CENTER,
+                        name,
+                        FontId::monospace(13.0),
+                        TEXT,
+                    );
+                    painter.text(
+                        rect.right_center() + egui::vec2(-14.0, -3.0),
+                        Align2::RIGHT_CENTER,
+                        self.tree
+                            .as_ref()
+                            .map(|tree| state_label(&tree.root().state))
+                            .unwrap_or(if side == 0 { "LEFT" } else { "RIGHT" }),
+                        FontId::monospace(10.0),
+                        self.tree
+                            .as_ref()
+                            .map(|tree| state_color(&tree.root().state))
+                            .unwrap_or(MUTED),
+                    );
                 }
-                Mode::Directory => &mut self.directory_right_path,
-                Mode::ThreeWay if self.base_path.is_empty() => &mut self.base_path,
-                _ if self.left_path.is_empty() => &mut self.left_path,
-                _ => &mut self.right_path,
-            };
-            *target = path.display().to_string();
-            self.status = "Added dropped path.".into();
+                ui.painter().line_segment(
+                    [header.center_top(), header.center_bottom()],
+                    Stroke::new(1.0, BORDER),
+                );
+                ui.painter().line_segment(
+                    [header.left_bottom(), header.right_bottom()],
+                    Stroke::new(1.0, BORDER),
+                );
+                if let Some(tree) = &mut self.tree {
+                    let rows = tree.visible_rows();
+                    if rows.is_empty() {
+                        empty_display(
+                            ui,
+                            height - 46.0,
+                            "Both folders are empty",
+                            "There are no files or folders to compare.",
+                        );
+                        return;
+                    }
+                    let mut toggle = None;
+                    let mut selected = None;
+                    egui::ScrollArea::vertical()
+                        .id_salt(("linked-trees", self.scroll_generation))
+                        .auto_shrink([false, false])
+                        .max_height(height - 46.0)
+                        .show_rows(ui, ROW_HEIGHT, rows.len(), |ui, range| {
+                            for index in range {
+                                let row = &rows[index];
+                                let node = row.node;
+                                let (rect, _) = ui.allocate_exact_size(
+                                    egui::vec2(ui.available_width(), ROW_HEIGHT),
+                                    Sense::hover(),
+                                );
+                                let is_selected =
+                                    self.selected.as_ref() == Some(&node.relative_path);
+                                for (side, half) in split_rect(rect).into_iter().enumerate() {
+                                    let entry = if side == 0 { &node.left } else { &node.right };
+                                    let present = entry.exists;
+                                    let response = ui.interact(
+                                        half,
+                                        ui.id().with((&node.relative_path, side)),
+                                        Sense::click(),
+                                    );
+                                    response.widget_info(|| {
+                                        egui::WidgetInfo::selected(
+                                            egui::WidgetType::SelectableLabel,
+                                            true,
+                                            is_selected,
+                                            format!(
+                                                "{}: {} ({})",
+                                                if side == 0 { "Left" } else { "Right" },
+                                                node.relative_path.display(),
+                                                state_label(&node.state)
+                                            ),
+                                        )
+                                    });
+                                    paint_row(
+                                        ui,
+                                        half,
+                                        node,
+                                        side,
+                                        RowAppearance {
+                                            depth: row.depth,
+                                            expanded: tree.is_expanded(&node.relative_path),
+                                            alternate: index % 2 == 1,
+                                            selected: is_selected,
+                                            hovered: response.hovered() || response.has_focus(),
+                                        },
+                                    );
+                                    let expandable = node.is_expandable()
+                                        && entry.kind == Some(DirectoryEntryKind::Directory);
+                                    let keyboard_toggle = response.has_focus()
+                                        && ui.input(|input| {
+                                            input.key_pressed(egui::Key::Space)
+                                                || input.key_pressed(egui::Key::Enter)
+                                        });
+                                    if response.clicked() || keyboard_toggle {
+                                        response.request_focus();
+                                        selected = Some(node.relative_path.clone());
+                                        if expandable {
+                                            toggle = Some(node.relative_path.clone());
+                                        }
+                                    }
+                                    if response.has_focus() && expandable {
+                                        let expanded = tree.is_expanded(&node.relative_path);
+                                        if ui.input(|input| {
+                                            (input.key_pressed(egui::Key::ArrowRight) && !expanded)
+                                                || (input.key_pressed(egui::Key::ArrowLeft)
+                                                    && expanded)
+                                        }) {
+                                            toggle = Some(node.relative_path.clone());
+                                        }
+                                    }
+                                    response.on_hover_ui(|ui| {
+                                        ui.monospace(node.relative_path.display().to_string());
+                                        ui.label(if present {
+                                            state_label(&node.state)
+                                        } else {
+                                            "Not present on this side"
+                                        });
+                                        if let Some(roots) = &self.roots {
+                                            ui.monospace(
+                                                roots[side]
+                                                    .join(&node.relative_path)
+                                                    .display()
+                                                    .to_string(),
+                                            );
+                                        }
+                                        if let DirectoryEntryState::Error(error) = &node.state {
+                                            ui.colored_label(ERROR, error.to_string());
+                                        }
+                                    });
+                                }
+                                ui.painter().line_segment(
+                                    [rect.center_top(), rect.center_bottom()],
+                                    Stroke::new(1.0, BORDER),
+                                );
+                            }
+                        });
+                    if let Some(path) = toggle {
+                        tree.toggle_expanded(path);
+                    }
+                    if let Some(path) = selected {
+                        self.selected = Some(path);
+                    }
+                } else {
+                    empty_display(
+                        ui,
+                        height - 46.0,
+                        if self.job.is_some() {
+                            "Comparing folders…"
+                        } else {
+                            "Two folders. One clear view."
+                        },
+                        if self.job.is_some() {
+                            "The trees will appear when the comparison finishes."
+                        } else {
+                            "Choose a folder on each side to see what matches and what changed."
+                        },
+                    );
+                }
+            });
+    }
+
+    fn footer(&self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(&self.message).size(11.0).color(MUTED));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if let Some(elapsed) = self.elapsed {
+                    ui.label(
+                        RichText::new(format!("{:.2}s", elapsed.as_secs_f64()))
+                            .monospace()
+                            .size(11.0)
+                            .color(MUTED),
+                    );
+                }
+            });
+        });
+        if let Some(path) = &self.selected {
+            ui.add(
+                egui::Label::new(
+                    RichText::new(path.display().to_string())
+                        .monospace()
+                        .size(11.0)
+                        .color(TEXT),
+                )
+                .truncate(),
+            );
+        } else {
+            ui.label(RichText::new("Click a folder on either side to expand both trees.  •  Symlinks are not traversed.").size(10.0).color(MUTED));
+        }
+    }
+}
+
+impl Drop for VersusApp {
+    fn drop(&mut self) {
+        if let Some(job) = &self.job {
+            job.cancellation.store(true, Ordering::Relaxed);
         }
     }
 }
 
 impl eframe::App for VersusApp {
     fn clear_color(&self, _: &egui::Visuals) -> [f32; 4] {
-        let fill = if self.dark_mode {
-            Color32::from_rgb(24, 28, 35)
-        } else {
-            Color32::from_rgb(249, 251, 254)
-        };
-        fill.to_normalized_gamma_f32()
+        BACKGROUND.to_normalized_gamma_f32()
     }
     fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
-        self.accept_drops(ctx);
-        self.poll_directory_job(ctx);
-        self.poll_file_job(ctx);
+        self.poll_comparison(ctx);
     }
     fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
-        egui::Frame::default()
-            .inner_margin(egui::Margin::same(10))
-            .show(ui, |ui| {
-                self.header(ui);
-                self.toolbar(ui);
-                ui.add_space(8.0);
-                match self.mode {
-                    Mode::Directory => self.directory_ui(ui),
-                    Mode::TwoWay => self.two_way_ui(ui),
-                    Mode::ThreeWay => self.three_way_ui(ui),
-                };
-                self.status_bar(ui);
-            });
-        self.save_dialog(ui.ctx());
+        self.render(ui);
     }
 }
 
-impl VersusApp {
-    fn header(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.image((self.logo_texture.id(), egui::vec2(30.0, 30.0)));
-            ui.label(RichText::new("Versus").size(23.0).strong());
-            ui.separator();
-            let mode_name = match self.mode {
-                Mode::Directory => "Directory Compare",
-                Mode::TwoWay => "Text Compare",
-                Mode::ThreeWay => "3-Way Merge",
-            };
-            ui.label(RichText::new(mode_name).size(17.0).strong());
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let label = if self.dark_mode {
-                    "Light mode"
-                } else {
-                    "Dark mode"
-                };
-                if ui
-                    .button(label)
-                    .on_hover_text("Switch appearance")
-                    .clicked()
-                {
-                    self.dark_mode = !self.dark_mode;
-                    apply_theme(ui.ctx(), self.dark_mode);
-                    self.persist_settings();
-                }
-            });
-        });
-        ui.add_space(5.0);
-    }
+fn root_name(path: &std::path::Path) -> String {
+    path.file_name()
+        .unwrap_or(path.as_os_str())
+        .to_string_lossy()
+        .into_owned()
+}
 
-    fn toolbar(&mut self, ui: &mut egui::Ui) {
-        egui::Frame::default()
-            .fill(toolbar_fill(self.dark_mode))
-            .inner_margin(egui::Margin::symmetric(8, 7))
-            .show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    for (mode, label) in [
-                        (Mode::Directory, "Directory"),
-                        (Mode::TwoWay, "2-Way"),
-                        (Mode::ThreeWay, "3-Way"),
-                    ] {
-                        ui.selectable_value(&mut self.mode, mode, label);
-                    }
-                    ui.separator();
-                    let busy = self.directory_job.is_some() || self.file_job.is_some();
-                    if self.mode == Mode::Directory && self.directory_job.is_some() {
-                        if ui.button("Cancel").clicked() {
-                            if let Some(job) = &self.directory_job {
-                                job.cancelled
-                                    .store(true, std::sync::atomic::Ordering::Relaxed);
-                            }
-                        }
-                    } else if ui
-                        .add_enabled(!busy, egui::Button::new("Compare"))
-                        .clicked()
-                    {
-                        match self.mode {
-                            Mode::Directory => self.start_directory_compare(),
-                            Mode::TwoWay => self.compare_two_paths(),
-                            Mode::ThreeWay => self.compare_three_paths(),
-                        }
-                    }
-                    if ui
-                        .add_enabled(!busy, egui::Button::new("Refresh"))
-                        .clicked()
-                    {
-                        match self.mode {
-                            Mode::Directory => self.start_directory_compare(),
-                            Mode::TwoWay => self.compare_two_paths(),
-                            Mode::ThreeWay => self.compare_three_paths(),
-                        }
-                    }
-                    if self.mode == Mode::Directory {
-                        ui.menu_button("Filter", |ui| {
-                            for (filter, label) in [
-                                (DirectoryFilter::All, "All"),
-                                (DirectoryFilter::Different, "Different"),
-                                (DirectoryFilter::Same, "Same"),
-                                (DirectoryFilter::LeftOnly, "Left only"),
-                                (DirectoryFilter::RightOnly, "Right only"),
-                            ] {
-                                if ui
-                                    .selectable_value(&mut self.directory_filter, filter, label)
-                                    .clicked()
-                                {
-                                    ui.close();
-                                }
-                            }
-                        });
-                    }
-                    if self.mode == Mode::TwoWay {
-                        self.two_way_actions(ui);
-                    }
-                    if self.mode == Mode::ThreeWay {
-                        self.three_way_actions(ui);
-                    }
-                    ui.separator();
-                    ui.menu_button("Settings", |ui| {
-                        let mut changed = ui
-                            .checkbox(
-                                &mut self.ignore_line_endings,
-                                "Ignore line-ending differences",
-                            )
-                            .changed();
-                        changed |= ui
-                            .checkbox(&mut self.ignore_whitespace, "Ignore whitespace")
-                            .changed();
-                        changed |= ui
-                            .checkbox(&mut self.confirm_overwrite, "Confirm before overwrite")
-                            .changed();
-                        if changed {
-                            self.persist_settings();
-                        }
-                    });
-                });
-            });
-    }
-
-    fn status_bar(&self, ui: &mut egui::Ui) {
-        ui.add_space(5.0);
-        ui.separator();
-        ui.horizontal(|ui| {
-            ui.colored_label(accent(self.dark_mode), "●");
-            ui.label(&self.status);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(if self.directory_job.is_some() || self.file_job.is_some() {
-                    "Working…"
-                } else {
-                    "Ready"
-                });
-            });
-        });
-    }
-
-    fn directory_summary(&self, ui: &mut egui::Ui) {
-        let Some(directory) = &self.directory else {
-            ui.add_space(10.0);
-            ui.label("Choose two folders, then select Compare. Double-click a changed file to inspect it.");
-            return;
+fn count_entries(tree: &FolderTree) -> [usize; 5] {
+    let mut counts = [0; 5];
+    let mut nodes: Vec<_> = tree.root().children.iter().collect();
+    while let Some(node) = nodes.pop() {
+        let index = match node.state {
+            DirectoryEntryState::Same => 0,
+            DirectoryEntryState::Different => 1,
+            DirectoryEntryState::LeftOnly => 2,
+            DirectoryEntryState::RightOnly => 3,
+            DirectoryEntryState::TypeMismatch | DirectoryEntryState::Error(_) => 4,
         };
-        let mut same = 0;
-        let mut different = 0;
-        let mut left_only = 0;
-        let mut right_only = 0;
-        let mut issues = 0;
-        for entry in &directory.entries {
-            match entry.state {
-                DirectoryEntryState::Same => same += 1,
-                DirectoryEntryState::Different => different += 1,
-                DirectoryEntryState::LeftOnly => left_only += 1,
-                DirectoryEntryState::RightOnly => right_only += 1,
-                DirectoryEntryState::TypeMismatch | DirectoryEntryState::Error(_) => issues += 1,
-            }
-        }
-        ui.add_space(7.0);
-        ui.label(
-            RichText::new("Comparison Summary")
-                .strong()
-                .color(accent(self.dark_mode)),
+        counts[index] += 1;
+        nodes.extend(&node.children);
+    }
+    counts
+}
+
+fn split_rect(rect: Rect) -> [Rect; 2] {
+    [
+        Rect::from_min_max(rect.min, rect.center_bottom()),
+        Rect::from_min_max(rect.center_top(), rect.max),
+    ]
+}
+
+fn state_label(state: &DirectoryEntryState) -> &'static str {
+    match state {
+        DirectoryEntryState::Same => "Identical",
+        DirectoryEntryState::Different => "Different",
+        DirectoryEntryState::LeftOnly => "Left only",
+        DirectoryEntryState::RightOnly => "Right only",
+        DirectoryEntryState::TypeMismatch => "Type mismatch",
+        DirectoryEntryState::Error(_) => "Read error",
+    }
+}
+
+fn state_color(state: &DirectoryEntryState) -> Color32 {
+    match state {
+        DirectoryEntryState::Same => SAME,
+        DirectoryEntryState::Different => CHANGED,
+        DirectoryEntryState::LeftOnly => LEFT_ONLY,
+        DirectoryEntryState::RightOnly => RIGHT_ONLY,
+        DirectoryEntryState::TypeMismatch | DirectoryEntryState::Error(_) => ERROR,
+    }
+}
+
+struct RowAppearance {
+    depth: usize,
+    expanded: bool,
+    alternate: bool,
+    selected: bool,
+    hovered: bool,
+}
+
+fn paint_row(ui: &egui::Ui, rect: Rect, node: &TreeNode, side: usize, appearance: RowAppearance) {
+    let entry = if side == 0 { &node.left } else { &node.right };
+    let kind = entry.kind.as_ref();
+    let present = entry.exists;
+    let state = &node.state;
+    let RowAppearance {
+        depth,
+        expanded,
+        alternate,
+        selected,
+        hovered,
+    } = appearance;
+    let painter = ui.painter().with_clip_rect(rect);
+    let color = state_color(state);
+    let fill = if selected {
+        ACCENT.gamma_multiply(0.16)
+    } else if hovered {
+        Color32::from_rgb(34, 44, 58)
+    } else if alternate {
+        Color32::from_rgb(26, 34, 45)
+    } else {
+        PANEL
+    };
+    painter.rect_filled(rect, 0, fill);
+    if present && *state != DirectoryEntryState::Same {
+        painter.rect_filled(
+            Rect::from_min_size(rect.min, egui::vec2(3.0, rect.height())),
+            0,
+            color,
         );
-        ui.separator();
-        ui.horizontal_wrapped(|ui| {
-            ui.strong(format!("{} items compared", directory.entries.len()));
-            ui.separator();
-            ui.label(format!("{different} different"));
-            ui.label(format!("{left_only} left only"));
-            ui.label(format!("{right_only} right only"));
-            ui.label(format!("{same} same"));
-            if issues > 0 {
-                ui.colored_label(Color32::RED, format!("{issues} issues"));
-            }
-        });
     }
-
-    fn two_way_actions(&mut self, ui: &mut egui::Ui) {
-        let text_ready = self.two_kind == Some(FileDiffKind::Text)
-            && self.two_diff.is_some()
-            && self.file_job.is_none();
-        let diff_ready = text_ready && !self.two_diff_dirty;
-        let count = self.two_diff.as_ref().map_or(0, |diff| diff.hunks.len());
-        if ui
-            .add_enabled(diff_ready && count > 0, egui::Button::new("Previous"))
-            .clicked()
-        {
-            self.two_selected = (self.two_selected + count - 1) % count;
-            self.selected_hunk_scroll();
-        }
-        if ui
-            .add_enabled(diff_ready && count > 0, egui::Button::new("Next"))
-            .clicked()
-        {
-            self.two_selected = (self.two_selected + 1) % count;
-            self.selected_hunk_scroll();
-        }
-        if ui
-            .add_enabled(diff_ready && count > 0, egui::Button::new("Copy left"))
-            .clicked()
-        {
-            self.copy_hunk(false);
-        }
-        if ui
-            .add_enabled(diff_ready && count > 0, egui::Button::new("Copy right"))
-            .clicked()
-        {
-            self.copy_hunk(true);
-        }
-        if ui
-            .add_enabled(
-                diff_ready,
-                egui::Button::new(if self.two_edit_open {
-                    "View diff"
-                } else {
-                    "Edit buffers"
-                }),
-            )
-            .clicked()
-        {
-            self.two_edit_open = !self.two_edit_open;
-        }
-        ui.menu_button("Save", |ui| {
-            if ui
-                .add_enabled(
-                    text_ready && !self.two_loaded_left_path.is_empty(),
-                    egui::Button::new("Save left"),
-                )
-                .clicked()
-            {
-                self.save(
-                    &self.two_loaded_left_path.clone(),
-                    &self.left_text.clone(),
-                    self.two_left_ending,
-                );
-                ui.close();
-            }
-            if ui
-                .add_enabled(
-                    text_ready && !self.two_loaded_right_path.is_empty(),
-                    egui::Button::new("Save right"),
-                )
-                .clicked()
-            {
-                self.save(
-                    &self.two_loaded_right_path.clone(),
-                    &self.right_text.clone(),
-                    self.two_right_ending,
-                );
-                ui.close();
-            }
-            if ui
-                .add_enabled(
-                    text_ready && !self.two_loaded_right_path.is_empty(),
-                    egui::Button::new("Save right as…"),
-                )
-                .clicked()
-            {
-                self.open_save_as(self.right_text.clone(), self.two_right_ending);
-                ui.close();
-            }
-        });
+    let x = rect.left() + 14.0 + depth as f32 * 18.0;
+    let y = rect.center().y;
+    let name_right = rect.right() - 120.0;
+    if !present {
+        painter.text(
+            egui::pos2(x + 36.0, y),
+            Align2::LEFT_CENTER,
+            "—",
+            FontId::monospace(12.0),
+            MUTED.gamma_multiply(0.55),
+        );
+        return;
     }
-
-    fn three_way_actions(&mut self, ui: &mut egui::Ui) {
-        let conflicts: Vec<usize> = self
-            .three_diff
-            .as_ref()
-            .map(|diff| {
-                diff.hunks
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, h)| {
-                        (h.kind == MergeHunkKind::Conflict
-                            && !self.resolved_merge_hunks.get(i).copied().unwrap_or(false))
-                        .then_some(i)
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        if ui
-            .add_enabled(!conflicts.is_empty(), egui::Button::new("Previous"))
-            .clicked()
-        {
-            if let Some(&index) = conflicts
-                .iter()
-                .rev()
-                .find(|&&i| i < self.three_selected)
-                .or_else(|| conflicts.last())
-            {
-                self.three_selected = index;
-            }
-        }
-        if ui
-            .add_enabled(!conflicts.is_empty(), egui::Button::new("Next"))
-            .clicked()
-        {
-            if let Some(&index) = conflicts
-                .iter()
-                .find(|&&i| i > self.three_selected)
-                .or_else(|| conflicts.first())
-            {
-                self.three_selected = index;
-            }
-        }
-        if ui
-            .add_enabled(!conflicts.is_empty(), egui::Button::new("Use left"))
-            .clicked()
-        {
-            self.apply_merge_choice(MergeChoice::Left);
-        }
-        if ui
-            .add_enabled(!conflicts.is_empty(), egui::Button::new("Use right"))
-            .clicked()
-        {
-            self.apply_merge_choice(MergeChoice::Right);
-        }
-        ui.menu_button("Save result", |ui| {
-            if ui
-                .add_enabled(self.three_diff.is_some(), egui::Button::new("Save as…"))
-                .clicked()
-            {
-                self.open_save_as(self.merged_text.clone(), self.three_result_ending);
-                ui.close();
-            }
-            if ui
-                .add_enabled(
-                    !self.three_loaded_right_path.is_empty(),
-                    egui::Button::new("Save to right file"),
-                )
-                .clicked()
-            {
-                self.save(
-                    &self.three_loaded_right_path.clone(),
-                    &self.merged_text.clone(),
-                    self.three_result_ending,
-                );
-                ui.close();
-            }
-        });
+    let name_painter = painter.with_clip_rect(Rect::from_min_max(
+        rect.min,
+        egui::pos2(name_right.max(rect.left()), rect.bottom()),
+    ));
+    if kind == Some(&DirectoryEntryKind::Directory) && node.is_expandable() {
+        name_painter.text(
+            egui::pos2(x, y),
+            Align2::LEFT_CENTER,
+            if expanded { "▾" } else { "▸" },
+            FontId::monospace(15.0),
+            MUTED,
+        );
     }
-    fn directory_ui(&mut self, ui: &mut egui::Ui) {
-        ui.columns(2, |columns| {
-            Self::path_field(
-                &mut columns[0],
-                "LEFT  •  Folder",
-                &mut self.directory_left_path,
-                true,
-            );
-            Self::path_field(
-                &mut columns[1],
-                "RIGHT  •  Folder",
-                &mut self.directory_right_path,
-                true,
-            );
-        });
-        ui.horizontal(|ui| {
-            if ui.small_button("Swap sides").clicked() {
-                std::mem::swap(
-                    &mut self.directory_left_path,
-                    &mut self.directory_right_path,
-                );
-            }
-            ui.separator();
-            let filter_name = match self.directory_filter {
-                DirectoryFilter::All => "All",
-                DirectoryFilter::Different => "Different",
-                DirectoryFilter::Same => "Same",
-                DirectoryFilter::LeftOnly => "Left only",
-                DirectoryFilter::RightOnly => "Right only",
-            };
-            ui.label(format!("Showing: {filter_name}"));
-            if self.directory_job.is_some() {
-                ui.spinner();
-            }
-        });
-        ui.add_space(4.0);
-        let entries: Vec<DirectoryEntry> = self
-            .directory
-            .as_ref()
-            .map(|d| {
-                d.entries
-                    .iter()
-                    .filter(|e| match self.directory_filter {
-                        DirectoryFilter::All => true,
-                        DirectoryFilter::Different => matches!(
-                            e.state,
-                            DirectoryEntryState::Different
-                                | DirectoryEntryState::LeftOnly
-                                | DirectoryEntryState::RightOnly
-                                | DirectoryEntryState::TypeMismatch
-                                | DirectoryEntryState::Error(_)
-                        ),
-                        DirectoryFilter::Same => matches!(e.state, DirectoryEntryState::Same),
-                        DirectoryFilter::LeftOnly => {
-                            matches!(e.state, DirectoryEntryState::LeftOnly)
-                        }
-                        DirectoryFilter::RightOnly => {
-                            matches!(e.state, DirectoryEntryState::RightOnly)
-                        }
-                    })
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default();
-        let table_height = (ui.available_height() - 165.0).max(160.0);
-        egui::Frame::group(ui.style()).show(ui, |ui| {
-            ui.set_min_height(table_height);
-            ui.horizontal(|ui| {
-                ui.strong("LEFT  •  Name");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.strong("RIGHT  •  Name");
-                });
-            });
-            ui.separator();
-            egui::ScrollArea::vertical()
-                .max_height(table_height)
-                .show(ui, |ui| {
-                    egui::Grid::new("directory-results")
-                        .striped(true)
-                        .num_columns(3)
-                        .min_col_width((ui.available_width() - 170.0) / 2.0)
-                        .show(ui, |ui| {
-                            for entry in entries {
-                                let name = entry.relative_path.display().to_string();
-                                let icon = if matches!(entry.kind, DirectoryEntryKind::Directory) {
-                                    "Folder"
-                                } else {
-                                    "File"
-                                };
-                                let left_visible =
-                                    !matches!(entry.state, DirectoryEntryState::RightOnly);
-                                let right_visible =
-                                    !matches!(entry.state, DirectoryEntryState::LeftOnly);
-                                let left_response = ui.selectable_label(
-                                    false,
-                                    if left_visible {
-                                        format!("{icon}  {name}")
-                                    } else {
-                                        String::new()
-                                    },
-                                );
-                                ui.colored_label(
-                                    state_color(&entry.state, self.dark_mode),
-                                    directory_state(&entry.state),
-                                );
-                                let right_response = ui.selectable_label(
-                                    false,
-                                    if right_visible {
-                                        format!("{icon}  {name}")
-                                    } else {
-                                        String::new()
-                                    },
-                                );
-                                if (left_response.double_clicked()
-                                    || right_response.double_clicked())
-                                    && matches!(entry.kind, DirectoryEntryKind::File)
-                                    && matches!(
-                                        entry.state,
-                                        DirectoryEntryState::Different | DirectoryEntryState::Same
-                                    )
-                                {
-                                    self.left_path = Path::new(&self.compared_directory_left)
-                                        .join(&entry.relative_path)
-                                        .display()
-                                        .to_string();
-                                    self.right_path = Path::new(&self.compared_directory_right)
-                                        .join(&entry.relative_path)
-                                        .display()
-                                        .to_string();
-                                    self.mode = Mode::TwoWay;
-                                    self.compare_two_paths();
-                                }
-                                ui.end_row();
-                            }
-                        });
-                });
-        });
-        self.directory_summary(ui);
-    }
-    fn two_way_ui(&mut self, ui: &mut egui::Ui) {
-        ui.columns(2, |columns| {
-            Self::path_field(&mut columns[0], "LEFT  •  File", &mut self.left_path, false);
-            Self::path_field(
-                &mut columns[1],
-                "RIGHT  •  File",
-                &mut self.right_path,
-                false,
-            );
-        });
-        ui.horizontal(|ui| {
-            ui.label(format!("{} bytes  •  UTF-8", self.left_text.len()));
-            ui.separator();
-            ui.label(format!("{} bytes  •  UTF-8", self.right_text.len()));
-            if self.file_job.is_some() {
-                ui.spinner();
-            }
-        });
-        ui.add_space(7.0);
-        if let Some(kind) = &self.two_kind {
-            if !matches!(kind, FileDiffKind::Text) {
-                egui::Frame::group(ui.style()).show(ui, |ui| {
-                    ui.label(match kind {
-                        FileDiffKind::Binary if self.two_equal == Some(true) => {
-                            "Binary files match; text display is unavailable."
-                        }
-                        FileDiffKind::Binary => "Binary files differ; text display is unavailable.",
-                        FileDiffKind::TooLarge if self.two_equal == Some(true) => {
-                            "Large files match; text display is unavailable."
-                        }
-                        FileDiffKind::TooLarge => {
-                            "Large files differ; text display is unavailable."
-                        }
-                        FileDiffKind::Text => "",
-                    });
-                });
-                return;
-            }
-        }
-        let pane_height = (ui.available_height() - 205.0).max(150.0);
-        if self.two_edit_open {
-            let edited = ui.columns(2, |columns| {
-                let left_changed = text_editor(
-                    &mut columns[0],
-                    "LEFT  •  Editable buffer",
-                    &mut self.left_text,
-                    &mut self.left_undo,
-                );
-                let right_changed = text_editor(
-                    &mut columns[1],
-                    "RIGHT  •  Editable buffer",
-                    &mut self.right_text,
-                    &mut self.right_undo,
-                );
-                left_changed || right_changed
-            });
-            if edited {
-                self.two_diff_dirty = true;
-            }
-            if ui.button("Recalculate edited diff").clicked() {
-                self.refresh_two_diff();
-            }
-        } else if let Some(diff) = self.two_diff.clone() {
-            ui.columns(2, |columns| {
-                let requested_offset = self.two_scroll;
-                let left_offset = diff_pane(
-                    &mut columns[0],
-                    "LEFT",
-                    &self.left_text,
-                    &diff,
-                    true,
-                    self.two_selected,
-                    self.two_scroll,
-                    pane_height,
-                    self.dark_mode,
-                );
-                let right_offset = diff_pane(
-                    &mut columns[1],
-                    "RIGHT",
-                    &self.right_text,
-                    &diff,
-                    false,
-                    self.two_selected,
-                    left_offset,
-                    pane_height,
-                    self.dark_mode,
-                );
-                self.two_scroll = if (left_offset - requested_offset).abs() > 0.1 {
-                    left_offset
-                } else {
-                    right_offset
-                };
-            });
+    paint_icon(&name_painter, egui::pos2(x + 19.0, y), kind, color);
+    name_painter.text(
+        egui::pos2(x + 40.0, y),
+        Align2::LEFT_CENTER,
+        node.name.to_string_lossy(),
+        FontId::monospace(12.0),
+        if *state == DirectoryEntryState::Same {
+            TEXT
         } else {
-            egui::Frame::group(ui.style()).show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
-                ui.set_min_height(pane_height);
-                ui.add_space(20.0);
-                ui.label("Choose two files, then select Compare.");
-            });
-        }
-        ui.add_space(7.0);
-        ui.label(
-            RichText::new("Difference Summary")
-                .strong()
-                .color(accent(self.dark_mode)),
+            color
+        },
+    );
+    painter.text(
+        egui::pos2(rect.right() - 14.0, y),
+        Align2::RIGHT_CENTER,
+        state_label(state),
+        FontId::monospace(10.0),
+        color,
+    );
+}
+
+fn paint_icon(
+    painter: &egui::Painter,
+    center: Pos2,
+    kind: Option<&DirectoryEntryKind>,
+    color: Color32,
+) {
+    let rect = Rect::from_center_size(center, egui::vec2(13.0, 11.0));
+    if kind == Some(&DirectoryEntryKind::Directory) {
+        painter.rect_filled(
+            Rect::from_min_size(rect.min - egui::vec2(0.0, 2.0), egui::vec2(6.0, 4.0)),
+            1,
+            color.gamma_multiply(0.6),
         );
-        ui.separator();
-        ui.horizontal_wrapped(|ui| {
-            let count = self.two_diff.as_ref().map_or(0, |diff| diff.hunks.len());
-            ui.strong(format!("{count} differences"));
-            ui.separator();
-            ui.label(format!(
-                "Difference {} of {count}",
-                if count == 0 { 0 } else { self.two_selected + 1 }
-            ));
-            ui.separator();
-            ui.label(if self.two_diff_dirty {
-                "Recalculate the diff before copying changes."
-            } else {
-                "Changes stay in editable buffers until you save."
-            });
-        });
-    }
-    fn three_way_ui(&mut self, ui: &mut egui::Ui) {
-        ui.columns(3, |columns| {
-            Self::path_field(
-                &mut columns[0],
-                "BASE  •  Common ancestor",
-                &mut self.base_path,
-                false,
-            );
-            Self::path_field(
-                &mut columns[1],
-                "LEFT  •  Branch A",
-                &mut self.left_path,
-                false,
-            );
-            Self::path_field(
-                &mut columns[2],
-                "RIGHT  •  Branch B",
-                &mut self.right_path,
-                false,
-            );
-        });
-        let source_height = (ui.available_height() * 0.35).clamp(125.0, 280.0);
-        ui.add_space(6.0);
-        ui.columns(3, |columns| {
-            readonly_lines(&mut columns[0], "Base", &self.base_text, source_height);
-            readonly_lines(
-                &mut columns[1],
-                "Left (Branch A)",
-                &self.merge_left,
-                source_height,
-            );
-            readonly_lines(
-                &mut columns[2],
-                "Right (Branch B)",
-                &self.merge_right,
-                source_height,
-            );
-        });
-        ui.add_space(8.0);
-        let remaining = (ui.available_height() - 110.0).max(150.0);
-        let result_width = (ui.available_width() * 0.73).max(250.0);
-        ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                ui.set_width(result_width);
-                egui::Frame::group(ui.style()).show(ui, |ui| {
-                    ui.set_min_height(remaining);
-                    ui.label(
-                        RichText::new("Merged Result  •  Editable")
-                            .strong()
-                            .color(accent(self.dark_mode)),
-                    );
-                    let rows = ((remaining - 55.0) / 18.0).max(5.0) as usize;
-                    text_editor_sized(ui, &mut self.merged_text, &mut self.merged_undo, rows);
-                });
-            });
-            ui.vertical(|ui| {
-                egui::Frame::group(ui.style()).show(ui, |ui| {
-                    ui.set_min_height(remaining);
-                    ui.strong("Conflicts");
-                    ui.separator();
-                    if let Some(diff) = &self.three_diff {
-                        let unresolved = diff
-                            .hunks
-                            .iter()
-                            .enumerate()
-                            .filter(|(i, h)| {
-                                h.kind == MergeHunkKind::Conflict
-                                    && !self.resolved_merge_hunks.get(*i).copied().unwrap_or(false)
-                            })
-                            .count();
-                        ui.label(format!("{unresolved} remaining"));
-                        if let Some(hunk) = diff.hunks.get(self.three_selected) {
-                            if hunk.kind == MergeHunkKind::Conflict {
-                                ui.add_space(8.0);
-                                ui.label(format!(
-                                    "Conflict at base line {}",
-                                    hunk.base_range.start + 1
-                                ));
-                                ui.label(format!("Left: {} line(s)", hunk.left.len()));
-                                ui.label(format!("Right: {} line(s)", hunk.right.len()));
-                                ui.add_space(8.0);
-                                let selected_unresolved = !self
-                                    .resolved_merge_hunks
-                                    .get(self.three_selected)
-                                    .copied()
-                                    .unwrap_or(false);
-                                if ui
-                                    .add_enabled(selected_unresolved, egui::Button::new("Use Left"))
-                                    .clicked()
-                                {
-                                    self.apply_merge_choice(MergeChoice::Left);
-                                }
-                                if ui
-                                    .add_enabled(
-                                        selected_unresolved,
-                                        egui::Button::new("Use Right"),
-                                    )
-                                    .clicked()
-                                {
-                                    self.apply_merge_choice(MergeChoice::Right);
-                                }
-                            }
-                        }
-                    } else {
-                        ui.label("Compare three files to inspect conflicts.");
-                    }
-                });
-            });
-        });
-        ui.add_space(5.0);
-        ui.label(
-            RichText::new("Merge Output")
-                .strong()
-                .color(accent(self.dark_mode)),
+        painter.rect_filled(rect, 2, color.gamma_multiply(0.35));
+        painter.rect_stroke(rect, 2, Stroke::new(1.0, color), egui::StrokeKind::Inside);
+    } else if kind == Some(&DirectoryEntryKind::Symlink) {
+        painter.text(
+            center,
+            Align2::CENTER_CENTER,
+            "@",
+            FontId::monospace(13.0),
+            color,
+        );
+    } else {
+        painter.rect_stroke(
+            rect.shrink2(egui::vec2(2.0, 0.0)),
+            1,
+            Stroke::new(1.0, color),
+            egui::StrokeKind::Inside,
         );
     }
-    fn apply_merge_choice(&mut self, choice: MergeChoice) {
-        let Some(diff) = &self.three_diff else { return };
-        let Some(hunk) = diff.hunks.get(self.three_selected) else {
-            return;
-        };
-        if hunk.kind != MergeHunkKind::Conflict {
-            return;
-        }
-        let before = self.merged_text.clone();
-        let marker = conflict_marker(hunk);
-        let occurrence = diff.hunks[..self.three_selected]
-            .iter()
-            .enumerate()
-            .filter(|(index, earlier)| {
-                earlier.kind == MergeHunkKind::Conflict
-                    && !self
-                        .resolved_merge_hunks
-                        .get(*index)
-                        .copied()
-                        .unwrap_or(false)
-                    && conflict_marker(earlier) == marker
-            })
-            .count();
-        self.merged_text = resolve_current_conflict(&self.merged_text, hunk, choice, occurrence);
-        if let Some(resolved) = self.resolved_merge_hunks.get_mut(self.three_selected) {
-            *resolved = true;
-        }
-        if let Some(next) = diff
-            .hunks
-            .iter()
-            .enumerate()
-            .filter(|(i, h)| {
-                h.kind == MergeHunkKind::Conflict
-                    && !self.resolved_merge_hunks.get(*i).copied().unwrap_or(false)
-            })
-            .map(|(i, _)| i)
-            .find(|&i| i > self.three_selected)
-            .or_else(|| {
-                diff.hunks
-                    .iter()
-                    .enumerate()
-                    .find(|(i, h)| {
-                        h.kind == MergeHunkKind::Conflict
-                            && !self.resolved_merge_hunks.get(*i).copied().unwrap_or(false)
-                    })
-                    .map(|(i, _)| i)
-            })
-        {
-            self.three_selected = next;
-        }
-        self.merged_undo.changed(before);
-        self.status = "Applied conflict choice; save explicitly to write the result.".into();
-    }
-    fn save_dialog(&mut self, ctx: &egui::Context) {
-        if self.save_as_open {
-            egui::Window::new("Save As")
-                .collapsible(false)
-                .show(ctx, |ui| {
-                    ui.label("Destination path");
-                    ui.text_edit_singleline(&mut self.save_as_path);
-                    if ui.button("Browse").clicked() {
-                        if let Some(path) = rfd::FileDialog::new().save_file() {
-                            self.save_as_path = path.display().to_string();
-                        }
-                    }
-                    ui.horizontal(|ui| {
-                        if ui.button("Save").clicked() {
-                            let path = self.save_as_path.clone();
-                            let contents = self.save_as_contents.clone();
-                            self.save(&path, &contents, self.save_as_line_ending);
-                            self.save_as_open = false;
-                        }
-                        if ui.button("Cancel").clicked() {
-                            self.save_as_open = false;
-                        }
-                    });
-                });
-        }
-        if let Some((path, contents, line_ending)) = self.pending_overwrite.clone() {
-            egui::Window::new("Overwrite existing file?")
-                .collapsible(false)
-                .show(ctx, |ui| {
-                    ui.label(format!("{} already exists.", path.display()));
-                    ui.horizontal(|ui| {
-                        if ui.button("Overwrite").clicked() {
-                            match save_text_safely(
-                                &path,
-                                &contents,
-                                &SaveOptions {
-                                    overwrite: true,
-                                    line_ending,
-                                },
-                            ) {
-                                Ok(()) => self.status = format!("Saved {}.", path.display()),
-                                Err(error) => self.status = error.to_string(),
-                            }
-                            self.pending_overwrite = None;
-                        }
-                        if ui.button("Cancel").clicked() {
-                            self.pending_overwrite = None;
-                        }
-                    });
-                });
-        }
-    }
 }
-fn text_editor(ui: &mut egui::Ui, title: &str, text: &mut String, undo: &mut TextUndo) -> bool {
-    ui.label(RichText::new(title).strong());
-    text_editor_sized(ui, text, undo, 22)
-}
-fn text_editor_sized(
-    ui: &mut egui::Ui,
-    text: &mut String,
-    undo: &mut TextUndo,
-    rows: usize,
-) -> bool {
-    let mut history_changed = false;
-    ui.horizontal(|ui| {
-        if ui.button("Undo").clicked() {
-            history_changed = !undo.undo.is_empty();
-            undo.undo(text);
-        }
-        if ui.button("Redo").clicked() {
-            history_changed |= !undo.redo.is_empty();
-            undo.redo(text);
-        }
-    });
-    let before = text.clone();
-    let response = ui.add(
-        TextEdit::multiline(text)
-            .code_editor()
-            .desired_rows(rows)
-            .desired_width(f32::INFINITY),
+
+fn empty_display(ui: &mut egui::Ui, height: f32, title: &str, subtitle: &str) {
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), height.max(80.0)),
+        Sense::hover(),
     );
-    if response.changed() {
-        undo.changed(before);
-    }
-    history_changed || response.changed()
-}
-fn diff_pane(
-    ui: &mut egui::Ui,
-    title: &str,
-    text: &str,
-    diff: &TextDiff,
-    left: bool,
-    selected: usize,
-    offset: f32,
-    max_height: f32,
-    dark_mode: bool,
-) -> f32 {
-    let lines: Vec<&str> = text.lines().collect();
-    let output = egui::Frame::group(ui.style()).show(ui, |ui| {
-        ui.set_min_width(ui.available_width());
-        ui.set_min_height(max_height);
-        ui.label(RichText::new(title).strong().color(accent(dark_mode)));
-        ui.separator();
-        egui::ScrollArea::vertical()
-            .id_salt(if left {
-                "two-left-diff"
-            } else {
-                "two-right-diff"
-            })
-            .max_height(max_height)
-            .vertical_scroll_offset(offset)
-            .show_rows(
-                ui,
-                ui.text_style_height(&egui::TextStyle::Monospace),
-                lines.len(),
-                |ui, rows| {
-                    for index in rows {
-                        let line = lines[index];
-                        let matching = diff.hunks.iter().enumerate().find(|(_, hunk)| {
-                            let range = if left {
-                                &hunk.left_range
-                            } else {
-                                &hunk.right_range
-                            };
-                            range.contains(&index)
-                        });
-                        let color = match matching.map(|(_, hunk)| &hunk.kind) {
-                            Some(versus::HunkKind::Added) if dark_mode => {
-                                Color32::from_rgb(38, 80, 62)
-                            }
-                            Some(versus::HunkKind::Removed) if dark_mode => {
-                                Color32::from_rgb(90, 42, 50)
-                            }
-                            Some(versus::HunkKind::Changed) if dark_mode && left => {
-                                Color32::from_rgb(90, 42, 50)
-                            }
-                            Some(versus::HunkKind::Changed) if dark_mode => {
-                                Color32::from_rgb(38, 80, 62)
-                            }
-                            Some(versus::HunkKind::Added) => Color32::from_rgb(222, 247, 230),
-                            Some(versus::HunkKind::Removed) => Color32::from_rgb(255, 228, 230),
-                            Some(versus::HunkKind::Changed) if left => {
-                                Color32::from_rgb(255, 228, 230)
-                            }
-                            Some(versus::HunkKind::Changed) => Color32::from_rgb(222, 247, 230),
-                            None => Color32::TRANSPARENT,
-                        };
-                        egui::Frame::default().fill(color).show(ui, |ui| {
-                            let marker =
-                                matching.is_some_and(|(hunk_index, _)| hunk_index == selected);
-                            ui.monospace(format!(
-                                "{} {:>5} | {}",
-                                if marker { ">" } else { " " },
-                                index + 1,
-                                line
-                            ));
-                        });
-                    }
-                },
-            )
-    });
-    output.inner.state.offset.y
-}
-fn detected_line_ending(text: &str) -> LineEnding {
-    if text.matches("\r\n").count() * 2 >= text.matches('\n').count() {
-        LineEnding::Crlf
-    } else {
-        LineEnding::Lf
-    }
-}
-fn replace_lines_preserving_style(
-    target: &str,
-    range: std::ops::Range<usize>,
-    replacement: Vec<String>,
-    source_terminal_newline: bool,
-) -> String {
-    let ending = if target.contains("\r\n") {
-        "\r\n"
-    } else {
-        "\n"
-    };
-    let mut lines: Vec<String> = if target.is_empty() {
-        Vec::new()
-    } else {
-        target
-            .lines()
-            .map(|line| line.strip_suffix('\r').unwrap_or(line).to_owned())
-            .collect()
-    };
-    lines.splice(
-        range,
-        replacement
-            .into_iter()
-            .map(|line| line.strip_suffix('\r').unwrap_or(&line).to_owned()),
+    ui.painter().line_segment(
+        [rect.center_top(), rect.center_bottom()],
+        Stroke::new(1.0, BORDER.gamma_multiply(0.5)),
     );
-    let mut result = lines.join(ending);
-    if source_terminal_newline && !result.ends_with('\n') {
-        result.push_str(ending);
-    }
-    result
+    let painter = ui.painter().with_clip_rect(rect);
+    let center = rect.center();
+    painter.text(
+        center - egui::vec2(0.0, 24.0),
+        Align2::CENTER_CENTER,
+        title,
+        FontId::proportional(21.0),
+        TEXT,
+    );
+    painter.text(
+        center + egui::vec2(0.0, 8.0),
+        Align2::CENTER_CENTER,
+        subtitle,
+        FontId::proportional(12.0),
+        MUTED,
+    );
 }
-fn conflict_marker(hunk: &versus::MergeHunk) -> String {
-    format!(
-        "<<<<<<< LEFT\n{}\n=======\n{}\n>>>>>>> RIGHT",
-        hunk.left.join("\n"),
-        hunk.right.join("\n")
-    )
-}
-fn resolve_current_conflict(
-    current: &str,
-    hunk: &versus::MergeHunk,
-    choice: MergeChoice,
-    occurrence: usize,
-) -> String {
-    let marker = conflict_marker(hunk);
-    let replacement = match choice {
-        MergeChoice::Left => hunk.left.join("\n"),
-        MergeChoice::Right => hunk.right.join("\n"),
-    };
-    let mut search_start = 0;
-    for index in 0..=occurrence {
-        let Some(relative) = current[search_start..].find(&marker) else {
-            return current.to_owned();
-        };
-        search_start += relative;
-        if index == occurrence {
-            return format!(
-                "{}{}{}",
-                &current[..search_start],
-                replacement,
-                &current[search_start + marker.len()..]
-            );
-        }
-        search_start += marker.len();
-    }
-    current.to_owned()
-}
-fn readonly_lines(ui: &mut egui::Ui, title: &str, text: &str, height: f32) {
-    egui::Frame::group(ui.style()).show(ui, |ui| {
-        ui.strong(title);
-        ui.separator();
-        egui::ScrollArea::vertical()
-            .id_salt(title)
-            .max_height(height)
-            .show(ui, |ui| {
-                ui.set_min_height(height);
-                for (number, line) in text.lines().enumerate() {
-                    ui.monospace(format!("{:>4}  {}", number + 1, line));
-                }
-            });
-    });
-}
-fn directory_state(state: &DirectoryEntryState) -> String {
-    match state {
-        DirectoryEntryState::Same => "Same".into(),
-        DirectoryEntryState::Different => "Different".into(),
-        DirectoryEntryState::LeftOnly => "Left Only".into(),
-        DirectoryEntryState::RightOnly => "Right Only".into(),
-        DirectoryEntryState::TypeMismatch => "Type Mismatch".into(),
-        DirectoryEntryState::Error(error) => format!("Error: {error}"),
-    }
-}
-fn state_color(state: &DirectoryEntryState, dark_mode: bool) -> Color32 {
-    match state {
-        DirectoryEntryState::Same => Color32::GRAY,
-        DirectoryEntryState::Different | DirectoryEntryState::TypeMismatch => {
-            if dark_mode {
-                Color32::YELLOW
-            } else {
-                Color32::from_rgb(190, 45, 48)
-            }
-        }
-        DirectoryEntryState::LeftOnly => {
-            if dark_mode {
-                Color32::LIGHT_RED
-            } else {
-                Color32::from_rgb(30, 95, 180)
-            }
-        }
-        DirectoryEntryState::RightOnly => {
-            if dark_mode {
-                Color32::LIGHT_GREEN
-            } else {
-                Color32::from_rgb(30, 130, 65)
-            }
-        }
-        DirectoryEntryState::Error(_) => Color32::RED,
-    }
-}
-fn accent(dark_mode: bool) -> Color32 {
-    if dark_mode {
-        Color32::from_rgb(115, 175, 245)
-    } else {
-        Color32::from_rgb(36, 101, 183)
-    }
-}
-fn toolbar_fill(dark_mode: bool) -> Color32 {
-    if dark_mode {
-        Color32::from_rgb(35, 40, 49)
-    } else {
-        Color32::from_rgb(242, 247, 253)
-    }
-}
-fn apply_theme(ctx: &egui::Context, dark_mode: bool) {
-    ctx.set_theme(if dark_mode {
-        egui::Theme::Dark
-    } else {
-        egui::Theme::Light
-    });
-    ctx.set_visuals(if dark_mode {
-        egui::Visuals::dark()
-    } else {
-        egui::Visuals::light()
-    });
+
+fn apply_theme(ctx: &egui::Context) {
+    ctx.set_theme(egui::Theme::Dark);
+    let mut visuals = egui::Visuals::dark();
+    visuals.panel_fill = BACKGROUND;
+    visuals.window_fill = PANEL;
+    visuals.extreme_bg_color = BACKGROUND;
+    visuals.override_text_color = Some(TEXT);
+    visuals.selection.bg_fill = ACCENT.gamma_multiply(0.3);
+    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, BORDER);
+    ctx.set_visuals(visuals);
     ctx.all_styles_mut(|style| {
+        style.spacing.item_spacing = egui::vec2(10.0, 5.0);
+        style.spacing.interact_size.y = 30.0;
         style
             .text_styles
-            .insert(egui::TextStyle::Body, egui::FontId::proportional(15.0));
+            .insert(egui::TextStyle::Body, FontId::proportional(13.0));
         style
             .text_styles
-            .insert(egui::TextStyle::Button, egui::FontId::proportional(15.0));
+            .insert(egui::TextStyle::Button, FontId::proportional(12.0));
         style
             .text_styles
-            .insert(egui::TextStyle::Monospace, egui::FontId::monospace(14.0));
-        style
-            .text_styles
-            .insert(egui::TextStyle::Small, egui::FontId::proportional(13.0));
-        style.spacing.item_spacing = egui::vec2(10.0, 8.0);
-        style.spacing.interact_size.y = 29.0;
+            .insert(egui::TextStyle::Monospace, FontId::monospace(12.0));
     });
-}
-#[derive(Clone, Copy)]
-struct Settings {
-    ignore_line_endings: bool,
-    ignore_whitespace: bool,
-    confirm_overwrite: bool,
-    dark_mode: bool,
-}
-impl Default for Settings {
-    fn default() -> Self {
-        Self {
-            ignore_line_endings: true,
-            ignore_whitespace: false,
-            confirm_overwrite: true,
-            dark_mode: false,
-        }
-    }
-}
-fn settings_path() -> Option<PathBuf> {
-    let root = std::env::var_os("APPDATA")
-        .or_else(|| std::env::var_os("XDG_CONFIG_HOME"))
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .map(|home| PathBuf::from(home).join(".config").into_os_string())
-        })?;
-    Some(PathBuf::from(root).join("Versus").join("settings.conf"))
-}
-fn load_settings() -> Settings {
-    let Ok(contents) = settings_path()
-        .and_then(|path| std::fs::read_to_string(path).ok())
-        .ok_or(())
-    else {
-        return Settings::default();
-    };
-    parse_settings(&contents)
-}
-fn parse_settings(contents: &str) -> Settings {
-    let mut settings = Settings::default();
-    for line in contents.lines() {
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        let value = value == "true";
-        match key {
-            "ignore_line_endings" => settings.ignore_line_endings = value,
-            "ignore_whitespace" => settings.ignore_whitespace = value,
-            "confirm_overwrite" => settings.confirm_overwrite = value,
-            "dark_mode" => settings.dark_mode = value,
-            _ => {}
-        }
-    }
-    settings
-}
-fn save_settings(settings: Settings) -> Result<(), std::io::Error> {
-    let Some(path) = settings_path() else {
-        return Ok(());
-    };
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(
-        path,
-        format!(
-            "ignore_line_endings={}\nignore_whitespace={}\nconfirm_overwrite={}\ndark_mode={}\n",
-            settings.ignore_line_endings,
-            settings.ignore_whitespace,
-            settings.confirm_overwrite,
-            settings.dark_mode
-        ),
-    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ops::Range;
+    use versus::{DirectoryDiff, DirectoryEntry};
 
-    #[test]
-    fn theme_setting_loads_and_old_settings_default_to_light() {
-        assert!(parse_settings("dark_mode=true\nignore_whitespace=true\n").dark_mode);
-        assert!(parse_settings("dark_mode=true\nignore_whitespace=true\n").ignore_whitespace);
-        assert!(!parse_settings("ignore_whitespace=true\n").dark_mode);
+    fn fixture() -> FolderTree {
+        FolderTree::from_diff(&DirectoryDiff {
+            cancelled: false,
+            entries: [
+                ("assembly", DirectoryEntryKind::Directory),
+                ("assembly/model.step", DirectoryEntryKind::File),
+            ]
+            .into_iter()
+            .map(|(path, kind)| DirectoryEntry {
+                relative_path: path.into(),
+                left_exists: true,
+                right_exists: true,
+                left_kind: Some(kind.clone()),
+                right_kind: Some(kind.clone()),
+                kind,
+                state: DirectoryEntryState::Same,
+            })
+            .collect(),
+        })
     }
 
-    fn conflict(left: &[&str], right: &[&str]) -> versus::MergeHunk {
-        versus::MergeHunk {
-            base_range: Range { start: 0, end: 1 },
-            merged_range: Range { start: 0, end: 0 },
-            left: left.iter().map(|line| (*line).into()).collect(),
-            right: right.iter().map(|line| (*line).into()).collect(),
-            kind: MergeHunkKind::Conflict,
+    fn loaded_app() -> VersusApp {
+        let mut app = VersusApp::default();
+        app.tree = Some(fixture());
+        app.roots = Some(["left".into(), "right".into()]);
+        app
+    }
+
+    fn render(
+        app: &mut VersusApp,
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+    ) -> egui::FullOutput {
+        ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0))),
+                events,
+                ..Default::default()
+            },
+            |ui| app.render(ui),
+        )
+    }
+
+    fn text_positions(output: &egui::FullOutput, value: &str) -> Vec<Pos2> {
+        output
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text() == value => Some(text.pos),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn click(app: &mut VersusApp, ctx: &egui::Context, position: Pos2) {
+        for pressed in [true, false] {
+            render(
+                app,
+                ctx,
+                vec![
+                    egui::Event::PointerMoved(position),
+                    egui::Event::PointerButton {
+                        pos: position,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: Default::default(),
+                    },
+                ],
+            )
+            .drop_without_applying_deltas();
         }
     }
 
     #[test]
-    fn resolving_one_conflict_preserves_other_conflicts_and_edits() {
-        let first = conflict(&["left one"], &["right one"]);
-        let second = conflict(&["left two"], &["right two"]);
-        let initial = "manual header\n<<<<<<< LEFT\nleft one\n=======\nright one\n>>>>>>> RIGHT\n<<<<<<< LEFT\nleft two\n=======\nright two\n>>>>>>> RIGHT";
-        let after_first = resolve_current_conflict(initial, &first, MergeChoice::Left, 0);
-        let final_text = resolve_current_conflict(&after_first, &second, MergeChoice::Right, 0);
-        assert_eq!(final_text, "manual header\nleft one\nright two");
+    fn clicking_either_folder_pane_updates_both_rendered_trees() {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut app = loaded_app();
+        let output = render(&mut app, &ctx, vec![]);
+        let folders = text_positions(&output, "assembly");
+        assert_eq!(folders.len(), 2);
+        output.drop_without_applying_deltas();
+        click(&mut app, &ctx, folders[0] + egui::vec2(3.0, 5.0));
+        assert!(app.tree.as_ref().unwrap().is_expanded("assembly"));
+        let output = render(&mut app, &ctx, vec![]);
+        let children = text_positions(&output, "model.step");
+        assert_eq!(children.len(), 2);
+        assert_eq!(children[0].y, children[1].y);
+        let folders = text_positions(&output, "assembly");
+        output.drop_without_applying_deltas();
+        click(&mut app, &ctx, folders[1] + egui::vec2(3.0, 5.0));
+        assert!(!app.tree.as_ref().unwrap().is_expanded("assembly"));
+        let output = render(&mut app, &ctx, vec![]);
+        assert!(text_positions(&output, "model.step").is_empty());
+        output.drop_without_applying_deltas();
     }
 
     #[test]
-    fn resolving_second_identical_conflict_keeps_the_first() {
-        let conflict = conflict(&["left"], &["right"]);
-        let marker = conflict_marker(&conflict);
-        let current = format!("{marker}\nunchanged\n{marker}");
+    fn one_sided_rows_render_an_aligned_placeholder() {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut app = loaded_app();
+        app.tree = Some(FolderTree::from_diff(&DirectoryDiff {
+            cancelled: false,
+            entries: vec![DirectoryEntry {
+                relative_path: "left-only.step".into(),
+                left_exists: true,
+                right_exists: false,
+                left_kind: Some(DirectoryEntryKind::File),
+                right_kind: None,
+                kind: DirectoryEntryKind::File,
+                state: DirectoryEntryState::LeftOnly,
+            }],
+        }));
+        let output = render(&mut app, &ctx, vec![]);
+        let names = text_positions(&output, "left-only.step");
+        let placeholders = text_positions(&output, "—");
+        assert_eq!(names.len(), 1);
+        assert_eq!(placeholders.len(), 1);
+        assert_eq!(names[0].y, placeholders[0].y);
+        assert!(placeholders[0].x > 600.0);
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn empty_folder_has_no_disclosure_and_click_only_selects_it() {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut app = loaded_app();
+        app.tree = Some(FolderTree::from_diff(&DirectoryDiff {
+            cancelled: false,
+            entries: vec![DirectoryEntry {
+                relative_path: "empty-folder".into(),
+                left_exists: true,
+                right_exists: true,
+                left_kind: Some(DirectoryEntryKind::Directory),
+                right_kind: Some(DirectoryEntryKind::Directory),
+                kind: DirectoryEntryKind::Directory,
+                state: DirectoryEntryState::Same,
+            }],
+        }));
+        let output = render(&mut app, &ctx, vec![]);
+        assert!(text_positions(&output, "▸").is_empty());
+        let folders = text_positions(&output, "empty-folder");
+        output.drop_without_applying_deltas();
+        click(&mut app, &ctx, folders[0] + egui::vec2(3.0, 5.0));
         assert_eq!(
-            resolve_current_conflict(&current, &conflict, MergeChoice::Right, 1),
-            format!("{marker}\nunchanged\nright")
+            app.selected.as_deref(),
+            Some(std::path::Path::new("empty-folder"))
         );
+        assert!(!app.tree.as_ref().unwrap().is_expanded("empty-folder"));
     }
 
     #[test]
-    fn detects_predominant_line_ending() {
-        assert_eq!(detected_line_ending("a\r\nb\r\nc\n"), LineEnding::Crlf);
-        assert_eq!(detected_line_ending("a\nb\r\nc\n"), LineEnding::Lf);
+    fn minimum_window_keeps_controls_and_footer_inside_the_viewport() {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut app = loaded_app();
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(900.0, 650.0))),
+                ..Default::default()
+            },
+            |ui| app.render(ui),
+        );
+        for text in ["Collapse all", "Choose two folders to begin."] {
+            let positions = text_positions(&output, text);
+            assert!(!positions.is_empty(), "Missing {text}");
+            assert!(
+                positions.iter().all(|position| position.x >= 0.0
+                    && position.x < 900.0
+                    && position.y >= 0.0
+                    && position.y < 630.0),
+                "{text} outside viewport: {positions:?}"
+            );
+        }
+        output.drop_without_applying_deltas();
+    }
+
+    fn attach_job(app: &mut VersusApp) -> mpsc::Sender<Result<FolderTree, CompareError>> {
+        let (sender, receiver) = mpsc::channel();
+        app.job = Some(ComparisonJob {
+            receiver,
+            cancellation: Arc::new(AtomicBool::new(false)),
+            roots: ["new-left".into(), "new-right".into()],
+            started: Instant::now(),
+        });
+        sender
     }
 
     #[test]
-    fn copying_lines_preserves_target_newline_and_crlf() {
+    fn changing_paths_cancels_scan_and_clears_prior_results() {
+        let mut app = loaded_app();
+        let sender = attach_job(&mut app);
+        let flag = app.job.as_ref().unwrap().cancellation.clone();
+        app.invalidate();
+        assert!(flag.load(Ordering::Relaxed));
+        assert!(app.job.is_none() && app.tree.is_none() && app.roots.is_none());
+        assert!(sender.send(Ok(fixture())).is_err());
+    }
+
+    #[test]
+    fn cancelled_completed_job_does_not_replace_last_comparison() {
+        let mut app = loaded_app();
+        let sender = attach_job(&mut app);
+        sender.send(Ok(fixture())).unwrap();
+        app.job
+            .as_ref()
+            .unwrap()
+            .cancellation
+            .store(true, Ordering::Relaxed);
+        app.poll_comparison(&egui::Context::default());
+        assert!(app.job.is_none());
         assert_eq!(
-            replace_lines_preserving_style("one\r\ntwo\r\n", 1..2, vec!["changed".into()], true),
-            "one\r\nchanged\r\n"
+            app.roots.as_ref().unwrap(),
+            &[PathBuf::from("left"), PathBuf::from("right")]
         );
+        assert_eq!(app.message, "Comparison cancelled.");
     }
 
     #[test]
-    fn copying_into_empty_target_does_not_add_a_newline() {
-        assert_eq!(
-            replace_lines_preserving_style("", 0..0, vec!["new".into()], false),
-            "new"
-        );
-    }
-
-    #[test]
-    fn copying_eof_block_can_remove_terminal_newline() {
-        assert_eq!(
-            replace_lines_preserving_style("old\n", 0..1, vec!["new".into()], false),
-            "new"
-        );
+    fn failed_worker_reports_error_and_keeps_last_comparison() {
+        let mut app = loaded_app();
+        drop(attach_job(&mut app));
+        app.poll_comparison(&egui::Context::default());
+        assert!(app.error.as_ref().unwrap().contains("worker stopped"));
+        assert!(app.tree.is_some());
+        assert_eq!(app.roots.as_ref().unwrap()[0], PathBuf::from("left"));
     }
 }

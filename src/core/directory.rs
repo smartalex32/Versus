@@ -43,6 +43,10 @@ pub enum DirectoryEntryState {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DirectoryEntry {
     pub relative_path: PathBuf,
+    pub left_exists: bool,
+    pub right_exists: bool,
+    pub left_kind: Option<DirectoryEntryKind>,
+    pub right_kind: Option<DirectoryEntryKind>,
     pub kind: DirectoryEntryKind,
     pub state: DirectoryEntryState,
 }
@@ -94,6 +98,14 @@ pub fn compare_directories(
         }
         let left_item = left_entries.remove(&relative_path);
         let right_item = right_entries.remove(&relative_path);
+        let left_exists = left_item.is_some();
+        let right_exists = right_item.is_some();
+        let left_kind = left_item
+            .as_ref()
+            .and_then(|item| item.as_ref().ok().cloned());
+        let right_kind = right_item
+            .as_ref()
+            .and_then(|item| item.as_ref().ok().cloned());
         let (kind, state) = match (left_item, right_item) {
             (Some(Err(error)), _) | (_, Some(Err(error))) => {
                 (DirectoryEntryKind::Other, DirectoryEntryState::Error(error))
@@ -143,6 +155,10 @@ pub fn compare_directories(
         };
         entries.push(DirectoryEntry {
             relative_path,
+            left_exists,
+            right_exists,
+            left_kind,
+            right_kind,
             kind,
             state,
         });

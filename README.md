@@ -1,29 +1,39 @@
 # Versus
 
-Versus is a fast, offline desktop utility for comparing directories, two files,
-and three versions of a text file. It uses operating-system filesystem paths, so
+Versus is an offline engineering workspace for comparing two folders in linked,
+side-by-side trees. It uses operating-system filesystem paths, so
 mapped drives and UNC paths on Windows and mounted network filesystems on Linux
 work through the same local APIs as other paths. Versus does not implement network
 authentication or make outbound network requests at runtime.
 
 ## Use
 
-Open Versus and choose **Directory**, **2-Way**, or **3-Way**. Enter, paste, drop,
-or browse for local paths, mapped drives, UNC shares, or mounted Linux paths.
-Directory comparison starts with the **Different** filter; double-click a changed
-file to inspect it and return to the directory results afterward. File comparison
-shows line numbers, highlighted changes, and difference navigation. Choose
-**Edit buffers** to edit either side, then **Recalculate edited diff** to update
-the highlighting. Copying a selected difference changes only the working buffer
-until you choose **Save** or **Save As**. Three-way merge uses base, left, and
-right files; resolve conflicts into the editable result before saving. Use the
-**Dark mode** or **Light mode** button in the header to switch appearance; the
-choice is saved with the other local settings.
+Choose **Browse…** on each side, or enter/paste both folder paths and choose
+**Compare folders**. Selecting the second folder with the picker starts comparison
+automatically; pressing Enter in a path field also starts comparison when both
+paths are supplied. Local paths, mapped drives, UNC shares, and mounted Linux
+paths all use the same filesystem APIs.
 
-Versus never writes compared files during opening or comparison. It requests
-confirmation before replacing an existing destination. Settings are stored locally
-in `Versus/settings.conf` under the platform's configuration directory and contain
-no file contents.
+Click a folder in either tree to expand or collapse the corresponding relative
+path in both. Scrolling is linked, and a dash marks the empty position opposite
+a one-sided item so matching paths stay aligned. **Expand all** and **Collapse
+all** control both trees. Tab focuses tree rows; Enter or Space toggles a folder,
+and the left/right arrow keys collapse/expand a focused folder.
+
+- Green: identical entries.
+- Amber: changed files or shared folders containing differences.
+- Cyan: files and folders present only on the left.
+- Violet: files and folders present only on the right.
+- Red: different entry types or a filesystem read error. Hover for details.
+
+Comparison runs in the background with **Cancel** and **Refresh comparison**.
+Files are compared by content, not timestamps. Symlinks are compared by their
+targets and are never recursively followed. Empty folders are included. Changing
+a path clears the prior result so it cannot be mistaken for the new selection.
+
+This rebuild focuses exclusively on read-only folder comparison. Text comparison,
+merge, editing, saving, and other workflows are deferred; their existing Rust core
+primitives remain available for later work. Compared folders are never modified.
 
 ## Releases
 

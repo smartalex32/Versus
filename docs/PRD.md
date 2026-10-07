@@ -2,6 +2,14 @@ Versus
 
 Product Requirements Document
 
+Current implementation scope: the engineering workspace has been rebuilt around
+read-only two-folder comparison. Its UI has two folder pickers, aligned folder
+trees with linked expansion and scrolling, and colors for content differences,
+ancestor folders, one-sided entries, type mismatches, and read errors. All text
+comparison, editing, merge, save, settings, and other UI workflows described below
+are deferred. The remainder of this document is the original longer-term product
+roadmap, not the acceptance criteria for this folder-comparison rebuild.
+
 1. Summary
 
 Versus is a small, fast, offline desktop utility for comparing files and directories.
