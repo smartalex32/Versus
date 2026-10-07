@@ -305,7 +305,12 @@ impl VersusApp {
             .is_none_or(|(theme, _)| *theme != dark)
         {
             let icon = crate::logo::themed_icon(dark);
-            let image: egui::ColorImage = (&icon).into();
+            // PNG/window-icon bytes have straight alpha; egui textures need
+            // premultiplied alpha, including nearly transparent edge pixels.
+            let image = egui::ColorImage::from_rgba_unmultiplied(
+                [icon.width as usize, icon.height as usize],
+                &icon.rgba,
+            );
             self.logo_texture = Some((
                 dark,
                 ui.ctx()
@@ -2254,6 +2259,38 @@ mod tests {
                 }
                 output.drop_without_applying_deltas();
             }
+        }
+    }
+
+    #[test]
+    fn logo_texture_respects_transparency_of_stray_and_edge_pixels() {
+        let ctx = egui::Context::default();
+        let mut app = loaded_app();
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            set_theme(&ctx, theme);
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0))),
+                    ..Default::default()
+                },
+                |ui| app.render(ui),
+            );
+            let logo_id = app.logo_texture.as_ref().unwrap().1.id();
+            let delta = &output.textures_delta.set.get(&logo_id).unwrap()[0];
+            let egui::ImageData::Color(image) = &delta.image;
+            let speck = image[(91, 74)];
+            assert_eq!(speck.a(), 1);
+            assert!(
+                speck.r() <= 1 && speck.g() <= 1 && speck.b() <= 1,
+                "Nearly transparent pixels must not become bright white"
+            );
+            for pixel in &image.pixels {
+                assert!(
+                    pixel.r() <= pixel.a() && pixel.g() <= pixel.a() && pixel.b() <= pixel.a(),
+                    "Logo texture must use premultiplied alpha"
+                );
+            }
+            output.drop_without_applying_deltas();
         }
     }
 
