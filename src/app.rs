@@ -538,61 +538,97 @@ impl VersusApp {
     }
 
     fn header(&mut self, ui: &mut egui::Ui) {
-        ui.allocate_ui_with_layout(
-            egui::vec2(ui.available_width(), 32.0),
-            egui::Layout::left_to_right(egui::Align::Center),
-            |ui| {
-                if let Some((_, logo)) = &self.logo_texture {
-                    ui.image((logo.id(), egui::vec2(28.0, 28.0)));
-                }
-                ui.label(RichText::new("Versus").size(18.0).strong());
-                for mode in [ComparisonMode::Folder, ComparisonMode::File] {
-                    if ui
-                        .add(egui::Button::selectable(
-                            self.comparison_mode == mode,
-                            RichText::new(mode.label()).size(14.0).strong(),
-                        ))
-                        .on_hover_cursor(egui::CursorIcon::PointingHand)
-                        .clicked()
-                    {
-                        self.switch_comparison_mode(mode);
-                        ui.ctx().request_repaint();
-                    }
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let dark = ui.visuals().dark_mode;
-                    if icon_button(
-                        ui,
-                        if dark {
-                            ToolbarIcon::Sun
-                        } else {
-                            ToolbarIcon::Moon
-                        },
-                        true,
-                        if dark {
-                            "Switch to light mode"
-                        } else {
-                            "Switch to dark mode"
-                        },
-                    )
-                    .clicked()
-                    {
-                        set_theme(
-                            ui.ctx(),
-                            if dark {
-                                egui::Theme::Light
-                            } else {
-                                egui::Theme::Dark
-                            },
-                        );
-                        ui.ctx().request_repaint();
-                    }
-                    if self.mode() == SelectionMode::Folder {
-                        self.controls(ui);
-                    }
-                });
-            },
+        let modes = [ComparisonMode::Folder, ComparisonMode::File];
+        let labels = modes.map(|mode| {
+            egui::WidgetText::from(RichText::new(mode.label()).size(14.0).strong()).into_galley(
+                ui,
+                Some(egui::TextWrapMode::Extend),
+                f32::INFINITY,
+                FontId::proportional(14.0),
+            )
+        });
+        let padding = ui.spacing().button_padding;
+        let widths = labels
+            .each_ref()
+            .map(|label| label.size().x + 22.0 + padding.x * 2.0);
+        let gap = ui.spacing().item_spacing.x;
+        let group_width = widths.iter().sum::<f32>() + gap;
+        let (header, _) =
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), 32.0), Sense::hover());
+        let group = Rect::from_center_size(header.center(), egui::vec2(group_width, 28.0));
+
+        let mut brand_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(Rect::from_min_max(
+                    header.min,
+                    egui::pos2(group.left() - gap, header.bottom()),
+                ))
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
         );
+        if let Some((_, logo)) = &self.logo_texture {
+            brand_ui.image((logo.id(), egui::vec2(28.0, 28.0)));
+        }
+        brand_ui.label(RichText::new("Versus").size(18.0).strong());
+
+        let mut x = group.left();
+        for (index, mode) in modes.into_iter().enumerate() {
+            let rect = Rect::from_min_size(
+                egui::pos2(x, group.top()),
+                egui::vec2(widths[index], group.height()),
+            );
+            if comparison_mode_button(
+                ui,
+                rect,
+                labels[index].clone(),
+                mode,
+                self.comparison_mode == mode,
+            )
+            .clicked()
+            {
+                self.switch_comparison_mode(mode);
+                ui.ctx().request_repaint();
+            }
+            x += widths[index] + gap;
+        }
+
+        let mut controls_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(Rect::from_min_max(
+                    egui::pos2(group.right() + gap, header.top()),
+                    header.max,
+                ))
+                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+        );
+        let dark = ui.visuals().dark_mode;
+        if icon_button(
+            &mut controls_ui,
+            if dark {
+                ToolbarIcon::Sun
+            } else {
+                ToolbarIcon::Moon
+            },
+            true,
+            if dark {
+                "Switch to light mode"
+            } else {
+                "Switch to dark mode"
+            },
+        )
+        .clicked()
+        {
+            set_theme(
+                ui.ctx(),
+                if dark {
+                    egui::Theme::Light
+                } else {
+                    egui::Theme::Dark
+                },
+            );
+            ui.ctx().request_repaint();
+        }
+        if self.mode() == SelectionMode::Folder {
+            self.controls(&mut controls_ui);
+        }
     }
 
     fn folder_inputs(&mut self, ui: &mut egui::Ui) {
@@ -1187,6 +1223,77 @@ fn absolute_path(path: &str) -> PathBuf {
             .map(|cwd| cwd.join(&path))
             .unwrap_or(path)
     }
+}
+
+fn comparison_mode_button(
+    ui: &egui::Ui,
+    rect: Rect,
+    label: Arc<egui::Galley>,
+    mode: ComparisonMode,
+    selected: bool,
+) -> egui::Response {
+    let response = ui
+        .interact(rect, egui::Id::new(mode.label()), Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(
+            egui::WidgetType::Button,
+            ui.is_enabled(),
+            selected,
+            mode.label(),
+        )
+    });
+    let visuals = ui.style().interact_selectable(&response, selected);
+    if selected
+        || response.hovered()
+        || response.has_focus()
+        || response.is_pointer_button_down_on()
+    {
+        ui.painter().rect(
+            rect,
+            visuals.corner_radius,
+            visuals.weak_bg_fill,
+            visuals.bg_stroke,
+            egui::StrokeKind::Inside,
+        );
+    }
+    let icon_center = egui::pos2(
+        rect.left() + ui.spacing().button_padding.x + 8.0,
+        rect.center().y,
+    );
+    if mode == ComparisonMode::Folder {
+        paint_icon(
+            ui.painter(),
+            icon_center,
+            Some(&DirectoryEntryKind::Directory),
+            visuals.fg_stroke.color,
+        );
+    } else {
+        let point = |x, y| icon_center + egui::vec2(x, y);
+        let stroke = Stroke::new(1.0, visuals.fg_stroke.color);
+        ui.painter().add(egui::Shape::closed_line(
+            vec![
+                point(-5.0, -7.0),
+                point(1.0, -7.0),
+                point(5.0, -3.0),
+                point(5.0, 7.0),
+                point(-5.0, 7.0),
+            ],
+            stroke,
+        ));
+        ui.painter().line(
+            vec![point(1.0, -7.0), point(1.0, -3.0), point(5.0, -3.0)],
+            stroke,
+        );
+        for y in [1.0, 4.0] {
+            ui.painter()
+                .line_segment([point(-2.0, y), point(2.0, y)], stroke);
+        }
+    }
+    let position = egui::pos2(icon_center.x + 14.0, rect.center().y - label.size().y / 2.0);
+    ui.painter()
+        .galley_with_override_text_color(position, label, visuals.fg_stroke.color);
+    response
 }
 
 fn paint_side_label(painter: &egui::Painter, rect: Rect, side: usize, palette: Palette) {
@@ -2954,42 +3061,140 @@ mod tests {
     }
 
     #[test]
-    fn comparison_mode_buttons_are_visible_and_centered_with_logo() {
-        for (width, height) in [(900.0, 650.0), (1200.0, 800.0)] {
-            let ctx = egui::Context::default();
-            apply_theme(&ctx);
-            let mut app = VersusApp::default();
-            let screen = Rect::from_min_size(Pos2::ZERO, egui::vec2(width, height));
-            let output = ctx.run_ui(
-                egui::RawInput {
-                    screen_rect: Some(screen),
-                    ..Default::default()
-                },
-                |ui| app.render(ui),
-            );
-            let texture = app.logo_texture.as_ref().unwrap().1.id();
-            let logo = output
-                .shapes
-                .iter()
-                .find_map(|shape| match &shape.shape {
-                    egui::Shape::Rect(rect) if rect.fill_texture_id() == texture => Some(rect.rect),
-                    _ => None,
-                })
-                .unwrap();
-            for label in ["Folder Compare", "File Compare"] {
-                let text = output
-                    .shapes
-                    .iter()
-                    .find_map(|shape| match &shape.shape {
-                        egui::Shape::Text(text) if text.galley.text() == label => Some(text),
-                        _ => None,
-                    })
-                    .unwrap();
-                let bounds = Rect::from_min_size(text.pos, text.galley.size());
-                assert!((bounds.center().y - logo.center().y).abs() < 1.0);
-                assert!(screen.contains_rect(bounds));
+    fn comparison_mode_buttons_stay_centered_with_icons_in_both_themes() {
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            for (width, height) in [(900.0, 650.0), (1200.0, 800.0)] {
+                for state in 0..4 {
+                    let ctx = egui::Context::default();
+                    set_theme(&ctx, theme);
+                    let mut app = if state == 0 {
+                        VersusApp::default()
+                    } else {
+                        loaded_app()
+                    };
+                    let _sender = (state == 2).then(|| attach_job(&mut app));
+                    if state == 3 {
+                        app.comparison_mode = ComparisonMode::File;
+                        let mut view = loaded_file_view();
+                        view.from_folders = false;
+                        app.file_view = Some(view);
+                    }
+                    let screen = Rect::from_min_size(Pos2::ZERO, egui::vec2(width, height));
+                    let output = ctx.run_ui(
+                        egui::RawInput {
+                            screen_rect: Some(screen),
+                            ..Default::default()
+                        },
+                        |ui| app.render(ui),
+                    );
+                    let texture = app.logo_texture.as_ref().unwrap().1.id();
+                    let logo = output
+                        .shapes
+                        .iter()
+                        .find_map(|shape| match &shape.shape {
+                            egui::Shape::Rect(rect) if rect.fill_texture_id() == texture => {
+                                Some(rect.rect)
+                            }
+                            _ => None,
+                        })
+                        .unwrap();
+                    let folder = ctx
+                        .read_response(egui::Id::new("Folder Compare"))
+                        .unwrap()
+                        .rect;
+                    let file = ctx
+                        .read_response(egui::Id::new("File Compare"))
+                        .unwrap()
+                        .rect;
+                    assert!((folder.union(file).center().x - screen.center().x).abs() < 0.5);
+                    assert!(logo.right() < folder.left());
+                    let theme_button = ctx
+                        .read_response(egui::Id::new(if theme == egui::Theme::Dark {
+                            "Switch to light mode"
+                        } else {
+                            "Switch to dark mode"
+                        }))
+                        .unwrap()
+                        .rect;
+                    assert!(file.right() < theme_button.left());
+                    for (label, rect) in [("Folder Compare", folder), ("File Compare", file)] {
+                        assert!(screen.contains_rect(rect));
+                        let text = output
+                            .shapes
+                            .iter()
+                            .find_map(|shape| match &shape.shape {
+                                egui::Shape::Text(text) if text.galley.text() == label => {
+                                    Some(text)
+                                }
+                                _ => None,
+                            })
+                            .unwrap();
+                        let bounds = Rect::from_min_size(text.pos, text.galley.size());
+                        assert!((bounds.center().y - logo.center().y).abs() < 1.0);
+                        assert!(rect.contains_rect(bounds));
+                        let icon_center = egui::pos2(
+                            rect.left() + ctx.style_of(theme).spacing.button_padding.x + 8.0,
+                            rect.center().y,
+                        );
+                        let icon = Rect::from_center_size(icon_center, egui::vec2(16.0, 16.0));
+                        assert!(icon.right() < bounds.left());
+                        assert!(
+                            output.shapes.iter().any(|shape| match &shape.shape {
+                                egui::Shape::Rect(shape) if label == "Folder Compare" =>
+                                    icon.contains_rect(shape.rect)
+                                        && shape.rect.width() == 13.0
+                                        && shape.stroke.width > 0.0,
+                                egui::Shape::Path(shape) if label == "File Compare" =>
+                                    shape.closed
+                                        && shape.points.len() == 5
+                                        && shape.points.iter().all(|point| icon.contains(*point)),
+                                _ => false,
+                            }),
+                            "{label} must have a visible icon"
+                        );
+                    }
+                    output.drop_without_applying_deltas();
+                }
             }
-            output.drop_without_applying_deltas();
+        }
+    }
+
+    #[test]
+    fn compare_icons_are_clickable_and_mode_buttons_support_keyboard_activation() {
+        let ctx = egui::Context::default();
+        let mut app = VersusApp::default();
+        render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+        let file = ctx
+            .read_response(egui::Id::new("File Compare"))
+            .unwrap()
+            .rect;
+        let icon = egui::pos2(file.left() + 12.0, file.center().y);
+        let output = render(&mut app, &ctx, vec![egui::Event::PointerMoved(icon)]);
+        assert_eq!(
+            output.platform_output.cursor_icon,
+            egui::CursorIcon::PointingHand
+        );
+        output.drop_without_applying_deltas();
+        click(&mut app, &ctx, icon);
+        assert_eq!(app.comparison_mode, ComparisonMode::File);
+        for (key, mode) in [
+            (egui::Key::Enter, ComparisonMode::Folder),
+            (egui::Key::Space, ComparisonMode::File),
+        ] {
+            ctx.memory_mut(|memory| memory.request_focus(egui::Id::new(mode.label())));
+            render(
+                &mut app,
+                &ctx,
+                vec![egui::Event::Key {
+                    key,
+                    physical_key: Some(key),
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Default::default(),
+                }],
+            )
+            .drop_without_applying_deltas();
+            assert_eq!(app.comparison_mode, mode);
         }
     }
 

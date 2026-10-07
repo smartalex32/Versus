@@ -8,8 +8,9 @@ authentication or make outbound network requests at runtime.
 
 ## Use
 
-Choose **Folder Compare** or **File Compare** beside the main logo. The active
-mode is highlighted, with Folder Compare selected initially. Clicking a path
+Choose **Folder Compare** or **File Compare** in the center of the header. Each
+button includes a folder or file icon. The active mode is highlighted, with Folder
+Compare selected initially. Clicking a path
 area or browse icon in either pane opens that mode's native folder or file picker
 directly. Selecting the second source starts comparison automatically. File
 Compare opens the line comparison without a Back button.
