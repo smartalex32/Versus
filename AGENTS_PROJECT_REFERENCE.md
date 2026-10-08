@@ -53,7 +53,8 @@ APIs and must fail cleanly when unavailable.
   Windows also reads the live native cursor relative to the app window while
   hovering or dropping, converting physical pixels to UI points and repainting
   during hover. A foreground border identifies the receiving side above pane
-  contents; unavailable native coordinates fall back to forwarded pointer events.
+  contents. A position forwarded in the current frame takes priority over the
+  native sample; older retained pointer state is used only if both are unavailable.
   Linux chooses X11/XWayland when `DISPLAY` exists for native file drops,
   retaining native Wayland browsing when no X11 display is available.
 - `src/core/progress.rs` publishes synchronized stage snapshots. Measured stages

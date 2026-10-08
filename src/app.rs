@@ -880,15 +880,23 @@ impl VersusApp {
     }
 
     fn drag_and_drop(&mut self, ui: &mut egui::Ui) {
-        let (hovering, event_position) = ui.input(|input| {
+        let (hovering, frame_position, retained_position) = ui.input(|input| {
             (
                 !input.raw.hovered_files.is_empty(),
+                // A position delivered with Drop is more precise than a later
+                // live-cursor sample taken when the UI redraws.
+                input.raw.events.iter().rev().find_map(|event| match event {
+                    egui::Event::PointerMoved(position) => Some(*position),
+                    _ => None,
+                }),
                 // Native drags can report PointerGone after the drag position
                 // in the same frame. Keep that position for hit testing the drop.
                 input.pointer.interact_pos(),
             )
         });
-        let position = self.native_drag_position.take().or(event_position);
+        let position = frame_position
+            .or(self.native_drag_position.take())
+            .or(retained_position);
         let dropped = ui
             .ctx()
             .input_mut(|input| std::mem::take(&mut input.raw.dropped_files));
@@ -5623,12 +5631,13 @@ mod tests {
 
         // An up-to-date native position outside the panes must reject the drop,
         // even if egui still retains an old, valid pane position.
-        app.native_drag_position = Some(egui::pos2(600.0, 20.0));
         let pane = app.pane_rects[1].center();
+        render(&mut app, &ctx, vec![egui::Event::PointerMoved(pane)])
+            .drop_without_applying_deltas();
+        app.native_drag_position = Some(egui::pos2(600.0, 20.0));
         ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0))),
-                events: vec![egui::Event::PointerMoved(pane)],
                 dropped_files: vec![Arc::new(TestDrop(sources.path("right")))],
                 ..Default::default()
             },
@@ -5637,6 +5646,33 @@ mod tests {
         .drop_without_applying_deltas();
         assert!(app.source_paths[1].is_none());
         assert!(app.drop_message.is_some());
+    }
+
+    #[test]
+    fn drop_event_position_takes_priority_over_a_later_native_cursor_sample() {
+        let sources = SourceFixture::new();
+        let ctx = egui::Context::default();
+        let mut app = VersusApp::default();
+        render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+        let position = app.pane_rects[1].center();
+        app.native_drag_position = Some(egui::pos2(600.0, 20.0));
+        ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0))),
+                events: vec![
+                    egui::Event::PointerMoved(position),
+                    egui::Event::PointerGone,
+                ],
+                dropped_files: vec![Arc::new(TestDrop(sources.path("right")))],
+                ..Default::default()
+            },
+            |ui| app.render(ui),
+        )
+        .drop_without_applying_deltas();
+        assert_eq!(app.source_paths[1], Some(sources.path("right")));
+        assert!(app.drop_message.is_none());
+        assert!(app.native_drag_position.is_none());
+        settle_sources(&mut app, &ctx);
     }
 
     #[test]
