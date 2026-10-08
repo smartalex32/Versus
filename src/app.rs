@@ -152,6 +152,7 @@ pub struct VersusApp {
     tree_scroll_y: f32,
     folder_differences: Vec<PathBuf>,
     pane_rects: [Rect; 2],
+    native_drag_position: Option<Pos2>,
     drop_hover_side: Option<usize>,
     drop_message: Option<String>,
 }
@@ -183,6 +184,7 @@ impl Default for VersusApp {
             tree_scroll_y: 0.0,
             folder_differences: Vec::new(),
             pane_rects: [Rect::NOTHING; 2],
+            native_drag_position: None,
             drop_hover_side: None,
             drop_message: None,
         }
@@ -878,7 +880,7 @@ impl VersusApp {
     }
 
     fn drag_and_drop(&mut self, ui: &mut egui::Ui) {
-        let (hovering, position) = ui.input(|input| {
+        let (hovering, event_position) = ui.input(|input| {
             (
                 !input.raw.hovered_files.is_empty(),
                 // Native drags can report PointerGone after the drag position
@@ -886,34 +888,53 @@ impl VersusApp {
                 input.pointer.interact_pos(),
             )
         });
+        let position = self.native_drag_position.take().or(event_position);
         let dropped = ui
             .ctx()
             .input_mut(|input| std::mem::take(&mut input.raw.dropped_files));
         let side =
             position.and_then(|pos| self.pane_rects.iter().position(|rect| rect.contains(pos)));
         if hovering {
+            // OLE drags can suppress ordinary mouse motion. Keep polling the
+            // native cursor so the highlight follows it even without events.
+            if cfg!(windows) {
+                ui.ctx().request_repaint_after(Duration::from_millis(33));
+            }
             if position.is_some() {
                 self.drop_hover_side = side;
             }
             if let Some(side) = side.or(self.drop_hover_side) {
                 let rect = self.pane_rects[side].shrink(3.0);
                 let palette = Palette::for_context(ui.ctx());
-                ui.painter()
-                    .rect_filled(rect, 4, palette.accent.gamma_multiply(0.1));
-                ui.painter().rect_stroke(
+                // Draw above the empty-state text and rows. Native
+                // drops are hit-tested by geometry, not intercepted by widgets.
+                let painter = ui.ctx().layer_painter(egui::LayerId::new(
+                    egui::Order::Foreground,
+                    egui::Id::new("native-drop-highlight"),
+                ));
+                painter.rect_filled(rect, 4, palette.accent.gamma_multiply(0.1));
+                painter.rect_stroke(
                     rect,
                     4,
-                    Stroke::new(2.0, palette.accent),
+                    Stroke::new(3.0, palette.accent),
                     egui::StrokeKind::Inside,
                 );
-                ui.painter().text(
-                    rect.center(),
-                    Align2::CENTER_CENTER,
+                let label = painter.layout_no_wrap(
                     format!(
                         "Drop a file or folder on {}",
                         if side == 0 { "LEFT" } else { "RIGHT" }
                     ),
                     FontId::proportional(16.0),
+                    palette.text,
+                );
+                let label_rect = Rect::from_center_size(
+                    egui::pos2(rect.center().x, rect.top() + 64.0),
+                    label.size() + egui::vec2(24.0, 16.0),
+                );
+                painter.rect_filled(label_rect, 4, palette.panel);
+                painter.galley(
+                    label_rect.center() - label.size() * 0.5,
+                    label,
                     palette.text,
                 );
             }
@@ -1828,7 +1849,23 @@ impl eframe::App for VersusApp {
         self.poll_comparison(ctx);
         self.poll_file_comparison(ctx);
     }
-    fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        #[cfg(windows)]
+        if ui.input(|input| {
+            !input.raw.hovered_files.is_empty() || !input.raw.dropped_files.is_empty()
+        }) {
+            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            self.native_drag_position = _frame.window_handle().ok().and_then(|handle| {
+                if let RawWindowHandle::Win32(handle) = handle.as_raw() {
+                    crate::native_drop::cursor_position(
+                        handle.hwnd.get(),
+                        ui.ctx().pixels_per_point(),
+                    )
+                } else {
+                    None
+                }
+            });
+        }
         self.render(ui);
     }
 }
@@ -5455,6 +5492,151 @@ mod tests {
             Some("Drop into the large LEFT or RIGHT view below the path bars.")
         );
         assert!(app.source_jobs.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn drag_highlight_borders_only_the_hovered_pane_above_empty_or_loaded_content() {
+        let sources = SourceFixture::new();
+        for dark in [true, false] {
+            for loaded in [false, true] {
+                let ctx = egui::Context::default();
+                set_theme(
+                    &ctx,
+                    if dark {
+                        egui::Theme::Dark
+                    } else {
+                        egui::Theme::Light
+                    },
+                );
+                let mut app = if loaded {
+                    loaded_app()
+                } else {
+                    VersusApp::default()
+                };
+                render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+                for side in [0, 1] {
+                    let mut output = ctx.run_ui(
+                        egui::RawInput {
+                            screen_rect: Some(Rect::from_min_size(
+                                Pos2::ZERO,
+                                egui::vec2(1200.0, 800.0),
+                            )),
+                            events: vec![egui::Event::PointerMoved(app.pane_rects[side].center())],
+                            hovered_files: vec![egui::HoveredFile {
+                                path: Some(sources.path("left")),
+                                ..Default::default()
+                            }],
+                            ..Default::default()
+                        },
+                        |ui| app.render(ui),
+                    );
+                    output.textures_delta.clear();
+                    let borders: Vec<_> = output
+                        .shapes
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, shape)| match &shape.shape {
+                            egui::Shape::Rect(rect)
+                                if rect.stroke.width == 3.0
+                                    && rect.stroke.color == Palette::new(dark).accent =>
+                            {
+                                Some((index, rect.rect))
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    assert_eq!(borders.len(), 1);
+                    assert_eq!(borders[0].1, app.pane_rects[side].shrink(3.0));
+                    assert!(
+                        output.shapes[..borders[0].0]
+                            .iter()
+                            .any(|shape| matches!(shape.shape, egui::Shape::Text(_)))
+                    );
+                    assert_eq!(app.drop_hover_side, Some(side));
+                    output.drop_without_applying_deltas();
+                }
+                let mut output = render(&mut app, &ctx, vec![egui::Event::PointerGone]);
+                output.textures_delta.clear();
+                assert!(app.drop_hover_side.is_none());
+                assert!(!output.shapes.iter().any(|shape| matches!(&shape.shape,
+                    egui::Shape::Rect(rect) if rect.stroke.width == 3.0 && rect.stroke.color == Palette::new(dark).accent)));
+                output.drop_without_applying_deltas();
+            }
+        }
+    }
+
+    #[test]
+    fn native_cursor_targets_hover_and_drop_without_pointer_events() {
+        let sources = SourceFixture::new();
+        let ctx = egui::Context::default();
+        let mut app = VersusApp::default();
+        // Explorer can retain focus and leave egui's pointer at an old location.
+        render(
+            &mut app,
+            &ctx,
+            vec![egui::Event::PointerMoved(egui::pos2(600.0, 20.0))],
+        )
+        .drop_without_applying_deltas();
+        for side in [1, 0] {
+            app.native_drag_position = Some(app.pane_rects[side].center());
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0))),
+                    hovered_files: vec![egui::HoveredFile {
+                        path: Some(sources.path("left")),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                |ui| app.render(ui),
+            );
+            output.textures_delta.clear();
+            assert_eq!(app.drop_hover_side, Some(side));
+            assert!(app.native_drag_position.is_none());
+            assert!(
+                !text_positions(
+                    &output,
+                    if side == 0 {
+                        "Drop a file or folder on LEFT"
+                    } else {
+                        "Drop a file or folder on RIGHT"
+                    }
+                )
+                .is_empty()
+            );
+            output.drop_without_applying_deltas();
+        }
+        app.native_drag_position = Some(app.pane_rects[0].center());
+        ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0))),
+                dropped_files: vec![Arc::new(TestDrop(sources.path("left")))],
+                ..Default::default()
+            },
+            |ui| app.render(ui),
+        )
+        .drop_without_applying_deltas();
+        assert_eq!(app.source_paths[0], Some(sources.path("left")));
+        assert!(app.source_paths[1].is_none());
+        assert!(app.drop_message.is_none());
+        settle_sources(&mut app, &ctx);
+
+        // An up-to-date native position outside the panes must reject the drop,
+        // even if egui still retains an old, valid pane position.
+        app.native_drag_position = Some(egui::pos2(600.0, 20.0));
+        let pane = app.pane_rects[1].center();
+        ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0))),
+                events: vec![egui::Event::PointerMoved(pane)],
+                dropped_files: vec![Arc::new(TestDrop(sources.path("right")))],
+                ..Default::default()
+            },
+            |ui| app.render(ui),
+        )
+        .drop_without_applying_deltas();
+        assert!(app.source_paths[1].is_none());
+        assert!(app.drop_message.is_some());
     }
 
     #[test]

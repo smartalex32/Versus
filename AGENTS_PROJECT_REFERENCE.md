@@ -50,6 +50,10 @@ APIs and must fail cleanly when unavailable.
   documented in `docs/vendor-winit-drop-position.md`; preserve it on vendor
   refresh. Pane targeting retains the drag position when a pointer-leave event
   follows it in the same frame, including drops without an earlier hover frame.
+  Windows also reads the live native cursor relative to the app window while
+  hovering or dropping, converting physical pixels to UI points and repainting
+  during hover. A foreground border identifies the receiving side above pane
+  contents; unavailable native coordinates fall back to forwarded pointer events.
   Linux chooses X11/XWayland when `DISPLAY` exists for native file drops,
   retaining native Wayland browsing when no X11 display is available.
 - `src/core/progress.rs` publishes synchronized stage snapshots. Measured stages

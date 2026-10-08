@@ -82,8 +82,10 @@ options apply to valid UTF-8 text up to 32 MiB; binary, invalid UTF-8, and large
 files retain byte-for-byte comparison.
 
 Drag one file or folder from your file explorer into the large view on the left
-or right, below the path bars, to replace that side. The highlighted drop target
-identifies LEFT or RIGHT. The source type
+or right, below the path bars, to replace that side. A blue border and drop label
+identify LEFT or RIGHT above the pane contents, including the empty chooser view.
+Windows follows the live cursor during native drags even when ordinary pointer
+events are unavailable. The source type
 selects the corresponding view automatically; mixed file/folder pairs show why
 they cannot compare. A drop in a file opened from the folder tree keeps the other
 displayed file and starts a direct comparison. Multiple-item drops are rejected

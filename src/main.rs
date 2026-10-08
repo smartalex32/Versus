@@ -3,6 +3,8 @@
 mod app;
 mod cli;
 mod logo;
+#[cfg(windows)]
+mod native_drop;
 mod selection;
 
 fn main() -> std::process::ExitCode {

@@ -2320,6 +2320,7 @@ name = "versus"
 version = "0.1.0"
 dependencies = [
  "eframe",
+ "raw-window-handle",
  "rfd",
  "similar",
  "tracing",
