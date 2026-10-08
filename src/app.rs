@@ -85,6 +85,7 @@ struct FileJob {
     cancellation: Arc<AtomicBool>,
     started: Instant,
     progress: Arc<ComparisonProgress>,
+    ignore_line_endings: bool,
 }
 
 struct SourceJob {
@@ -113,6 +114,7 @@ struct FileView {
     difference_rows: Vec<usize>,
     navigation_row: Option<usize>,
     navigation_scroll_pending: bool,
+    ignore_line_endings: bool,
 }
 
 impl Drop for FileView {
@@ -478,7 +480,56 @@ impl VersusApp {
                 return;
             }
             match result {
-                Ok(tree) => {
+                Ok(mut tree) => {
+                    let same_roots = self.roots.as_ref() == Some(&job.roots);
+                    if same_roots {
+                        let anchor = self.tree.as_ref().and_then(|previous| {
+                            previous
+                                .visible_rows()
+                                .into_iter()
+                                .filter(|row| {
+                                    !self.show_only_differences
+                                        || row.node.state != DirectoryEntryState::Same
+                                })
+                                .nth((self.tree_scroll_y / ROW_HEIGHT).floor() as usize)
+                                .map(|row| row.node.relative_path.clone())
+                        });
+                        if let Some(previous) = &self.tree {
+                            let expanded: Vec<_> = tree
+                                .all_rows()
+                                .into_iter()
+                                .filter(|row| previous.is_expanded(&row.node.relative_path))
+                                .map(|row| row.node.relative_path.clone())
+                                .collect();
+                            for path in expanded {
+                                tree.set_expanded(path, true);
+                            }
+                        }
+                        if self.selected.as_ref().is_some_and(|path| {
+                            !tree
+                                .all_rows()
+                                .iter()
+                                .any(|row| &row.node.relative_path == path)
+                        }) {
+                            self.selected = None;
+                        }
+                        if let Some(top) = anchor.and_then(|path| {
+                            tree.visible_rows()
+                                .into_iter()
+                                .filter(|row| {
+                                    !self.show_only_differences
+                                        || row.node.state != DirectoryEntryState::Same
+                                })
+                                .position(|row| row.node.relative_path == path)
+                        }) {
+                            self.tree_scroll_y =
+                                top as f32 * ROW_HEIGHT + self.tree_scroll_y % ROW_HEIGHT;
+                        }
+                    } else {
+                        self.selected = None;
+                        self.tree_scroll_y = 0.0;
+                        self.scroll_generation += 1;
+                    }
                     self.folder_differences = tree
                         .all_rows()
                         .into_iter()
@@ -489,8 +540,6 @@ impl VersusApp {
                     self.tree = Some(tree);
                     self.roots = Some(job.roots);
                     self.elapsed = Some(job.started.elapsed());
-                    self.selected = None;
-                    self.scroll_generation += 1;
                     self.message = "Comparison complete.".into();
                 }
                 Err(error) => {
@@ -532,6 +581,7 @@ impl VersusApp {
         let (sender, receiver) = mpsc::channel();
         let progress = Arc::new(ComparisonProgress::default());
         options.progress = Some(progress.clone());
+        let ignore_line_endings = options.ignore_line_endings;
         if ready && !type_mismatch {
             std::thread::spawn(move || {
                 let result = load_file_comparison_with_options(
@@ -551,6 +601,7 @@ impl VersusApp {
                 cancellation,
                 started: Instant::now(),
                 progress,
+                ignore_line_endings,
             }),
             comparison: None,
             error: type_mismatch.then(|| "Entry types differ. Line comparison requires regular files; folders and symlink targets are not opened.".into()),
@@ -562,6 +613,7 @@ impl VersusApp {
             difference_rows: Vec::new(),
             navigation_row: None,
             navigation_scroll_pending: false,
+            ignore_line_endings,
         }
     }
 
@@ -578,9 +630,25 @@ impl VersusApp {
             Err(TryRecvError::Empty) => None,
         };
         if let Some(result) = result {
-            view.job = None;
+            let job = view.job.take().unwrap();
+            if job.cancellation.load(Ordering::Relaxed) {
+                view.error = Some("File comparison cancelled.".into());
+                return;
+            }
             match result {
                 Ok(Some(comparison)) => {
+                    // Ignore rules can change row alignment. Restore the viewport
+                    // and navigation by source line number, rather than row index.
+                    let anchor = file_line_anchor(
+                        view,
+                        view.visible_rows
+                            .get((view.scroll_y / ROW_HEIGHT).floor() as usize)
+                            .copied(),
+                    );
+                    let navigation = file_line_anchor(view, view.navigation_row);
+                    let fraction = view.scroll_y % ROW_HEIGHT;
+                    view.counts = [0; 6];
+                    view.content_widths = [0.0; 2];
                     for row in &comparison.rows {
                         view.counts[state_index(&row.state)] += 1;
                         for (side, line) in [&row.left, &row.right].into_iter().enumerate() {
@@ -593,7 +661,25 @@ impl VersusApp {
                         }
                     }
                     view.comparison = Some(comparison);
+                    view.ignore_line_endings = job.ignore_line_endings;
+                    view.error = None;
                     update_visible_file_rows(view, self.show_only_differences);
+                    let comparison = view.comparison.as_ref().unwrap();
+                    if let Some(row) = find_file_line(comparison, anchor) {
+                        let top = view
+                            .visible_rows
+                            .iter()
+                            .position(|index| *index >= row)
+                            .unwrap_or_else(|| view.visible_rows.len().saturating_sub(1));
+                        view.scroll_y = if view.visible_rows.is_empty() {
+                            0.0
+                        } else {
+                            top as f32 * ROW_HEIGHT + fraction
+                        };
+                    }
+                    view.navigation_row = find_file_line(comparison, navigation)
+                        .filter(|index| view.difference_rows.contains(index));
+                    view.navigation_scroll_pending = true;
                 }
                 Ok(None) => view.error = Some("File comparison cancelled.".into()),
                 Err(error) => view.error = Some(error),
@@ -620,25 +706,30 @@ impl VersusApp {
             .iter()
             .all(|kind| *kind == Some(SourceKind::Folder))
         {
-            self.tree = None;
-            self.folder_differences.clear();
-            self.counts = [0; 6];
             self.start_comparison();
         }
-        if let Some(view) = self.file_view.take() {
+        let options = self.file_options();
+        if let Some(view) = &mut self.file_view {
             let ready = view.from_folders
                 || self
                     .source_kinds
                     .iter()
                     .all(|kind| *kind == Some(SourceKind::File));
-            self.file_view = Some(Self::create_file_view(
+            let mut refreshed = Self::create_file_view(
                 view.paths.clone(),
                 view.sources.clone(),
                 view.from_folders,
                 matches!(view.error_icon, StatusIcon::TypeMismatch),
                 ready,
-                self.file_options(),
-            ));
+                options,
+            );
+            if let Some(job) = view.job.take() {
+                job.cancellation.store(true, Ordering::Relaxed);
+            }
+            view.job = refreshed.job.take();
+            if !matches!(view.error_icon, StatusIcon::TypeMismatch) {
+                view.error = None;
+            }
         }
     }
 
@@ -732,6 +823,14 @@ impl VersusApp {
     }
 
     fn progress_indicator(&self, ui: &mut egui::Ui) {
+        if let Some(message) = &self.drop_message {
+            ui.label(
+                RichText::new(message)
+                    .size(11.0)
+                    .color(Palette::for_context(ui.ctx()).error),
+            );
+            return;
+        }
         let file_job = self.file_view.as_ref().and_then(|view| view.job.as_ref());
         let job = file_job
             .map(|job| (&job.progress, job.started))
@@ -769,13 +868,12 @@ impl VersusApp {
                 ui.label("Opening selected sources…");
             });
             ui.ctx().request_repaint_after(Duration::from_millis(60));
-        }
-        if let Some(message) = &self.drop_message {
-            ui.label(
-                RichText::new(message)
-                    .size(11.0)
-                    .color(Palette::for_context(ui.ctx()).error),
-            );
+        } else if let Some(view) = &self.file_view {
+            if view.comparison.is_some() {
+                if let Some(error) = &view.error {
+                    ui.colored_label(Palette::for_context(ui.ctx()).error, error);
+                }
+            }
         }
     }
 
@@ -880,7 +978,13 @@ impl VersusApp {
                 ui.add_space(5.0);
                 self.legend(ui);
                 ui.add_space(5.0);
-                self.progress_indicator(ui);
+                // Keep the pane geometry and widget identities stable while
+                // background work starts and finishes.
+                let (status_rect, _) =
+                    ui.allocate_exact_size(egui::vec2(ui.available_width(), 24.0), Sense::hover());
+                let mut status_ui = ui.new_child(egui::UiBuilder::new().max_rect(status_rect));
+                status_ui.set_clip_rect(ui.clip_rect().intersect(status_rect));
+                self.progress_indicator(&mut status_ui);
                 if self.file_view.is_some() {
                     self.pane_rects = split_rect(ui.available_rect_before_wrap());
                     self.file_area(ui);
@@ -1340,7 +1444,9 @@ impl VersusApp {
                         }
                     });
                 }
-                if let Some(error) = &view.error {
+                if let Some(error) = &view.error
+                    && view.comparison.is_none()
+                {
                     ui.horizontal(|ui| {
                         let (rect, _) =
                             ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::hover());
@@ -1437,7 +1543,7 @@ impl VersusApp {
                             row.right_ending
                         };
                         let ending_diff =
-                            !self.ignore_line_endings && row.left_ending != row.right_ending;
+                            !view.ignore_line_endings && row.left_ending != row.right_ending;
                         paint_file_line(
                             &painter,
                             rect,
@@ -1511,6 +1617,11 @@ impl VersusApp {
                     }
                     let mut toggle = None;
                     let mut selected = None;
+                    // show_rows paints before ScrollArea clamps its offset. Clamp
+                    // first so a jump near the end is correct on its first frame.
+                    self.tree_scroll_y = self
+                        .tree_scroll_y
+                        .clamp(0.0, (rows.len() as f32 * ROW_HEIGHT - body_height).max(0.0));
                     let output = egui::ScrollArea::vertical()
                         .id_salt(("linked-trees", self.scroll_generation))
                         .auto_shrink([false, false])
@@ -1978,6 +2089,27 @@ fn append_file_text(
             ..Default::default()
         },
     );
+}
+
+fn file_line_anchor(view: &FileView, index: Option<usize>) -> [Option<usize>; 2] {
+    index
+        .and_then(|index| view.comparison.as_ref()?.rows.get(index))
+        .map(|row| {
+            [
+                row.left.as_ref().map(|line| line.0),
+                row.right.as_ref().map(|line| line.0),
+            ]
+        })
+        .unwrap_or([None; 2])
+}
+
+fn find_file_line(comparison: &FileComparison, anchor: [Option<usize>; 2]) -> Option<usize> {
+    let side = if anchor[0].is_some() { 0 } else { 1 };
+    let number = anchor[side]?;
+    comparison.rows.iter().position(|row| {
+        let line = if side == 0 { &row.left } else { &row.right };
+        line.as_ref().is_some_and(|line| line.0 == number)
+    })
 }
 
 fn update_visible_file_rows(view: &mut FileView, differences_only: bool) {
@@ -3183,6 +3315,7 @@ mod tests {
             difference_rows: vec![1, 2],
             navigation_row: None,
             navigation_scroll_pending: false,
+            ignore_line_endings: true,
         }
     }
 
@@ -3562,6 +3695,7 @@ mod tests {
             cancellation: Arc::new(AtomicBool::new(false)),
             started: Instant::now(),
             progress: Arc::new(ComparisonProgress::default()),
+            ignore_line_endings: true,
         });
         app.file_view = Some(view);
         sender
@@ -4179,6 +4313,7 @@ mod tests {
             cancellation: file_flag.clone(),
             started: Instant::now(),
             progress: Arc::new(ComparisonProgress::default()),
+            ignore_line_endings: true,
         });
         app.file_view = Some(view);
         let (source_sender, source_receiver) = mpsc::channel();
@@ -4376,10 +4511,218 @@ mod tests {
     }
 
     fn click_action(app: &mut VersusApp, ctx: &egui::Context, label: &str) {
+        click_action_frame(app, ctx, label).drop_without_applying_deltas();
+    }
+
+    fn click_action_frame(
+        app: &mut VersusApp,
+        ctx: &egui::Context,
+        label: &str,
+    ) -> egui::FullOutput {
         render(app, ctx, vec![]).drop_without_applying_deltas();
         let response = ctx.read_response(egui::Id::new(label)).unwrap();
         assert!(response.enabled(), "{label} should be enabled");
-        click(app, ctx, response.rect.center());
+        let position = response.rect.center();
+        let events = |pressed| {
+            vec![
+                egui::Event::PointerMoved(position),
+                egui::Event::PointerButton {
+                    pos: position,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: Default::default(),
+                },
+            ]
+        };
+        render(app, ctx, events(true)).drop_without_applying_deltas();
+        render(app, ctx, events(false))
+    }
+
+    #[test]
+    fn ignore_refresh_keeps_file_rows_and_viewport_until_results_are_ready() {
+        let sources = SourceFixture::new();
+        let left: String = (1..=200)
+            .map(|number| format!("line {number}: value\n"))
+            .collect();
+        let right: String = (1..=200)
+            .map(|number| match number {
+                81 => "line 81: changed\n".into(),
+                100 => "line 100:  value\n".into(),
+                _ => format!("line {number}: value\n"),
+            })
+            .collect();
+        std::fs::write(sources.path("left/model.txt"), left).unwrap();
+        std::fs::write(sources.path("right/model.txt"), right).unwrap();
+        for theme in [egui::Theme::Light, egui::Theme::Dark] {
+            let ctx = egui::Context::default();
+            set_theme(&ctx, theme);
+            let mut app = VersusApp::default();
+            app.open_launch_request(crate::cli::LaunchRequest {
+                paths: [
+                    sources.path("left/model.txt"),
+                    sources.path("right/model.txt"),
+                ],
+                mode: None,
+            });
+            settle_sources(&mut app, &ctx);
+            let view = app.file_view.as_mut().unwrap();
+            view.scroll_y = 80.0 * ROW_HEIGHT + 7.0;
+            view.navigation_row = Some(80);
+            let before = render(&mut app, &ctx, vec![]);
+            let positions = text_positions(&before, "line 81: value");
+            assert_eq!(positions.len(), 1);
+            let panes = app.pane_rects;
+            before.drop_without_applying_deltas();
+            let updating = click_action_frame(&mut app, &ctx, "Ignore whitespace");
+            assert_eq!(positions, text_positions(&updating, "line 81: value"));
+            assert_eq!(panes, app.pane_rects);
+            assert!(text_positions(&updating, "Loading file comparison…").is_empty());
+            updating.drop_without_applying_deltas();
+            let view = app.file_view.as_ref().unwrap();
+            assert!(view.job.is_some() && view.comparison.is_some());
+            assert_eq!(view.navigation_row, Some(80));
+            assert_eq!(view.counts[1], 2);
+            settle_sources(&mut app, &ctx);
+            let after = render(&mut app, &ctx, vec![]);
+            assert_eq!(positions, text_positions(&after, "line 81: value"));
+            assert_eq!(panes, app.pane_rects);
+            let view = app.file_view.as_ref().unwrap();
+            assert_eq!(view.counts.iter().sum::<usize>(), 200);
+            assert_eq!(view.counts[1], 1);
+            assert_eq!(view.navigation_row, Some(80));
+            assert_eq!(view.scroll_y, 80.0 * ROW_HEIGHT + 7.0);
+            after.drop_without_applying_deltas();
+        }
+    }
+
+    #[test]
+    fn ignore_refresh_keeps_folder_rows_expansion_selection_and_scroll() {
+        let sources = SourceFixture::new();
+        for side in ["left", "right"] {
+            std::fs::create_dir_all(sources.path(&format!("{side}/z_group"))).unwrap();
+            std::fs::write(sources.path(&format!("{side}/z_group/detail.txt")), side).unwrap();
+            for number in 0..80 {
+                let text = if side == "right" && number == 20 {
+                    "same  value\n"
+                } else {
+                    "same value\n"
+                };
+                std::fs::write(sources.path(&format!("{side}/a_{number:03}.txt")), text).unwrap();
+            }
+        }
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut app = VersusApp::default();
+        app.open_launch_request(crate::cli::LaunchRequest {
+            paths: [sources.path("left"), sources.path("right")],
+            mode: None,
+        });
+        settle_sources(&mut app, &ctx);
+        app.tree.as_mut().unwrap().expand_all();
+        app.selected = Some("z_group/detail.txt".into());
+        app.tree_scroll_y = 20.0 * ROW_HEIGHT + 7.0;
+        let before = render(&mut app, &ctx, vec![]);
+        let positions = text_positions(&before, "a_020.txt");
+        assert_eq!(positions.len(), 2);
+        let panes = app.pane_rects;
+        let generation = app.scroll_generation;
+        before.drop_without_applying_deltas();
+        let updating = click_action_frame(&mut app, &ctx, "Ignore whitespace");
+        assert_eq!(positions, text_positions(&updating, "a_020.txt"));
+        assert_eq!(panes, app.pane_rects);
+        assert!(app.tree.is_some() && app.job.is_some());
+        updating.drop_without_applying_deltas();
+        settle_sources(&mut app, &ctx);
+        let after = render(&mut app, &ctx, vec![]);
+        assert_eq!(positions, text_positions(&after, "a_020.txt"));
+        assert_eq!(panes, app.pane_rects);
+        assert_eq!(app.scroll_generation, generation);
+        assert_eq!(
+            app.selected.as_deref(),
+            Some(std::path::Path::new("z_group/detail.txt"))
+        );
+        assert!(app.tree.as_ref().unwrap().is_expanded("z_group"));
+        assert_eq!(app.tree_scroll_y, 20.0 * ROW_HEIGHT + 7.0);
+        assert_eq!(app.counts[1], 3); // model.txt, z_group and its detail.txt
+        after.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn file_refresh_preserves_source_line_anchors_when_alignment_changes() {
+        let ctx = egui::Context::default();
+        let mut app = loaded_app();
+        let mut view = loaded_file_view();
+        view.scroll_y = ROW_HEIGHT + 5.0;
+        view.navigation_row = Some(1);
+        let mut replacement = view.comparison.as_ref().unwrap().clone();
+        replacement.rows.insert(
+            1,
+            test_file_row(
+                None,
+                Some((99, "inserted".into())),
+                DirectoryEntryState::RightOnly,
+            ),
+        );
+        let (sender, receiver) = mpsc::channel();
+        view.job = Some(FileJob {
+            receiver,
+            cancellation: Arc::new(AtomicBool::new(false)),
+            started: Instant::now(),
+            progress: Arc::new(ComparisonProgress::default()),
+            ignore_line_endings: false,
+        });
+        app.file_view = Some(view);
+        sender.send(Ok(Some(replacement))).unwrap();
+        app.poll_file_comparison(&ctx);
+        let view = app.file_view.as_ref().unwrap();
+        assert_eq!(view.scroll_y, 2.0 * ROW_HEIGHT + 5.0);
+        assert_eq!(view.navigation_row, Some(2));
+        assert_eq!(view.counts, [1, 1, 1, 1, 0, 0]);
+        assert!(!view.ignore_line_endings);
+    }
+
+    #[test]
+    fn failed_or_cancelled_file_refresh_keeps_the_last_result_visible() {
+        for cancelled in [false, true] {
+            let ctx = egui::Context::default();
+            apply_theme(&ctx);
+            let mut app = loaded_app();
+            let mut view = loaded_file_view();
+            let before = view.comparison.clone();
+            let (sender, receiver) = mpsc::channel();
+            view.job = Some(FileJob {
+                receiver,
+                cancellation: Arc::new(AtomicBool::new(cancelled)),
+                started: Instant::now(),
+                progress: Arc::new(ComparisonProgress::default()),
+                ignore_line_endings: false,
+            });
+            app.file_view = Some(view);
+            if cancelled {
+                sender
+                    .send(Ok(Some(FileComparison {
+                        rows: vec![],
+                        message: None,
+                    })))
+                    .unwrap();
+            } else {
+                sender
+                    .send(Err(CompareError {
+                        path: None,
+                        kind: versus::CompareErrorKind::InvalidPath,
+                        message: "file unavailable".into(),
+                    }))
+                    .unwrap();
+            }
+            app.poll_file_comparison(&ctx);
+            let output = render(&mut app, &ctx, vec![]);
+            assert_eq!(text_positions(&output, "old value").len(), 1);
+            let view = app.file_view.as_ref().unwrap();
+            assert_eq!(view.comparison, before);
+            assert!(view.error.is_some() && view.job.is_none());
+            assert!(view.ignore_line_endings);
+            output.drop_without_applying_deltas();
+        }
     }
 
     #[test]
@@ -4412,7 +4755,7 @@ mod tests {
         let mut view = loaded_file_view();
         view.comparison.as_mut().unwrap().rows = (1..=200)
             .map(|number| {
-                let changed = [20, 80, 150].contains(&number);
+                let changed = [20, 80, 150, 200].contains(&number);
                 test_file_row(
                     Some((number, format!("left line {number}"))),
                     Some((number, format!("right line {number}"))),
@@ -4429,13 +4772,25 @@ mod tests {
         for (action, number) in [
             ("Next difference", 20),
             ("Next difference", 80),
+            ("Next difference", 150),
+            ("Next difference", 200),
+            ("Previous difference", 150),
+            ("Previous difference", 80),
             ("Previous difference", 20),
         ] {
-            click_action(&mut app, &ctx, action);
+            let first = click_action_frame(&mut app, &ctx, action);
+            let first_positions = text_positions(&first, &format!("left line {number}"));
+            assert_eq!(first_positions.len(), 1);
+            first.drop_without_applying_deltas();
             let output = render(&mut app, &ctx, vec![]);
             let left = text_positions(&output, &format!("left line {number}"))[0];
             let right = text_positions(&output, &format!("right line {number}"))[0];
             assert!((left.y - right.y).abs() < 0.1);
+            assert_eq!(
+                first_positions,
+                vec![left],
+                "Jump should settle on its first frame"
+            );
             assert_eq!(
                 app.file_view.as_ref().unwrap().navigation_row,
                 Some(number - 1)
@@ -4499,7 +4854,10 @@ mod tests {
         let sender = attach_job(&mut app);
         sender.send(Ok(tree)).unwrap();
         app.poll_comparison(&ctx);
-        click_action(&mut app, &ctx, "Next difference");
+        let first = click_action_frame(&mut app, &ctx, "Next difference");
+        let first_positions = text_positions(&first, "changed.txt");
+        assert_eq!(first_positions.len(), 2);
+        first.drop_without_applying_deltas();
         assert_eq!(
             app.selected.as_deref(),
             Some(std::path::Path::new("z_changed/deep/changed.txt"))
@@ -4509,6 +4867,10 @@ mod tests {
         let output = render(&mut app, &ctx, vec![]);
         let rows = text_positions(&output, "changed.txt");
         assert_eq!(rows.len(), 2);
+        assert_eq!(
+            first_positions, rows,
+            "Jump should settle on its first frame"
+        );
         assert!((rows[0].y - rows[1].y).abs() < 0.1);
         output.drop_without_applying_deltas();
         click_action(&mut app, &ctx, "Show only differences");

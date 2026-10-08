@@ -37,8 +37,11 @@ APIs and must fail cleanly when unavailable.
   insertions/deletions without discarding exact line anchors or original numbers.
   Identical entries are neutral gray; both views share difference status icons.
 - Shared UI options filter identical entries and independently ignore inline
-  whitespace or line endings. Changes to ignore rules restart background workers;
-  folder ignores use bounded UTF-8 normalization and fall back to byte comparison
+  whitespace or line endings. Changes to ignore rules restart background workers
+  while retaining the displayed result until its replacement is ready. Refreshes
+  preserve expansion, selection and source-line scroll anchors; progress uses a
+  fixed status area, and folder jumps clamp before painting to avoid transient shifts.
+  Folder ignores use bounded UTF-8 normalization and fall back to byte comparison
   for binary, invalid UTF-8, or larger files. Native single-path drops select a
   pane and infer file/folder mode through the existing source classifier.
   Native drag pointer coordinates come from a narrow vendored winit patch,
