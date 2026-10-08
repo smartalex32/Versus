@@ -54,12 +54,49 @@ Comparison runs in the background with refresh and cancel icons in the header.
 Files are compared by content, not timestamps. Symlinks are compared by their
 targets and are never recursively followed. Empty folders are included. Changing
 a path clears the prior result so it cannot be mistaken for the new selection.
+While loading, a status indicator shows the current stage and elapsed time.
+Measured stages also show progress and an approximate time remaining for that
+stage. Folder discovery and line alignment have no reliable total, so they show
+activity without a time estimate. File loading can also be cancelled.
+
+The icon buttons beside the legend apply to both comparison views:
+
+- **Show only differences** hides identical lines and tree entries. File line
+  numbers still refer to the original files; changed folder ancestors stay visible.
+- **Ignore whitespace** ignores inline Unicode whitespace, including spaces and
+  tabs, while preserving line boundaries. It starts off.
+- **Ignore line endings** ignores CRLF, LF, CR, and final-terminator differences.
+  It starts on. Turn it off to compare endings exactly; changed endings appear
+  as badges beside their lines.
+- **Previous difference** and **Next difference**, the up/down arrows, scroll
+  both panes to the previous or next changed line or tree entry. Folder navigation
+  expands the target's parents, including when they were collapsed. Navigation
+  stops at the first or last difference.
+
+Selected option icons have a blue outline. Changing an ignore option recomputes
+the comparison in the background; filtering does not reread the sources. Options
+remain selected when starting a new comparison or changing modes. Folder ignore
+options apply to valid UTF-8 text up to 32 MiB; binary, invalid UTF-8, and larger
+files retain byte-for-byte comparison.
+
+Drag one file or folder from your file explorer onto either pane to replace that
+side. The highlighted drop target identifies LEFT or RIGHT. The source type
+selects the corresponding view automatically; mixed file/folder pairs show why
+they cannot compare. A drop in a file opened from the folder tree keeps the other
+displayed file and starts a direct comparison. Multiple-item drops are rejected
+without replacing the current selection.
+On Linux, Versus uses X11 or XWayland when `DISPLAY` is available so native
+file drops work. Pure Wayland sessions retain browse selection; the windowing
+backend does not support file drops there.
 
 When comparing folders, double-click a regular file on either side to open a
 read-only, line-by-line file comparison. The same legend colors and icons identify changed, left-only, and
 right-only lines; line numbers and empty placeholders keep both sides aligned.
 File headers use the same LEFT/RIGHT styling as folder headers. Long file paths
 show a leading ellipsis so the filename remains visible; hover for the full path.
+Changed text within a line has a stronger highlight in that line's status color;
+unchanged text remains unhighlighted. Very long lines or exhausted highlight
+processing time use a whole-line highlight to keep loading responsive.
 Vertical scrolling stays linked, and each pane can scroll horizontally for long
 lines. The **back arrow**, at the left of the legend, returns to the folder view
 with its selection, expansion, and scroll position preserved. Enter or Space on a
@@ -70,7 +107,7 @@ non-UTF-8 files, files above the 32 MiB text limit, and comparisons exceeding th
 two-second diff processing limit show an explanation. Type mismatches do not open
 folders or symlink targets. Read errors are shown in the file view; Back remains
 available for files opened from a folder comparison. Line endings are normalized
-for text comparison. Merge, editing, saving, and other workflows remain
+when **Ignore line endings** is selected. Merge, editing, saving, and other workflows remain
 deferred. Compared files and folders are never modified.
 
 The sun/moon icon at the upper right switches between light and dark themes in
@@ -240,6 +277,8 @@ Review and commit the resulting `vendor/`, `.cargo/config.toml`, lockfile, and
 inventory output used for a release. Do not run the vendor refresh in an air-gapped
 environment. A separate Rust toolchain bundle is required where Rust is not already
 installed; it is intentionally outside this repository.
+The vendor tree includes a [native drop-position patch](docs/vendor-winit-drop-position.md).
+Reapply it and update its checksums after refreshing dependencies.
 
 On Linux, install the host development libraries required by the native windowing
 backend, then use the same Cargo command. The release workflow lists the Ubuntu

@@ -370,6 +370,8 @@ declare_class!(
         fn dragging_entered(&self, sender: &NSObject) -> bool {
             trace_scope!("draggingEntered:");
 
+            self.queue_drag_cursor_position(sender);
+
             use std::path::PathBuf;
 
             let pb: Retained<NSPasteboard> = unsafe { msg_send_id![sender, draggingPasteboard] };
@@ -387,6 +389,14 @@ declare_class!(
             true
         }
 
+        /// Invoked as the drag cursor moves over the destination.
+        #[method(draggingUpdated:)]
+        fn dragging_updated(&self, sender: &NSObject) -> bool {
+            trace_scope!("draggingUpdated:");
+            self.queue_drag_cursor_position(sender);
+            true
+        }
+
         /// Invoked when the image is released
         #[method(prepareForDragOperation:)]
         fn prepare_for_drag_operation(&self, _sender: &NSObject) -> bool {
@@ -398,6 +408,8 @@ declare_class!(
         #[method(performDragOperation:)]
         fn perform_drag_operation(&self, sender: &NSObject) -> bool {
             trace_scope!("performDragOperation:");
+
+            self.queue_drag_cursor_position(sender);
 
             use std::path::PathBuf;
 
@@ -673,6 +685,16 @@ fn new_window(
 }
 
 impl WindowDelegate {
+    /// Forward the current native drag location as a regular cursor event. AppKit reports the
+    /// position in window coordinates; converting through the flipped content view gives the
+    /// upper-left-origin logical coordinates used by winit.
+    fn queue_drag_cursor_position(&self, sender: &NSObject) {
+        let window_point: NSPoint = unsafe { msg_send![sender, draggingLocation] };
+        let view_point = self.view().convertPoint_fromView(window_point, None);
+        let position = LogicalPosition::new(view_point.x, view_point.y).to_physical(self.scale_factor());
+        self.queue_event(WindowEvent::CursorMoved { device_id: super::DEVICE_ID, position });
+    }
+
     pub(super) fn new(
         app_delegate: &ApplicationDelegate,
         attrs: WindowAttributes,

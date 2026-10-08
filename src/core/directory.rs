@@ -1,5 +1,6 @@
 use super::{
-    CompareError, CompareErrorKind, DEFAULT_BUFFER_SIZE, buffered_files_equal_cancellable,
+    CompareError, CompareErrorKind, ComparisonProgress, DEFAULT_BUFFER_SIZE, ProgressStage,
+    files_equal_with_ignores_cancellable,
 };
 use std::{
     collections::BTreeMap,
@@ -15,12 +16,22 @@ use std::{
 pub struct DirectoryCompareOptions {
     pub buffer_size: usize,
     pub cancellation: Option<Arc<AtomicBool>>,
+    /// Ignore inline Unicode whitespace in valid UTF-8 files at most 32 MiB.
+    /// Binary, invalid UTF-8, and larger files are compared byte-for-byte.
+    pub ignore_whitespace: bool,
+    /// Normalize CR, LF, and CRLF (including a final line ending) in valid UTF-8
+    /// files at most 32 MiB. Other files remain byte-compared.
+    pub ignore_line_endings: bool,
+    pub progress: Option<Arc<ComparisonProgress>>,
 }
 impl Default for DirectoryCompareOptions {
     fn default() -> Self {
         Self {
             buffer_size: DEFAULT_BUFFER_SIZE,
             cancellation: None,
+            ignore_whitespace: false,
+            ignore_line_endings: false,
+            progress: None,
         }
     }
 }
@@ -69,6 +80,7 @@ pub fn compare_directories(
     let right = right.as_ref();
     validate_directory(left)?;
     validate_directory(right)?;
+    begin_progress(options, ProgressStage::Scanning, None);
     let mut left_entries = collect(left, options)?;
     if cancelled(options) {
         return Ok(DirectoryDiff {
@@ -93,6 +105,11 @@ pub fn compare_directories(
     for relative_path in paths {
         unique.insert(relative_path);
     }
+    begin_progress(
+        options,
+        ProgressStage::ComparingFiles,
+        Some(unique.len() as u64),
+    );
     for relative_path in unique {
         if cancelled(options) {
             return Ok(DirectoryDiff {
@@ -132,10 +149,12 @@ pub fn compare_directories(
                 })),
                 Some(Ok(_)),
             ) => {
-                let state = match buffered_files_equal_cancellable(
+                let state = match files_equal_with_ignores_cancellable(
                     left.join(&relative_path),
                     right.join(&relative_path),
                     options.buffer_size,
+                    options.ignore_whitespace,
+                    options.ignore_line_endings,
                     options.cancellation.as_deref(),
                 ) {
                     Ok(Some(true)) => DirectoryEntryState::Same,
@@ -186,7 +205,10 @@ pub fn compare_directories(
             kind,
             state,
         });
+        advance_progress(options, 1);
     }
+    begin_progress(options, ProgressStage::Finished, Some(entries.len() as u64));
+    advance_progress(options, entries.len() as u64);
     Ok(DirectoryDiff {
         entries,
         cancelled: false,
@@ -269,6 +291,7 @@ fn collect(
                     }
                 }
             }
+            advance_progress(options, 1);
         }
     }
     calculate_directory_sizes(&mut entries, options);
@@ -345,4 +368,16 @@ fn cancelled(options: &DirectoryCompareOptions) -> bool {
         .cancellation
         .as_ref()
         .is_some_and(|value| value.load(Ordering::Relaxed))
+}
+
+fn begin_progress(options: &DirectoryCompareOptions, stage: ProgressStage, total: Option<u64>) {
+    if let Some(progress) = &options.progress {
+        progress.begin(stage, total);
+    }
+}
+
+fn advance_progress(options: &DirectoryCompareOptions, amount: u64) {
+    if let Some(progress) = &options.progress {
+        progress.advance(amount);
+    }
 }

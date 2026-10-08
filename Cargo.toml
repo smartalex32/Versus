@@ -11,6 +11,10 @@ eframe = { version = "=0.36.2", default-features = false, features = ["default_f
 rfd = "=0.17.2"
 similar = "=3.2.0"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# Reuse eframe's windowing crate to choose its file-drop-capable X11 backend.
+winit = { version = "=0.30.13", default-features = false, features = ["x11"] }
+
 [profile.release]
 codegen-units = 1
 lto = "thin"

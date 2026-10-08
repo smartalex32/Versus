@@ -481,14 +481,33 @@ impl EventProcessor {
 
             let source_window = xev.data.get_long(0) as xproto::Window;
 
-            // Equivalent to `(x << shift) | y`
-            // where `shift = mem::size_of::<c_short>() * 8`
-            // Note that coordinates are in "desktop space", not "window space"
-            // (in X11 parlance, they're root window coordinates)
-            // let packed_coordinates = xev.data.get_long(2);
-            // let shift = mem::size_of::<libc::c_short>() * 8;
-            // let x = packed_coordinates >> shift;
-            // let y = packed_coordinates & !(x << shift);
+            // XDND packs signed 16-bit root-window coordinates in the third data slot. Convert
+            // them back to client coordinates before forwarding the hover event so consumers can
+            // identify the target under the native drag cursor.
+            let packed_coordinates = xev.data.get_long(2) as u32;
+            let root_x = (packed_coordinates >> 16) as u16 as i16;
+            let root_y = packed_coordinates as u16 as i16;
+            if let Ok(cookie) = wt
+                .xconn
+                .xcb_connection()
+                .translate_coordinates(wt.root, window, root_x, root_y)
+            {
+                if let Ok(position) = cookie.reply() {
+                    callback(
+                        &self.target,
+                        Event::WindowEvent {
+                            window_id,
+                            event: WindowEvent::CursorMoved {
+                                device_id: mkdid(util::VIRTUAL_CORE_POINTER),
+                                position: PhysicalPosition::new(
+                                    position.dst_x as f64,
+                                    position.dst_y as f64,
+                                ),
+                            },
+                        },
+                    );
+                }
+            }
 
             // By our own state flow, `version` should never be `None` at this point.
             let version = self.dnd.version.unwrap_or(5);

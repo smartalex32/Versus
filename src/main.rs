@@ -41,6 +41,7 @@ fn run(launch: Option<cli::LaunchRequest>) -> eframe::Result {
             .with_icon(logo::themed_icon(true))
             .with_inner_size([1200.0, 800.0])
             .with_min_inner_size([900.0, 650.0]),
+        event_loop_builder: drop_capable_event_loop(),
         ..Default::default()
     };
     eframe::run_native(
@@ -50,6 +51,19 @@ fn run(launch: Option<cli::LaunchRequest>) -> eframe::Result {
         // temporary inputs as soon as its diff-tool child exits.
         Box::new(move |cc| Ok(Box::new(app::VersusApp::new(cc, launch)))),
     )
+}
+
+fn drop_capable_event_loop() -> Option<eframe::EventLoopBuilderHook> {
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("DISPLAY").is_some_and(|display| !display.is_empty()) {
+        // Winit's native Wayland backend does not emit file-drop events. Prefer
+        // X11/XWayland when available, retaining Wayland on systems without X11.
+        return Some(Box::new(|builder| {
+            use winit::platform::x11::EventLoopBuilderExtX11 as _;
+            builder.with_x11();
+        }));
+    }
+    None
 }
 
 fn attach_parent_console() {

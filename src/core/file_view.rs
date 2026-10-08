@@ -6,8 +6,12 @@ use similar::{ChangeTag, TextDiff as SimilarTextDiff};
 use std::{
     fs,
     io::{BufReader, Read},
+    ops::Range,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -26,6 +30,53 @@ pub struct FileComparisonRow {
     /// One-based line number and rendered line content for the right file.
     pub right: Option<(usize, String)>,
     pub state: DirectoryEntryState,
+    /// Byte ranges in the rendered left text that differ from its aligned peer.
+    pub left_changed: Vec<Range<usize>>,
+    /// Byte ranges in the rendered right text that differ from its aligned peer.
+    pub right_changed: Vec<Range<usize>>,
+    /// The original line terminator, if any, for the left rendered line.
+    pub left_ending: Option<DisplayLineEnding>,
+    /// The original line terminator, if any, for the right rendered line.
+    pub right_ending: Option<DisplayLineEnding>,
+}
+
+/// A source line ending retained separately from the rendered line text.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DisplayLineEnding {
+    None,
+    Lf,
+    CrLf,
+    Cr,
+}
+
+impl DisplayLineEnding {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::None => "No ending",
+            Self::Lf => "LF",
+            Self::CrLf => "CRLF",
+            Self::Cr => "CR",
+        }
+    }
+}
+
+/// Display comparison options. The default preserves the historical behavior of
+/// accepting line-ending-only changes while still comparing all other text exactly.
+#[derive(Clone, Debug)]
+pub struct FileViewOptions {
+    pub ignore_whitespace: bool,
+    pub ignore_line_endings: bool,
+    pub progress: Option<Arc<super::ComparisonProgress>>,
+}
+
+impl Default for FileViewOptions {
+    fn default() -> Self {
+        Self {
+            ignore_whitespace: false,
+            ignore_line_endings: true,
+            progress: None,
+        }
+    }
 }
 
 const DIFF_TIMEOUT: Duration = Duration::from_secs(2);
@@ -40,55 +91,73 @@ pub fn load_file_comparison(
     paths: &[Option<PathBuf>; 2],
     cancellation: &AtomicBool,
 ) -> Result<Option<FileComparison>, CompareError> {
-    load_file_comparison_with_timeout(paths, cancellation, DIFF_TIMEOUT)
+    load_file_comparison_with_options(paths, cancellation, &FileViewOptions::default())
+}
+
+/// Reads and aligns files using the selected comparison rules.
+pub fn load_file_comparison_with_options(
+    paths: &[Option<PathBuf>; 2],
+    cancellation: &AtomicBool,
+    options: &FileViewOptions,
+) -> Result<Option<FileComparison>, CompareError> {
+    load_file_comparison_with_timeout(paths, cancellation, options, DIFF_TIMEOUT)
 }
 
 fn load_file_comparison_with_timeout(
     paths: &[Option<PathBuf>; 2],
     cancellation: &AtomicBool,
+    options: &FileViewOptions,
     timeout: Duration,
 ) -> Result<Option<FileComparison>, CompareError> {
     if cancelled(cancellation) {
         return Ok(None);
     }
 
-    let left = read_optional_text(paths[0].as_deref(), cancellation)?;
+    begin_reading_progress(paths, options);
+    let left = read_optional_text(paths[0].as_deref(), cancellation, options.progress.as_ref())?;
     if cancelled(cancellation) {
         return Ok(None);
     }
-    let right = read_optional_text(paths[1].as_deref(), cancellation)?;
+    let right = read_optional_text(paths[1].as_deref(), cancellation, options.progress.as_ref())?;
     if cancelled(cancellation) {
         return Ok(None);
     }
 
     let (left, right) = match (left, right) {
         (OptionalText::Missing, OptionalText::Missing) => {
+            finish_progress(options);
             return Ok(Some(FileComparison {
                 rows: Vec::new(),
                 message: Some("No file selected.".into()),
             }));
         }
         (OptionalText::Unavailable(message), _) | (_, OptionalText::Unavailable(message)) => {
+            finish_progress(options);
             return Ok(Some(FileComparison {
                 rows: Vec::new(),
                 message: Some(message),
             }));
         }
         (OptionalText::Missing, OptionalText::Text(right)) => {
-            return rows_for_one_side(right, false, cancellation);
+            return rows_for_one_side(right, false, cancellation, options);
         }
         (OptionalText::Text(left), OptionalText::Missing) => {
-            return rows_for_one_side(left, true, cancellation);
+            return rows_for_one_side(left, true, cancellation, options);
         }
         (OptionalText::Text(left), OptionalText::Text(right)) => (left, right),
     };
 
-    let left_lines = display_lines_for_view(&left);
-    let right_lines = display_lines_for_view(&right);
+    let left_lines = lines_for_view(&left);
+    let right_lines = lines_for_view(&right);
     drop(left);
     drop(right);
-    let left_refs: Vec<_> = left_lines.iter().map(String::as_str).collect();
-    let right_refs: Vec<_> = right_lines.iter().map(String::as_str).collect();
+    let left_compare = comparable_lines(&left_lines, options);
+    let right_compare = comparable_lines(&right_lines, options);
+    let left_refs: Vec<_> = left_compare.iter().map(String::as_str).collect();
+    let right_refs: Vec<_> = right_compare.iter().map(String::as_str).collect();
+    if let Some(progress) = &options.progress {
+        progress.begin(super::ProgressStage::ComparingLines, None);
+    }
     // A cancellation request cannot interrupt Similar while it computes a diff, so
     // give its worst-case work a finite bound before observing cancellation again.
     let diff_started = Instant::now();
@@ -96,11 +165,13 @@ fn load_file_comparison_with_timeout(
         .timeout(timeout)
         .diff_slices(&left_refs, &right_refs);
     if diff_started.elapsed() >= timeout {
+        finish_progress(options);
         return Ok(Some(FileComparison {
             rows: Vec::new(),
             message: Some(DIFF_TIMEOUT_MESSAGE.into()),
         }));
     }
+    let highlight_deadline = diff_started + timeout;
     if cancelled(cancellation) {
         return Ok(None);
     }
@@ -109,6 +180,15 @@ fn load_file_comparison_with_timeout(
     let mut right_index = 0;
     let mut pending_left = Vec::new();
     let mut pending_right = Vec::new();
+    if let Some(progress) = &options.progress {
+        let changed = diff
+            .ops()
+            .iter()
+            .filter(|op| op.tag() != similar::DiffTag::Equal)
+            .map(|op| op.old_range().len().max(op.new_range().len()) as u64)
+            .sum();
+        progress.begin(super::ProgressStage::Highlighting, Some(changed));
+    }
     for change in diff.iter_all_changes() {
         if cancelled(cancellation) {
             return Ok(None);
@@ -120,13 +200,19 @@ fn load_file_comparison_with_timeout(
                     pending_left.drain(..),
                     pending_right.drain(..),
                     cancellation,
+                    options,
+                    highlight_deadline,
                 ) {
                     return Ok(None);
                 }
                 rows.push(FileComparisonRow {
-                    left: Some((left_index + 1, left_lines[left_index].clone())),
-                    right: Some((right_index + 1, right_lines[right_index].clone())),
+                    left: Some((left_index + 1, left_lines[left_index].content.clone())),
+                    right: Some((right_index + 1, right_lines[right_index].content.clone())),
                     state: DirectoryEntryState::Same,
+                    left_changed: Vec::new(),
+                    right_changed: Vec::new(),
+                    left_ending: Some(left_lines[left_index].ending),
+                    right_ending: Some(right_lines[right_index].ending),
                 });
                 left_index += 1;
                 right_index += 1;
@@ -146,9 +232,12 @@ fn load_file_comparison_with_timeout(
         pending_left.drain(..),
         pending_right.drain(..),
         cancellation,
+        options,
+        highlight_deadline,
     ) {
         return Ok(None);
     }
+    finish_progress(options);
     Ok(Some(FileComparison {
         rows,
         message: None,
@@ -164,6 +253,7 @@ enum OptionalText {
 fn read_optional_text(
     path: Option<&Path>,
     cancellation: &AtomicBool,
+    progress: Option<&Arc<super::ComparisonProgress>>,
 ) -> Result<OptionalText, CompareError> {
     let Some(path) = path else {
         return Ok(OptionalText::Missing);
@@ -183,7 +273,7 @@ fn read_optional_text(
             DEFAULT_TEXT_SIZE_LIMIT / (1024 * 1024)
         )));
     }
-    let bytes = match read_bytes_cancellable(path, metadata.len(), cancellation)? {
+    let bytes = match read_bytes_cancellable(path, metadata.len(), cancellation, progress)? {
         ReadBytes::Cancelled => return Ok(OptionalText::Missing),
         ReadBytes::TooLarge => {
             return Ok(OptionalText::Unavailable(format!(
@@ -213,6 +303,7 @@ fn read_bytes_cancellable(
     path: &Path,
     expected_length: u64,
     cancellation: &AtomicBool,
+    progress: Option<&Arc<super::ComparisonProgress>>,
 ) -> Result<ReadBytes, CompareError> {
     let capacity = usize::try_from(expected_length.min(DEFAULT_TEXT_SIZE_LIMIT)).unwrap_or(0);
     let mut bytes = Vec::with_capacity(capacity);
@@ -235,6 +326,9 @@ fn read_bytes_cancellable(
             return Ok(ReadBytes::TooLarge);
         }
         bytes.extend_from_slice(&buffer[..count]);
+        if let Some(progress) = progress {
+            progress.advance(count as u64);
+        }
     }
 }
 
@@ -242,13 +336,20 @@ fn rows_for_one_side(
     text: String,
     left_side: bool,
     cancellation: &AtomicBool,
+    options: &FileViewOptions,
 ) -> Result<Option<FileComparison>, CompareError> {
     let mut rows = Vec::new();
-    for (index, line) in display_lines_for_view(&text).into_iter().enumerate() {
+    let lines = lines_for_view(&text);
+    if let Some(progress) = &options.progress {
+        progress.begin(super::ProgressStage::Highlighting, Some(lines.len() as u64));
+    }
+    for (index, line) in lines.into_iter().enumerate() {
         if cancelled(cancellation) {
             return Ok(None);
         }
-        let line = Some((index + 1, line));
+        let ending = Some(line.ending);
+        let content = line.content;
+        let line = Some((index + 1, content.clone()));
         rows.push(FileComparisonRow {
             left: left_side.then(|| line.clone()).flatten(),
             right: (!left_side).then_some(line).flatten(),
@@ -257,7 +358,22 @@ fn rows_for_one_side(
             } else {
                 DirectoryEntryState::RightOnly
             },
+            left_changed: left_side
+                .then(|| whole_range(&content))
+                .flatten()
+                .into_iter()
+                .collect(),
+            right_changed: (!left_side)
+                .then(|| whole_range(&content))
+                .flatten()
+                .into_iter()
+                .collect(),
+            left_ending: left_side.then_some(ending).flatten(),
+            right_ending: (!left_side).then_some(ending).flatten(),
         });
+        if let Some(progress) = &options.progress {
+            progress.advance(1);
+        }
     }
     let message = rows.is_empty().then(|| {
         format!(
@@ -265,14 +381,17 @@ fn rows_for_one_side(
             if left_side { "left" } else { "right" }
         )
     });
+    finish_progress(options);
     Ok(Some(FileComparison { rows, message }))
 }
 
 fn append_changed_rows(
     rows: &mut Vec<FileComparisonRow>,
-    left: impl Iterator<Item = (usize, String)>,
-    right: impl Iterator<Item = (usize, String)>,
+    left: impl Iterator<Item = (usize, DisplayLine)>,
+    right: impl Iterator<Item = (usize, DisplayLine)>,
     cancellation: &AtomicBool,
+    options: &FileViewOptions,
+    highlight_deadline: Instant,
 ) -> bool {
     let mut left = left;
     let mut right = right;
@@ -281,29 +400,257 @@ fn append_changed_rows(
             return false;
         }
         match (left.next(), right.next()) {
-            (Some(left), Some(right)) => rows.push(FileComparisonRow {
-                left: Some(left),
-                right: Some(right),
-                state: DirectoryEntryState::Different,
-            }),
-            (Some(left), None) => rows.push(FileComparisonRow {
-                left: Some(left),
+            (Some((left_number, left)), Some((right_number, right))) => {
+                let Some((left_changed, right_changed)) = changed_ranges_with_options(
+                    &left.content,
+                    &right.content,
+                    options,
+                    cancellation,
+                    highlight_deadline,
+                ) else {
+                    return false;
+                };
+                rows.push(FileComparisonRow {
+                    left: Some((left_number, left.content)),
+                    right: Some((right_number, right.content)),
+                    state: DirectoryEntryState::Different,
+                    left_changed,
+                    right_changed,
+                    left_ending: Some(left.ending),
+                    right_ending: Some(right.ending),
+                });
+            }
+            (Some((left_number, left)), None) => rows.push(FileComparisonRow {
+                left: Some((left_number, left.content.clone())),
                 right: None,
                 state: DirectoryEntryState::LeftOnly,
+                left_changed: whole_range(&left.content).into_iter().collect(),
+                right_changed: Vec::new(),
+                left_ending: Some(left.ending),
+                right_ending: None,
             }),
-            (None, Some(right)) => rows.push(FileComparisonRow {
+            (None, Some((right_number, right))) => rows.push(FileComparisonRow {
                 left: None,
-                right: Some(right),
+                right: Some((right_number, right.content.clone())),
                 state: DirectoryEntryState::RightOnly,
+                left_changed: Vec::new(),
+                right_changed: whole_range(&right.content).into_iter().collect(),
+                left_ending: None,
+                right_ending: Some(right.ending),
             }),
             (None, None) => break,
+        }
+        if let Some(progress) = &options.progress {
+            progress.advance(1);
         }
     }
     true
 }
 
-fn display_lines_for_view(text: &str) -> Vec<String> {
-    super::display_lines(&text.replace("\r\n", "\n").replace('\r', "\n"))
+#[derive(Clone, Debug)]
+struct DisplayLine {
+    content: String,
+    ending: DisplayLineEnding,
+}
+
+fn lines_for_view(text: &str) -> Vec<DisplayLine> {
+    let mut lines = Vec::new();
+    let mut start = 0;
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        let (ending, width) = match bytes[index] {
+            b'\n' => (DisplayLineEnding::Lf, 1),
+            b'\r' if bytes.get(index + 1) == Some(&b'\n') => (DisplayLineEnding::CrLf, 2),
+            b'\r' => (DisplayLineEnding::Cr, 1),
+            _ => {
+                index += 1;
+                continue;
+            }
+        };
+        lines.push(DisplayLine {
+            content: text[start..index].to_owned(),
+            ending,
+        });
+        index += width;
+        start = index;
+    }
+    if start < text.len() {
+        lines.push(DisplayLine {
+            content: text[start..].to_owned(),
+            ending: DisplayLineEnding::None,
+        });
+    }
+    lines
+}
+
+fn comparable_lines(lines: &[DisplayLine], options: &FileViewOptions) -> Vec<String> {
+    lines
+        .iter()
+        .map(|line| {
+            let mut content = if options.ignore_whitespace {
+                line.content
+                    .chars()
+                    .filter(|character| !character.is_whitespace())
+                    .collect()
+            } else {
+                line.content.clone()
+            };
+            if !options.ignore_line_endings {
+                content.push('\u{0}');
+                content.push(match line.ending {
+                    DisplayLineEnding::None => '0',
+                    DisplayLineEnding::Lf => '1',
+                    DisplayLineEnding::CrLf => '2',
+                    DisplayLineEnding::Cr => '3',
+                });
+            }
+            content
+        })
+        .collect()
+}
+
+fn whole_range(text: &str) -> Option<Range<usize>> {
+    (!text.is_empty()).then_some(0..text.len())
+}
+
+const HIGHLIGHT_LINE_LIMIT: usize = 16 * 1024;
+
+struct HighlightText {
+    normalized: String,
+    byte_ranges: Vec<Range<usize>>,
+}
+
+fn changed_ranges_with_options(
+    left: &str,
+    right: &str,
+    options: &FileViewOptions,
+    cancellation: &AtomicBool,
+    deadline: Instant,
+) -> Option<(Vec<Range<usize>>, Vec<Range<usize>>)> {
+    if cancelled(cancellation) {
+        return None;
+    }
+    // Bound character-index bookkeeping before allocating one range per
+    // character. A single large source line can otherwise dwarf the file limit.
+    if left.len().saturating_add(right.len()) > HIGHLIGHT_LINE_LIMIT {
+        let equal = left == right
+            || (options.ignore_whitespace
+                && left
+                    .chars()
+                    .filter(|character| !character.is_whitespace())
+                    .eq(right.chars().filter(|character| !character.is_whitespace())));
+        if cancelled(cancellation) {
+            return None;
+        }
+        return Some(if equal {
+            (Vec::new(), Vec::new())
+        } else {
+            (
+                whole_range(left).into_iter().collect(),
+                whole_range(right).into_iter().collect(),
+            )
+        });
+    }
+    let left = highlight_text(left, options.ignore_whitespace);
+    let right = highlight_text(right, options.ignore_whitespace);
+    if left.normalized == right.normalized {
+        return Some((Vec::new(), Vec::new()));
+    }
+    if Instant::now() >= deadline {
+        return Some((
+            merge_ranges(left.byte_ranges),
+            merge_ranges(right.byte_ranges),
+        ));
+    }
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let diff = SimilarTextDiff::configure()
+        .timeout(remaining)
+        .diff_chars(left.normalized.as_str(), right.normalized.as_str());
+    if cancelled(cancellation) {
+        return None;
+    }
+    if Instant::now() >= deadline {
+        return Some((
+            merge_ranges(left.byte_ranges),
+            merge_ranges(right.byte_ranges),
+        ));
+    }
+    let mut left_changed = Vec::new();
+    let mut right_changed = Vec::new();
+    let mut left_index = 0;
+    let mut right_index = 0;
+    for change in diff.iter_all_changes() {
+        if cancelled(cancellation) {
+            return None;
+        }
+        match change.tag() {
+            ChangeTag::Delete => {
+                left_changed.push(left.byte_ranges[left_index].clone());
+                left_index += 1;
+            }
+            ChangeTag::Insert => {
+                right_changed.push(right.byte_ranges[right_index].clone());
+                right_index += 1;
+            }
+            ChangeTag::Equal => {
+                left_index += 1;
+                right_index += 1;
+            }
+        }
+    }
+    Some((merge_ranges(left_changed), merge_ranges(right_changed)))
+}
+
+fn highlight_text(text: &str, ignore_whitespace: bool) -> HighlightText {
+    let mut normalized = String::new();
+    let mut byte_ranges = Vec::new();
+    for (start, character) in text.char_indices() {
+        if ignore_whitespace && character.is_whitespace() {
+            continue;
+        }
+        normalized.push(character);
+        byte_ranges.push(start..start + character.len_utf8());
+    }
+    HighlightText {
+        normalized,
+        byte_ranges,
+    }
+}
+
+fn merge_ranges(mut ranges: Vec<Range<usize>>) -> Vec<Range<usize>> {
+    ranges.sort_unstable_by_key(|range| range.start);
+    let mut merged: Vec<Range<usize>> = Vec::new();
+    for range in ranges {
+        if let Some(previous) = merged.last_mut()
+            && range.start <= previous.end
+        {
+            previous.end = previous.end.max(range.end);
+        } else {
+            merged.push(range);
+        }
+    }
+    merged
+}
+
+fn begin_reading_progress(paths: &[Option<PathBuf>; 2], options: &FileViewOptions) {
+    let Some(progress) = &options.progress else {
+        return;
+    };
+    let total = paths
+        .iter()
+        .flatten()
+        .filter_map(|path| fs::symlink_metadata(path).ok())
+        .filter(|metadata| metadata.is_file())
+        .map(|metadata| metadata.len())
+        .sum();
+    progress.begin(super::ProgressStage::Reading, Some(total));
+}
+
+fn finish_progress(options: &FileViewOptions) {
+    if let Some(progress) = &options.progress {
+        progress.begin(super::ProgressStage::Finished, Some(0));
+    }
 }
 
 fn cancelled(cancellation: &AtomicBool) -> bool {
@@ -455,6 +802,7 @@ mod tests {
         let result = load_file_comparison_with_timeout(
             &paths(Some(left), Some(right)),
             &AtomicBool::new(false),
+            &FileViewOptions::default(),
             Duration::ZERO,
         )
         .unwrap()

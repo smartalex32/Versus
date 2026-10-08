@@ -29,9 +29,23 @@ APIs and must fail cleanly when unavailable.
   until its window closes. Git null-device inputs represent absent file sides
   without opening devices. `--help`/`--version` exit before GUI initialization.
 - `src/core/tree.rs` builds aligned folder trees with per-side types, ancestor
-  status aggregation, and shared expansion state.
+  status aggregation, shared expansion state, and full-tree traversal for diff
+  navigation that reveals collapsed ancestors.
 - `src/core/file_view.rs` loads bounded text inputs and aligns numbered line rows.
+  Rows retain original line numbers, terminators, and UTF-8 highlight ranges.
   Identical entries are neutral gray; both views share difference status icons.
+- Shared UI options filter identical entries and independently ignore inline
+  whitespace or line endings. Changes to ignore rules restart background workers;
+  folder ignores use bounded UTF-8 normalization and fall back to byte comparison
+  for binary, invalid UTF-8, or larger files. Native single-path drops select a
+  pane and infer file/folder mode through the existing source classifier.
+  Native drag pointer coordinates come from a narrow vendored winit patch,
+  documented in `docs/vendor-winit-drop-position.md`; preserve it on vendor
+  refresh. Linux chooses X11/XWayland when `DISPLAY` exists for native file drops,
+  retaining native Wayland browsing when no X11 display is available.
+- `src/core/progress.rs` publishes synchronized stage snapshots. Measured stages
+  support approximate stage-local remaining time; scanning and line alignment
+  show activity without an invented total or estimate.
 - `tests/` covers externally observable comparison and filesystem behavior.
 - `.cargo/config.toml` replaces crates.io with the checked-in `vendor/` tree and
   forces Cargo offline.

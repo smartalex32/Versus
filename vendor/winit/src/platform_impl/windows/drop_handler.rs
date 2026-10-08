@@ -5,9 +5,10 @@ use std::ptr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use windows_sys::core::{IUnknown, GUID, HRESULT};
-use windows_sys::Win32::Foundation::{DV_E_FORMATETC, HWND, POINTL, S_OK};
+use windows_sys::Win32::Foundation::{DV_E_FORMATETC, HWND, POINT, POINTL, S_OK};
 use windows_sys::Win32::System::Com::{IDataObject, DVASPECT_CONTENT, FORMATETC, TYMED_HGLOBAL};
 use windows_sys::Win32::System::Ole::{CF_HDROP, DROPEFFECT_COPY, DROPEFFECT_NONE};
+use windows_sys::Win32::Graphics::Gdi::ScreenToClient;
 use windows_sys::Win32::UI::Shell::{DragFinish, DragQueryFileW, HDROP};
 
 use tracing::debug;
@@ -17,7 +18,8 @@ use crate::platform_impl::platform::definitions::{
 };
 use crate::platform_impl::platform::WindowId;
 
-use crate::event::Event;
+use crate::dpi::PhysicalPosition;
+use crate::event::{Event, WindowEvent};
 use crate::window::WindowId as RootWindowId;
 
 #[repr(C)]
@@ -80,11 +82,12 @@ impl FileDropHandler {
         this: *mut IDropTarget,
         pDataObj: *const IDataObject,
         _grfKeyState: u32,
-        _pt: *const POINTL,
+        pt: *const POINTL,
         pdwEffect: *mut u32,
     ) -> HRESULT {
         use crate::event::WindowEvent::HoveredFile;
         let drop_handler = unsafe { Self::from_interface(this) };
+        unsafe { drop_handler.send_cursor_moved(pt) };
         let hdrop = unsafe {
             Self::iterate_filenames(pDataObj, |filename| {
                 drop_handler.send_event(Event::WindowEvent {
@@ -106,10 +109,11 @@ impl FileDropHandler {
     pub unsafe extern "system" fn DragOver(
         this: *mut IDropTarget,
         _grfKeyState: u32,
-        _pt: *const POINTL,
+        pt: *const POINTL,
         pdwEffect: *mut u32,
     ) -> HRESULT {
         let drop_handler = unsafe { Self::from_interface(this) };
+        unsafe { drop_handler.send_cursor_moved(pt) };
         unsafe {
             *pdwEffect = drop_handler.cursor_effect;
         }
@@ -134,11 +138,12 @@ impl FileDropHandler {
         this: *mut IDropTarget,
         pDataObj: *const IDataObject,
         _grfKeyState: u32,
-        _pt: *const POINTL,
+        pt: *const POINTL,
         _pdwEffect: *mut u32,
     ) -> HRESULT {
         use crate::event::WindowEvent::DroppedFile;
         let drop_handler = unsafe { Self::from_interface(this) };
+        unsafe { drop_handler.send_cursor_moved(pt) };
         let hdrop = unsafe {
             Self::iterate_filenames(pDataObj, |filename| {
                 drop_handler.send_event(Event::WindowEvent {
@@ -213,6 +218,29 @@ impl FileDropHandler {
 impl FileDropHandlerData {
     fn send_event(&self, event: Event<()>) {
         (self.send_event)(event);
+    }
+
+    /// OLE supplies drag coordinates in screen pixels, while winit cursor events use client
+    /// pixels. Send the movement before hover/drop events so clients can select a drop target.
+    unsafe fn send_cursor_moved(&self, point: *const POINTL) {
+        if point.is_null() {
+            return;
+        }
+
+        let point = unsafe { *point };
+        let mut position = POINT { x: point.x, y: point.y };
+        if unsafe { ScreenToClient(self.window, &mut position) } == false.into() {
+            debug!("Could not translate file drop position to window coordinates.");
+            return;
+        }
+
+        self.send_event(Event::WindowEvent {
+            window_id: RootWindowId(WindowId(self.window)),
+            event: WindowEvent::CursorMoved {
+                device_id: super::DEVICE_ID,
+                position: PhysicalPosition::new(position.x as f64, position.y as f64),
+            },
+        });
     }
 }
 
