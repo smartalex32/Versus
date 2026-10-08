@@ -81,8 +81,9 @@ remain selected when starting a new comparison or changing modes. Folder ignore
 options apply to valid UTF-8 text up to 32 MiB; binary, invalid UTF-8, and larger
 files retain byte-for-byte comparison.
 
-Drag one file or folder from your file explorer onto either pane to replace that
-side. The highlighted drop target identifies LEFT or RIGHT. The source type
+Drag one file or folder from your file explorer into the large view on the left
+or right, below the path bars, to replace that side. The highlighted drop target
+identifies LEFT or RIGHT. The source type
 selects the corresponding view automatically; mixed file/folder pairs show why
 they cannot compare. A drop in a file opened from the folder tree keeps the other
 displayed file and starts a direct comparison. Multiple-item drops are rejected

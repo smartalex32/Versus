@@ -881,7 +881,9 @@ impl VersusApp {
         let (hovering, position) = ui.input(|input| {
             (
                 !input.raw.hovered_files.is_empty(),
-                input.pointer.latest_pos(),
+                // Native drags can report PointerGone after the drag position
+                // in the same frame. Keep that position for hit testing the drop.
+                input.pointer.interact_pos(),
             )
         });
         let dropped = ui
@@ -937,8 +939,14 @@ impl VersusApp {
                 self.select_path(side, path);
                 self.launch_mode = Some(None);
             } else {
-                self.drop_message =
-                    Some("Drop one file or folder onto the LEFT or RIGHT pane.".into());
+                self.drop_message = Some(if dropped.len() != 1 {
+                    "Drop one file or folder at a time.".into()
+                } else if dropped[0].path().as_os_str().is_empty() {
+                    "This drag did not include a file or folder path. Use Browse to select it."
+                        .into()
+                } else {
+                    "Drop into the large LEFT or RIGHT view below the path bars.".into()
+                });
             }
             ui.ctx().request_repaint();
         }
@@ -5313,6 +5321,99 @@ mod tests {
     }
 
     #[test]
+    fn native_drag_positions_survive_pointer_gone_for_hover_and_drop_on_both_sides() {
+        let sources = SourceFixture::new();
+        for side in 0..2 {
+            for relative in ["left", "left/model.txt"] {
+                let ctx = egui::Context::default();
+                apply_theme(&ctx);
+                let mut app = VersusApp::default();
+                render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+                let position = app.pane_rects[side].center();
+                let input = |dropped: bool| egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0))),
+                    events: vec![
+                        egui::Event::PointerMoved(position),
+                        egui::Event::PointerGone,
+                    ],
+                    hovered_files: if dropped {
+                        vec![]
+                    } else {
+                        vec![egui::HoveredFile {
+                            path: Some(sources.path(relative)),
+                            ..Default::default()
+                        }]
+                    },
+                    dropped_files: if dropped {
+                        vec![Arc::new(TestDrop(sources.path(relative))) as egui::DroppedFileHandle]
+                    } else {
+                        vec![]
+                    },
+                    ..Default::default()
+                };
+                let mut hover = ctx.run_ui(input(false), |ui| app.render(ui));
+                hover.textures_delta.clear();
+                assert_eq!(app.drop_hover_side, Some(side));
+                assert!(ctx.input(|input| input.pointer.latest_pos()).is_none());
+                assert_eq!(
+                    text_positions(
+                        &hover,
+                        if side == 0 {
+                            "Drop a file or folder on LEFT"
+                        } else {
+                            "Drop a file or folder on RIGHT"
+                        }
+                    )
+                    .len(),
+                    1
+                );
+                hover.drop_without_applying_deltas();
+                let mut dropped = ctx.run_ui(input(true), |ui| app.render(ui));
+                dropped.textures_delta.clear();
+                assert_eq!(app.source_paths[side], Some(sources.path(relative)));
+                assert!(app.source_paths[1 - side].is_none());
+                assert!(app.drop_message.is_none());
+                dropped.drop_without_applying_deltas();
+                settle_sources(&mut app, &ctx);
+                assert_eq!(
+                    app.source_kinds[side],
+                    Some(if relative.ends_with(".txt") {
+                        SourceKind::File
+                    } else {
+                        SourceKind::Folder
+                    })
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn drop_position_survives_pointer_gone_without_a_hover_frame() {
+        let sources = SourceFixture::new();
+        let ctx = egui::Context::default();
+        let mut app = VersusApp::default();
+        render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+        let position = app.pane_rects[1].center();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0))),
+                events: vec![
+                    egui::Event::PointerMoved(position),
+                    egui::Event::PointerGone,
+                ],
+                dropped_files: vec![Arc::new(TestDrop(sources.path("right")))],
+                ..Default::default()
+            },
+            |ui| app.render(ui),
+        );
+        output.textures_delta.clear();
+        assert_eq!(app.source_paths[1], Some(sources.path("right")));
+        assert!(app.drop_message.is_none());
+        output.drop_without_applying_deltas();
+        settle_sources(&mut app, &ctx);
+    }
+
+    #[test]
     fn drop_hover_marks_the_target_and_outside_drops_preserve_selection() {
         let sources = SourceFixture::new();
         let ctx = egui::Context::default();
@@ -5338,7 +5439,10 @@ mod tests {
         ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0))),
-                events: vec![egui::Event::PointerMoved(egui::pos2(600.0, 20.0))],
+                events: vec![
+                    egui::Event::PointerMoved(egui::pos2(600.0, 20.0)),
+                    egui::Event::PointerGone,
+                ],
                 dropped_files: vec![Arc::new(TestDrop(sources.path("right/model.txt")))],
                 ..Default::default()
             },
@@ -5346,7 +5450,10 @@ mod tests {
         )
         .drop_without_applying_deltas();
         assert_eq!(app.paths, paths);
-        assert!(app.drop_message.is_some());
+        assert_eq!(
+            app.drop_message.as_deref(),
+            Some("Drop into the large LEFT or RIGHT view below the path bars.")
+        );
         assert!(app.source_jobs.iter().all(Option::is_none));
     }
 

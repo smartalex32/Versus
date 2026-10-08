@@ -48,7 +48,9 @@ APIs and must fail cleanly when unavailable.
   Native drag pointer coordinates come from a narrow vendored winit patch, including
   corrected Windows OLE by-value coordinates and storage-medium cleanup,
   documented in `docs/vendor-winit-drop-position.md`; preserve it on vendor
-  refresh. Linux chooses X11/XWayland when `DISPLAY` exists for native file drops,
+  refresh. Pane targeting retains the drag position when a pointer-leave event
+  follows it in the same frame, including drops without an earlier hover frame.
+  Linux chooses X11/XWayland when `DISPLAY` exists for native file drops,
   retaining native Wayland browsing when no X11 display is available.
 - `src/core/progress.rs` publishes synchronized stage snapshots. Measured stages
   support approximate stage-local remaining time; scanning and line alignment
