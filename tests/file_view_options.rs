@@ -2,9 +2,14 @@ use std::{
     fs,
     ops::Range,
     path::PathBuf,
-    sync::{Arc, atomic::AtomicBool},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
+
+static NEXT_SANDBOX: AtomicU64 = AtomicU64::new(0);
 use versus::{
     ComparisonProgress, DirectoryEntryState, DisplayLineEnding, FileViewOptions, ProgressStage,
     load_file_comparison_with_options,
@@ -12,11 +17,13 @@ use versus::{
 
 fn sandbox(name: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!(
-        "versus-file-view-options-{name}-{}",
+        "versus-file-view-options-{name}-{}-{}-{}",
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
-            .as_nanos()
+            .as_nanos(),
+        NEXT_SANDBOX.fetch_add(1, Ordering::Relaxed),
+        std::process::id()
     ));
     fs::create_dir_all(&path).unwrap();
     path
@@ -212,4 +219,115 @@ fn cancellation_returns_no_comparison_before_reading() {
         None
     );
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn aligns_insertions_before_related_changed_lines_without_losing_line_numbers() {
+    let prefix = (1..=49)
+        .map(|line| format!("shared {line}\n"))
+        .collect::<String>();
+    let left = format!("{prefix}inserted on the left\nlet alpha = 1;\nlet beta = 2;\ntail\n");
+    let right = format!("{prefix}// let alpha = 1;\n// let beta = 2;\ntail\n");
+    let rows = compare(&left, &right, FileViewOptions::default());
+
+    assert_eq!(rows.len(), 53);
+    assert_eq!(rows[49].state, DirectoryEntryState::LeftOnly);
+    assert_eq!(rows[49].left.as_ref().map(|line| line.0), Some(50));
+    assert_eq!(rows[49].right, None);
+    assert_eq!(rows[50].state, DirectoryEntryState::Different);
+    assert_eq!(rows[50].left.as_ref().map(|line| line.0), Some(51));
+    assert_eq!(rows[50].right.as_ref().map(|line| line.0), Some(50));
+    assert_eq!(rows[51].state, DirectoryEntryState::Different);
+    assert_eq!(rows[51].left.as_ref().map(|line| line.0), Some(52));
+    assert_eq!(rows[51].right.as_ref().map(|line| line.0), Some(51));
+    assert_eq!(rows[52].state, DirectoryEntryState::Same);
+    assert_eq!(rows[52].left.as_ref().map(|line| line.0), Some(53));
+    assert_eq!(rows[52].right.as_ref().map(|line| line.0), Some(52));
+
+    // The inserted line is one-sided, and the matched replacements retain
+    // prefix-only highlights instead of treating the whole lines as unrelated.
+    assert_eq!(rows[49].left_changed, vec![0..20]);
+    assert_eq!(rows[50].left_changed, Vec::<Range<usize>>::new());
+    assert_eq!(rows[50].right_changed, vec![0..3]);
+}
+
+#[test]
+fn aligns_shifted_changes_in_both_directions_and_at_end_of_file() {
+    let left = "anchor\n// let café = true;\n// repeat\n";
+    let right = "anchor\ninserted\nlet café = true;\nrepeat\n";
+    let rows = compare(left, right, FileViewOptions::default());
+    assert_eq!(rows.len(), 4);
+    assert_eq!(rows[1].state, DirectoryEntryState::RightOnly);
+    assert_eq!(rows[1].right.as_ref().map(|line| line.0), Some(2));
+    assert_eq!(rows[2].state, DirectoryEntryState::Different);
+    assert_eq!(rows[2].left.as_ref().map(|line| line.0), Some(2));
+    assert_eq!(rows[2].right.as_ref().map(|line| line.0), Some(3));
+    assert_eq!(rows[3].state, DirectoryEntryState::Different);
+    assert_eq!(rows[3].left.as_ref().map(|line| line.0), Some(3));
+    assert_eq!(rows[3].right.as_ref().map(|line| line.0), Some(4));
+
+    let whitespace = compare(
+        "anchor\nadded\nvalue    with spaces\n",
+        "anchor\n// value with spaces\n",
+        FileViewOptions {
+            ignore_whitespace: true,
+            ..Default::default()
+        },
+    );
+    assert_eq!(whitespace.len(), 3);
+    assert_eq!(whitespace[1].state, DirectoryEntryState::LeftOnly);
+    assert_eq!(whitespace[2].state, DirectoryEntryState::Different);
+    assert_eq!(whitespace[2].left.as_ref().map(|line| line.0), Some(3));
+    assert_eq!(whitespace[2].right.as_ref().map(|line| line.0), Some(2));
+}
+
+#[test]
+fn aligns_wrapped_comments_using_shared_interior_text() {
+    let left = "anchor\ninserted\nlet alpha = 1;\nlet beta = 2;\ntail\n";
+    let right = "anchor\n/* let alpha = 1; */\n/* let beta = 2; */\ntail\n";
+    let rows = compare(left, right, FileViewOptions::default());
+    assert_eq!(rows.len(), 5);
+    assert_eq!(rows[1].state, DirectoryEntryState::LeftOnly);
+    assert_eq!(rows[1].left.as_ref().map(|line| line.0), Some(2));
+    assert_eq!(rows[2].state, DirectoryEntryState::Different);
+    assert_eq!(rows[2].left.as_ref().map(|line| line.0), Some(3));
+    assert_eq!(rows[2].right.as_ref().map(|line| line.0), Some(2));
+    assert_eq!(rows[3].state, DirectoryEntryState::Different);
+    assert_eq!(rows[3].left.as_ref().map(|line| line.0), Some(4));
+    assert_eq!(rows[3].right.as_ref().map(|line| line.0), Some(3));
+    assert_eq!(rows[2].left_changed, Vec::<Range<usize>>::new());
+    assert_eq!(rows[2].right_changed, vec![0..3, 17..20]);
+
+    let inverse = compare(right, left, FileViewOptions::default());
+    assert_eq!(inverse.len(), 5);
+    assert_eq!(inverse[1].state, DirectoryEntryState::RightOnly);
+    assert_eq!(inverse[1].right.as_ref().map(|line| line.0), Some(2));
+    assert_eq!(inverse[2].state, DirectoryEntryState::Different);
+    assert_eq!(inverse[2].left.as_ref().map(|line| line.0), Some(2));
+    assert_eq!(inverse[2].right.as_ref().map(|line| line.0), Some(3));
+    assert_eq!(inverse[3].state, DirectoryEntryState::Different);
+    assert_eq!(inverse[3].left.as_ref().map(|line| line.0), Some(3));
+    assert_eq!(inverse[3].right.as_ref().map(|line| line.0), Some(4));
+    assert_eq!(inverse[2].left_changed, vec![0..3, 17..20]);
+    assert_eq!(inverse[2].right_changed, Vec::<Range<usize>>::new());
+}
+
+#[test]
+fn aligns_the_exact_original_before_a_near_duplicate_insertion() {
+    let left = "anchor\nαction(2);\nαction(1);\ntail\n";
+    for right_line in ["// αction(1);", "/* αction(1); */"] {
+        let right = format!("anchor\n{right_line}\ntail\n");
+        let rows = compare(left, &right, FileViewOptions::default());
+        assert_eq!(rows.len(), 4, "{right_line}");
+        assert_eq!(rows[1].state, DirectoryEntryState::LeftOnly, "{right_line}");
+        assert_eq!(rows[1].left.as_ref().map(|line| line.0), Some(2));
+        assert_eq!(
+            rows[2].state,
+            DirectoryEntryState::Different,
+            "{right_line}"
+        );
+        assert_eq!(rows[2].left.as_ref().map(|line| line.0), Some(3));
+        assert_eq!(rows[2].right.as_ref().map(|line| line.0), Some(2));
+        assert_eq!(rows[3].state, DirectoryEntryState::Same, "{right_line}");
+    }
 }

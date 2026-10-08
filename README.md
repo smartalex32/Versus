@@ -98,6 +98,12 @@ show a leading ellipsis so the filename remains visible; hover for the full path
 Changed text within a line has a stronger highlight in that line's status color;
 unchanged text remains unhighlighted. Very long lines or exhausted highlight
 processing time use a whole-line highlight to keep loading responsive.
+Within a changed block, similar lines are aligned even when an added or removed
+line shifts their original numbers. For example, an inserted left line appears
+opposite an empty placeholder, and following code aligns with its commented-out
+version on the right while the comment text remains highlighted as a change.
+Similarity alignment uses bounded extra work; very large changed blocks or an
+exhausted processing budget retain positional pairing.
 Vertical scrolling stays linked, and each pane can scroll horizontally for long
 lines. The **back arrow**, at the left of the legend, returns to the folder view
 with its selection, expansion, and scroll position preserved. Enter or Space on a

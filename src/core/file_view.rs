@@ -393,13 +393,17 @@ fn append_changed_rows(
     options: &FileViewOptions,
     highlight_deadline: Instant,
 ) -> bool {
-    let mut left = left;
-    let mut right = right;
-    loop {
+    let left: Vec<_> = left.collect();
+    let right: Vec<_> = right.collect();
+    let alignment = align_changed_block(&left, &right, cancellation, options, highlight_deadline);
+    for (left_index, right_index) in alignment {
         if cancelled(cancellation) {
             return false;
         }
-        match (left.next(), right.next()) {
+        match (
+            left_index.map(|index| &left[index]),
+            right_index.map(|index| &right[index]),
+        ) {
             (Some((left_number, left)), Some((right_number, right))) => {
                 let Some((left_changed, right_changed)) = changed_ranges_with_options(
                     &left.content,
@@ -411,8 +415,8 @@ fn append_changed_rows(
                     return false;
                 };
                 rows.push(FileComparisonRow {
-                    left: Some((left_number, left.content)),
-                    right: Some((right_number, right.content)),
+                    left: Some((*left_number, left.content.clone())),
+                    right: Some((*right_number, right.content.clone())),
                     state: DirectoryEntryState::Different,
                     left_changed,
                     right_changed,
@@ -421,7 +425,7 @@ fn append_changed_rows(
                 });
             }
             (Some((left_number, left)), None) => rows.push(FileComparisonRow {
-                left: Some((left_number, left.content.clone())),
+                left: Some((*left_number, left.content.clone())),
                 right: None,
                 state: DirectoryEntryState::LeftOnly,
                 left_changed: whole_range(&left.content).into_iter().collect(),
@@ -431,20 +435,226 @@ fn append_changed_rows(
             }),
             (None, Some((right_number, right))) => rows.push(FileComparisonRow {
                 left: None,
-                right: Some((right_number, right.content.clone())),
+                right: Some((*right_number, right.content.clone())),
                 state: DirectoryEntryState::RightOnly,
                 left_changed: Vec::new(),
                 right_changed: whole_range(&right.content).into_iter().collect(),
                 left_ending: None,
                 right_ending: Some(right.ending),
             }),
-            (None, None) => break,
+            (None, None) => unreachable!("a changed-block alignment always contains a line"),
         }
         if let Some(progress) = &options.progress {
             progress.advance(1);
         }
     }
     true
+}
+
+const ALIGNMENT_GAP_COST: u32 = 100;
+const MAX_BLOCK_ALIGNMENT_LINES: usize = 128;
+const MAX_BLOCK_ALIGNMENT_CELLS: usize = 16 * 1024;
+const MAX_BLOCK_ALIGNMENT_BYTES: usize = 64 * 1024;
+const ALIGNMENT_CHARACTER_WORK_BUDGET: usize = 128 * 1024;
+
+/// Aligns a run of inserted/deleted lines inside a larger line diff. `similar`
+/// deliberately leaves these runs opaque, so simply zipping them makes one
+/// inserted line shift every following replacement. This bounded second pass
+/// favours a pair with shared text over two gaps, while retaining a positional
+/// pairing for unrelated equal-sized replacements.
+fn align_changed_block(
+    left: &[(usize, DisplayLine)],
+    right: &[(usize, DisplayLine)],
+    cancellation: &AtomicBool,
+    options: &FileViewOptions,
+    deadline: Instant,
+) -> Vec<(Option<usize>, Option<usize>)> {
+    let can_align = left.len() <= MAX_BLOCK_ALIGNMENT_LINES
+        && right.len() <= MAX_BLOCK_ALIGNMENT_LINES
+        && left.len().saturating_mul(right.len()) <= MAX_BLOCK_ALIGNMENT_CELLS
+        && left
+            .iter()
+            .chain(right)
+            .map(|(_, line)| line.content.len())
+            .sum::<usize>()
+            <= MAX_BLOCK_ALIGNMENT_BYTES
+        && !cancelled(cancellation)
+        && Instant::now() < deadline;
+    if !can_align {
+        return positional_alignment(left.len(), right.len());
+    }
+
+    let left_text = alignment_text(left, options);
+    let right_text = alignment_text(right, options);
+    let width = right.len() + 1;
+    let mut character_work_remaining = ALIGNMENT_CHARACTER_WORK_BUDGET;
+    let mut costs = vec![0_u32; (left.len() + 1) * width];
+    let mut steps = vec![0_u8; costs.len()];
+    for left_index in 1..=left.len() {
+        costs[left_index * width] = left_index as u32 * ALIGNMENT_GAP_COST;
+        steps[left_index * width] = 1;
+    }
+    for right_index in 1..=right.len() {
+        costs[right_index] = right_index as u32 * ALIGNMENT_GAP_COST;
+        steps[right_index] = 2;
+    }
+    for left_index in 1..=left.len() {
+        for right_index in 1..=right.len() {
+            if cancelled(cancellation) || Instant::now() >= deadline {
+                return positional_alignment(left.len(), right.len());
+            }
+            let diagonal = costs[(left_index - 1) * width + right_index - 1]
+                + match line_pair_cost(
+                    &left_text[left_index - 1],
+                    &right_text[right_index - 1],
+                    cancellation,
+                    deadline,
+                    &mut character_work_remaining,
+                ) {
+                    Some(cost) => cost,
+                    None => return positional_alignment(left.len(), right.len()),
+                };
+            let left_only = costs[(left_index - 1) * width + right_index] + ALIGNMENT_GAP_COST;
+            let right_only = costs[left_index * width + right_index - 1] + ALIGNMENT_GAP_COST;
+            // A diagonal is preferred when it is cheaper. When an unequal run
+            // is entirely unrelated, taking the gap at its far edge preserves
+            // the conventional first-to-first replacement pairing.
+            let (cost, step) = if diagonal < left_only && diagonal < right_only {
+                (diagonal, 0)
+            } else if left_only <= right_only {
+                (left_only, 1)
+            } else {
+                (right_only, 2)
+            };
+            let offset = left_index * width + right_index;
+            costs[offset] = cost;
+            steps[offset] = step;
+        }
+    }
+
+    let mut aligned = Vec::with_capacity(left.len().max(right.len()));
+    let (mut left_index, mut right_index) = (left.len(), right.len());
+    while left_index != 0 || right_index != 0 {
+        match steps[left_index * width + right_index] {
+            0 => {
+                left_index -= 1;
+                right_index -= 1;
+                aligned.push((Some(left_index), Some(right_index)));
+            }
+            1 => {
+                left_index -= 1;
+                aligned.push((Some(left_index), None));
+            }
+            2 => {
+                right_index -= 1;
+                aligned.push((None, Some(right_index)));
+            }
+            _ => unreachable!("invalid changed-block alignment step"),
+        }
+    }
+    aligned.reverse();
+    aligned
+}
+
+fn positional_alignment(left_len: usize, right_len: usize) -> Vec<(Option<usize>, Option<usize>)> {
+    (0..left_len.max(right_len))
+        .map(|index| {
+            (
+                (index < left_len).then_some(index),
+                (index < right_len).then_some(index),
+            )
+        })
+        .collect()
+}
+
+fn alignment_text<'a>(
+    lines: &'a [(usize, DisplayLine)],
+    options: &FileViewOptions,
+) -> Vec<std::borrow::Cow<'a, str>> {
+    lines
+        .iter()
+        .map(|(_, line)| {
+            if options.ignore_whitespace {
+                std::borrow::Cow::Owned(
+                    line.content
+                        .chars()
+                        .filter(|character| !character.is_whitespace())
+                        .collect(),
+                )
+            } else {
+                std::borrow::Cow::Borrowed(line.content.as_str())
+            }
+        })
+        .collect()
+}
+
+fn line_pair_cost(
+    left: &str,
+    right: &str,
+    cancellation: &AtomicBool,
+    deadline: Instant,
+    character_work_remaining: &mut usize,
+) -> Option<u32> {
+    if cancelled(cancellation) || Instant::now() >= deadline {
+        return None;
+    }
+    if left == right {
+        return Some(0);
+    }
+    let left_length = left.chars().count();
+    let right_length = right.chars().count();
+    let max_length = left_length.max(right_length);
+    if max_length == 0 {
+        return Some(145);
+    }
+    let prefix = left
+        .chars()
+        .zip(right.chars())
+        .take_while(|(left, right)| left == right)
+        .count();
+    let suffix = left
+        .chars()
+        .rev()
+        .zip(right.chars().rev())
+        .take(left_length.min(right_length).saturating_sub(prefix))
+        .take_while(|(left, right)| left == right)
+        .count();
+    let shared_percent = (prefix + suffix) * 100 / max_length;
+    // Prefix/suffix handles the common cheap case. For text that differs at
+    // both ends (for example a wrapped comment), use a bounded character diff
+    // to recognize its common interior without knowing any comment syntax.
+    if shared_percent >= 70 {
+        return Some(pair_cost_for_percent(shared_percent));
+    }
+    let character_work = left.len().saturating_mul(right.len());
+    if character_work <= *character_work_remaining {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return None;
+        }
+        *character_work_remaining -= character_work;
+        let diff = SimilarTextDiff::configure()
+            .timeout(remaining)
+            .diff_chars(left, right);
+        if cancelled(cancellation) || Instant::now() >= deadline {
+            return None;
+        }
+        let common = diff
+            .iter_all_changes()
+            .filter(|change| change.tag() == ChangeTag::Equal)
+            .map(|change| change.value().chars().count())
+            .sum::<usize>();
+        return Some(pair_cost_for_percent(common * 100 / max_length));
+    }
+    Some(pair_cost_for_percent(shared_percent))
+}
+
+fn pair_cost_for_percent(shared_percent: usize) -> u32 {
+    // Keep every unequal substitution cheaper than two gaps so a same-sized
+    // unrelated replacement remains paired. Above a small noise floor, each
+    // additional shared character lowers the cost. That preserves the strict
+    // preference for an exact original line over a near-duplicate insertion.
+    150_u32.saturating_sub(shared_percent.saturating_sub(20) as u32)
 }
 
 #[derive(Clone, Debug)]
@@ -846,6 +1056,19 @@ mod tests {
         assert_eq!(error.kind, CompareErrorKind::InvalidPath);
         assert!(error.message.contains("regular"));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn short_and_unicode_containment_uses_character_similarity() {
+        let cancellation = AtomicBool::new(false);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut ascii_budget = ALIGNMENT_CHARACTER_WORK_BUDGET;
+        let mut unicode_budget = ALIGNMENT_CHARACTER_WORK_BUDGET;
+        let ascii = line_pair_cost("a", "//a", &cancellation, deadline, &mut ascii_budget).unwrap();
+        let unicode =
+            line_pair_cost("α", "//α", &cancellation, deadline, &mut unicode_budget).unwrap();
+        assert_eq!(ascii, unicode);
+        assert!(ascii < 150);
     }
 
     #[cfg(unix)]

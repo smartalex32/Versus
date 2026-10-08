@@ -3646,11 +3646,17 @@ mod tests {
 
     impl SourceFixture {
         fn new() -> Self {
+            static NEXT_FIXTURE: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(0);
             let unique = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos();
-            let root = std::env::temp_dir().join(format!("versus-source-ui-{unique}"));
+            let root = std::env::temp_dir().join(format!(
+                "versus-source-ui-{unique}-{}-{}",
+                std::process::id(),
+                NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
+            ));
             std::fs::create_dir_all(root.join("left")).unwrap();
             std::fs::create_dir_all(root.join("right")).unwrap();
             std::fs::write(root.join("left/model.txt"), "common\nold\n").unwrap();
@@ -4648,6 +4654,80 @@ mod tests {
         settle_sources(&mut app, &ctx);
         assert_eq!(app.counts[1], 0);
         assert_eq!(app.file_view.as_ref().unwrap().counts[1], 0);
+    }
+
+    #[test]
+    fn inserted_line_and_commented_peers_align_with_original_numbers_in_both_panes() {
+        let sources = SourceFixture::new();
+        let prefix: String = (1..50)
+            .map(|line| format!("unchanged line {line}\n"))
+            .collect();
+        std::fs::write(
+            sources.path("left/model.txt"),
+            format!("{prefix}extra_call();\n    first_action();\n    second_action();\ntail\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            sources.path("right/model.txt"),
+            format!("{prefix}    // first_action();\n    // second_action();\ntail\n"),
+        )
+        .unwrap();
+        let ctx = egui::Context::default();
+        let mut app = VersusApp::default();
+        app.open_launch_request(crate::cli::LaunchRequest {
+            paths: [
+                sources.path("left/model.txt"),
+                sources.path("right/model.txt"),
+            ],
+            mode: Some(ComparisonMode::File),
+        });
+        settle_sources(&mut app, &ctx);
+        let comparison = app.file_view.as_ref().unwrap().comparison.as_ref().unwrap();
+        assert_eq!(comparison.rows[49].left.as_ref().unwrap().0, 50);
+        assert!(comparison.rows[49].right.is_none());
+        for (index, left_number, right_number) in [(50, 51, 50), (51, 52, 51)] {
+            let row = &comparison.rows[index];
+            assert_eq!(row.left.as_ref().unwrap().0, left_number);
+            assert_eq!(row.right.as_ref().unwrap().0, right_number);
+            assert_eq!(row.state, DirectoryEntryState::Different);
+        }
+        click_action(&mut app, &ctx, "Next difference");
+        for differences_only in [false, true] {
+            if differences_only {
+                click_action(&mut app, &ctx, "Show only differences");
+            }
+            let mut output = render(&mut app, &ctx, vec![]);
+            output.textures_delta.clear();
+            for (left, right) in [
+                ("    first_action();", "    // first_action();"),
+                ("    second_action();", "    // second_action();"),
+            ] {
+                let left_position = text_positions(&output, left)[0];
+                let right_position = text_positions(&output, right)[0];
+                assert!((left_position.y - right_position.y).abs() < 0.1);
+                let highlighted: Vec<_> = output
+                    .shapes
+                    .iter()
+                    .filter_map(|shape| match &shape.shape {
+                        egui::Shape::Text(text) if text.galley.text() == right => {
+                            Some(&text.galley)
+                        }
+                        _ => None,
+                    })
+                    .flat_map(|galley| {
+                        galley.job.sections.iter().filter_map(|section| {
+                            (section.format.background != Color32::TRANSPARENT).then(|| {
+                                galley.job.text
+                                    [section.byte_range.start.0..section.byte_range.end.0]
+                                    .to_owned()
+                            })
+                        })
+                    })
+                    .collect();
+                assert_eq!(highlighted.concat(), "// ");
+            }
+            output.drop_without_applying_deltas();
+        }
     }
 
     #[test]

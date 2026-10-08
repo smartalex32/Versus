@@ -33,6 +33,8 @@ APIs and must fail cleanly when unavailable.
   navigation that skips folders and reveals changed files' collapsed ancestors.
 - `src/core/file_view.rs` loads bounded text inputs and aligns numbered line rows.
   Rows retain original line numbers, terminators, and UTF-8 highlight ranges.
+  Changed blocks use bounded similarity alignment to pair edited lines across
+  insertions/deletions without discarding exact line anchors or original numbers.
   Identical entries are neutral gray; both views share difference status icons.
 - Shared UI options filter identical entries and independently ignore inline
   whitespace or line endings. Changes to ignore rules restart background workers;
