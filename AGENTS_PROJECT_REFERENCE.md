@@ -23,6 +23,11 @@ APIs and must fail cleanly when unavailable.
 - `src/selection.rs` classifies sources without following symlinks and configures
   native pickers for the selected comparison mode. Switching modes clears both
   sources and pending work; New comparison keeps the selected mode and theme.
+- `src/cli.rs` parses native command-line paths for Git/IDE launches. Two paths
+  infer comparison mode; `--diff`/`--folder` require matching types. Startup uses
+  the same background workers as browsing, and the native process stays alive
+  until its window closes. Git null-device inputs represent absent file sides
+  without opening devices. `--help`/`--version` exit before GUI initialization.
 - `src/core/tree.rs` builds aligned folder trees with per-side types, ancestor
   status aggregation, and shared expansion state.
 - `src/core/file_view.rs` loads bounded text inputs and aligns numbered line rows.

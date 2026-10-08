@@ -119,6 +119,10 @@ pub struct VersusApp {
     comparison_mode: ComparisonMode,
     file_view: Option<FileView>,
     paths: [String; 2],
+    // Keep filesystem paths separate from their potentially lossy UI text.
+    source_paths: [Option<PathBuf>; 2],
+    // Some(None) is a pending automatic launch; Some(Some(mode)) forces a mode.
+    launch_mode: Option<Option<ComparisonMode>>,
     source_kinds: [Option<SourceKind>; 2],
     source_jobs: [Option<SourceJob>; 2],
     source_errors: [Option<String>; 2],
@@ -140,6 +144,8 @@ impl Default for VersusApp {
             comparison_mode: ComparisonMode::Folder,
             file_view: None,
             paths: Default::default(),
+            source_paths: [None, None],
+            launch_mode: None,
             source_kinds: [None; 2],
             source_jobs: [None, None],
             source_errors: [None, None],
@@ -158,9 +164,43 @@ impl Default for VersusApp {
 }
 
 impl VersusApp {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        launch: Option<crate::cli::LaunchRequest>,
+    ) -> Self {
         apply_theme(&cc.egui_ctx);
-        Self::default()
+        let mut app = Self::default();
+        if let Some(launch) = launch {
+            app.open_launch_request(launch);
+            cc.egui_ctx.request_repaint();
+        }
+        app
+    }
+
+    fn open_launch_request(&mut self, launch: crate::cli::LaunchRequest) {
+        self.new_comparison();
+        self.comparison_mode = launch.mode.unwrap_or(ComparisonMode::File);
+        for (side, path) in launch.paths.into_iter().enumerate() {
+            if launch.mode != Some(ComparisonMode::Folder) && empty_diff_side(&path) {
+                // Git represents an added/deleted side with a null-device name.
+                // Model it as absent; never open the device itself.
+                self.paths[side] = path.to_string_lossy().into_owned();
+                self.source_paths[side] = Some(path);
+                self.source_kinds[side] = Some(SourceKind::File);
+            } else {
+                self.select_path(side, path);
+            }
+        }
+        self.launch_mode = Some(launch.mode);
+        self.start_selected_comparison();
+    }
+
+    fn comparison_paths(&self) -> [PathBuf; 2] {
+        std::array::from_fn(|side| {
+            self.source_paths[side]
+                .clone()
+                .unwrap_or_else(|| absolute_path(&self.paths[side]))
+        })
     }
 
     fn invalidate(&mut self) {
@@ -180,7 +220,10 @@ impl VersusApp {
 
     fn select_path(&mut self, side: usize, path: PathBuf) {
         self.invalidate();
+        self.launch_mode = None;
+        let path = absolute_native_path(path);
         self.paths[side] = path.to_string_lossy().into_owned();
+        self.source_paths[side] = Some(path.clone());
         self.source_kinds[side] = None;
         self.source_errors[side] = None;
         self.source_jobs[side] = None;
@@ -258,6 +301,8 @@ impl VersusApp {
     fn new_comparison(&mut self) {
         self.invalidate();
         self.paths = Default::default();
+        self.source_paths = [None, None];
+        self.launch_mode = None;
         self.source_kinds = [None; 2];
         self.source_jobs = [None, None];
         self.source_errors = [None, None];
@@ -276,13 +321,43 @@ impl VersusApp {
         if self.source_jobs.iter().any(Option::is_some) {
             return;
         }
+        if let Some(requested_mode) = self.launch_mode.take() {
+            if let Some(mode) = requested_mode {
+                let expected = match mode {
+                    ComparisonMode::File => SourceKind::File,
+                    ComparisonMode::Folder => SourceKind::Folder,
+                };
+                if self.source_kinds.iter().any(|kind| *kind != Some(expected)) {
+                    self.error = Some(format!(
+                        "{} requires two {}. Choose matching sources.",
+                        mode.label(),
+                        match mode {
+                            ComparisonMode::File => "regular files",
+                            ComparisonMode::Folder => "folders",
+                        }
+                    ));
+                    self.message = "Cannot compare these command-line sources.".into();
+                    return;
+                }
+            } else {
+                self.comparison_mode = match selection::selection_mode(self.source_kinds) {
+                    SelectionMode::Folder => ComparisonMode::Folder,
+                    _ => ComparisonMode::File,
+                };
+            }
+        }
         match selection::selection_mode(self.source_kinds) {
             SelectionMode::File => {
-                let paths = self.paths.clone().map(|path| absolute_path(&path));
+                let paths = self.comparison_paths();
                 let sources = std::array::from_fn(|side| {
-                    (self.source_kinds[side] == Some(SourceKind::File)).then(|| paths[side].clone())
+                    (self.source_kinds[side] == Some(SourceKind::File)
+                        && !empty_diff_side(&paths[side]))
+                    .then(|| paths[side].clone())
                 });
-                let ready = sources.iter().all(Option::is_some);
+                let ready = self
+                    .source_kinds
+                    .iter()
+                    .all(|kind| *kind == Some(SourceKind::File));
                 self.file_view = Some(Self::create_file_view(paths, sources, false, false, ready));
                 self.message = "Choose a file on the other side to compare.".into();
             }
@@ -315,7 +390,7 @@ impl VersusApp {
         if let Some(job) = self.job.take() {
             job.cancellation.store(true, Ordering::Relaxed);
         }
-        let roots = self.paths.clone().map(|path| absolute_path(&path));
+        let roots = self.comparison_paths();
         let worker_roots = roots.clone();
         let cancellation = Arc::new(AtomicBool::new(false));
         let worker_cancellation = cancellation.clone();
@@ -1215,7 +1290,10 @@ impl eframe::App for VersusApp {
 }
 
 fn absolute_path(path: &str) -> PathBuf {
-    let path = PathBuf::from(path);
+    absolute_native_path(PathBuf::from(path))
+}
+
+fn absolute_native_path(path: PathBuf) -> PathBuf {
     if path.is_absolute() {
         path
     } else {
@@ -1223,6 +1301,15 @@ fn absolute_path(path: &str) -> PathBuf {
             .map(|cwd| cwd.join(&path))
             .unwrap_or(path)
     }
+}
+
+fn empty_diff_side(path: &std::path::Path) -> bool {
+    path.as_os_str() == "/dev/null"
+        || (cfg!(windows)
+            && path
+                .as_os_str()
+                .to_str()
+                .is_some_and(|name| name.eq_ignore_ascii_case("NUL")))
 }
 
 fn comparison_mode_button(
@@ -2934,6 +3021,171 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(1));
         }
+    }
+
+    #[test]
+    fn command_line_files_open_direct_comparison_in_supplied_order_without_writes() {
+        let sources = SourceFixture::new();
+        let paths = [
+            sources.path("left/model.txt"),
+            sources.path("right/model.txt"),
+        ];
+        for mode in [None, Some(ComparisonMode::File)] {
+            let ctx = egui::Context::default();
+            apply_theme(&ctx);
+            let mut app = VersusApp::default();
+            app.open_launch_request(crate::cli::LaunchRequest {
+                paths: paths.clone(),
+                mode,
+            });
+            settle_sources(&mut app, &ctx);
+            assert_eq!(app.comparison_mode, ComparisonMode::File);
+            let view = app.file_view.as_ref().unwrap();
+            assert_eq!(view.paths, paths);
+            assert_eq!(view.sources, paths.clone().map(Some));
+            assert!(!view.from_folders);
+            assert_eq!(view.counts[1], 1);
+            let output = render(&mut app, &ctx, vec![]);
+            assert_eq!(text_positions(&output, "old").len(), 1);
+            assert_eq!(text_positions(&output, "new").len(), 1);
+            assert!(
+                ctx.read_response(egui::Id::new("Back to folders"))
+                    .is_none()
+            );
+            output.drop_without_applying_deltas();
+        }
+        assert_eq!(std::fs::read_to_string(&paths[0]).unwrap(), "common\nold\n");
+        assert_eq!(std::fs::read_to_string(&paths[1]).unwrap(), "common\nnew\n");
+    }
+
+    #[test]
+    fn command_line_folders_choose_folder_mode_and_reject_forced_file_mode() {
+        let sources = SourceFixture::new();
+        let ctx = egui::Context::default();
+        let paths = [sources.path("left"), sources.path("right")];
+        for mode in [None, Some(ComparisonMode::Folder)] {
+            let mut app = VersusApp::default();
+            app.open_launch_request(crate::cli::LaunchRequest {
+                paths: paths.clone(),
+                mode,
+            });
+            settle_sources(&mut app, &ctx);
+            assert_eq!(app.comparison_mode, ComparisonMode::Folder);
+            assert_eq!(app.roots, Some(paths.clone()));
+            assert!(app.tree.is_some() && app.file_view.is_none());
+        }
+        for (mode, paths) in [
+            (ComparisonMode::File, paths),
+            (
+                ComparisonMode::Folder,
+                [
+                    sources.path("left/model.txt"),
+                    sources.path("right/model.txt"),
+                ],
+            ),
+        ] {
+            let mut app = VersusApp::default();
+            app.open_launch_request(crate::cli::LaunchRequest {
+                paths,
+                mode: Some(mode),
+            });
+            settle_sources(&mut app, &ctx);
+            assert!(app.error.as_ref().unwrap().contains("requires two"));
+            assert!(app.tree.is_none() && app.file_view.is_none());
+        }
+    }
+
+    #[test]
+    fn command_line_invalid_sources_show_errors_and_new_discards_pending_launch() {
+        let sources = SourceFixture::new();
+        let ctx = egui::Context::default();
+        for paths in [
+            [sources.path("left/model.txt"), sources.path("missing")],
+            [sources.path("left/model.txt"), sources.path("right")],
+        ] {
+            let mut app = VersusApp::default();
+            app.open_launch_request(crate::cli::LaunchRequest { paths, mode: None });
+            settle_sources(&mut app, &ctx);
+            assert!(app.error.is_some() || app.mode() == SelectionMode::Incompatible);
+            assert!(app.tree.is_none() && app.file_view.is_none());
+        }
+        let mut app = VersusApp::default();
+        app.open_launch_request(crate::cli::LaunchRequest {
+            paths: [
+                sources.path("left/model.txt"),
+                sources.path("right/model.txt"),
+            ],
+            mode: None,
+        });
+        app.new_comparison();
+        settle_sources(&mut app, &ctx);
+        assert!(app.paths.iter().all(String::is_empty));
+        assert!(app.source_paths.iter().all(Option::is_none));
+        assert!(app.launch_mode.is_none());
+        assert!(app.tree.is_none() && app.file_view.is_none());
+    }
+
+    #[test]
+    fn git_null_device_inputs_show_added_and_deleted_lines_without_opening_devices() {
+        let sources = SourceFixture::new();
+        let ctx = egui::Context::default();
+        let mut nulls = vec![PathBuf::from("/dev/null")];
+        if cfg!(windows) {
+            nulls.extend([PathBuf::from("NUL"), PathBuf::from("nul")]);
+        }
+        for null in nulls {
+            for empty_side in 0..2 {
+                let mut paths = [
+                    sources.path("left/model.txt"),
+                    sources.path("right/model.txt"),
+                ];
+                paths[empty_side] = null.clone();
+                let mut app = VersusApp::default();
+                app.open_launch_request(crate::cli::LaunchRequest {
+                    paths,
+                    mode: Some(ComparisonMode::File),
+                });
+                settle_sources(&mut app, &ctx);
+                let view = app.file_view.as_ref().unwrap();
+                assert!(view.error.is_none());
+                assert!(view.sources[empty_side].is_none());
+                let expected = if empty_side == 0 {
+                    DirectoryEntryState::RightOnly
+                } else {
+                    DirectoryEntryState::LeftOnly
+                };
+                let rows = &view.comparison.as_ref().unwrap().rows;
+                assert_eq!(rows.len(), 2);
+                assert!(rows.iter().all(|row| row.state == expected));
+            }
+        }
+    }
+
+    #[test]
+    fn command_line_native_paths_survive_display_conversion() {
+        #[cfg(target_os = "linux")]
+        use std::os::unix::ffi::OsStringExt;
+        let sources = SourceFixture::new();
+        let ctx = egui::Context::default();
+        // Linux permits non-UTF-8 filenames; macOS filesystems require Unicode.
+        #[cfg(target_os = "linux")]
+        let left_name = std::ffi::OsString::from_vec(b"left \xff.txt".to_vec());
+        #[cfg(not(target_os = "linux"))]
+        let left_name = std::ffi::OsString::from("left space é.txt");
+        let left = sources.0.join(left_name);
+        let right = sources.path("right space \u{6bd4}\u{8f03}.txt");
+        std::fs::write(&left, "before\n").unwrap();
+        std::fs::write(&right, "after\n").unwrap();
+        let mut app = VersusApp::default();
+        app.open_launch_request(crate::cli::LaunchRequest {
+            paths: [left.clone(), right.clone()],
+            mode: Some(ComparisonMode::File),
+        });
+        settle_sources(&mut app, &ctx);
+        let view = app.file_view.as_ref().unwrap();
+        assert_eq!(view.sources, [Some(left), Some(right)]);
+        assert!(view.error.is_none());
+        assert_eq!(view.counts[1], 1);
     }
 
     #[test]
