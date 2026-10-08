@@ -1,29 +1,81 @@
 # Versus
 
-Versus is a fast, offline desktop utility for comparing directories, two files,
-and three versions of a text file. It uses operating-system filesystem paths, so
+Versus is an offline engineering workspace for comparing two files or two folders
+in side-by-side panes. It uses operating-system filesystem paths, so
 mapped drives and UNC paths on Windows and mounted network filesystems on Linux
 work through the same local APIs as other paths. Versus does not implement network
 authentication or make outbound network requests at runtime.
 
 ## Use
 
-Open Versus and choose **Directory**, **2-Way**, or **3-Way**. Enter, paste, drop,
-or browse for local paths, mapped drives, UNC shares, or mounted Linux paths.
-Directory comparison starts with the **Different** filter; double-click a changed
-file to inspect it and return to the directory results afterward. File comparison
-shows line numbers, highlighted changes, and difference navigation. Choose
-**Edit buffers** to edit either side, then **Recalculate edited diff** to update
-the highlighting. Copying a selected difference changes only the working buffer
-until you choose **Save** or **Save As**. Three-way merge uses base, left, and
-right files; resolve conflicts into the editable result before saving. Use the
-**Dark mode** or **Light mode** button in the header to switch appearance; the
-choice is saved with the other local settings.
+Choose **Folder Compare** or **File Compare** in the center of the header. Each
+button includes a folder or file icon. The active mode is highlighted, with Folder
+Compare selected initially. Clicking a path
+area or browse icon in either pane opens that mode's native folder or file picker
+directly. Selecting the second source starts comparison automatically. File
+Compare opens the line comparison without a Back button.
 
-Versus never writes compared files during opening or comparison. It requests
-confirmation before replacing an existing destination. Settings are stored locally
-in `Versus/settings.conf` under the platform's configuration directory and contain
-no file contents.
+Changing modes starts a fresh comparison and cancels pending work. Clicking the
+active mode preserves the current comparison; clicking Folder Compare while
+viewing a file from its tree returns to that tree. The **+** button at the right
+of the legend has the tooltip **New comparison** and clears both selections,
+results, and pending work while keeping the selected mode and theme.
+
+Both pane headers remain available for browsing in directly selected file views.
+Folder paths wrap to show the full path; file paths use a leading ellipsis with
+the full path on hover. LEFT/RIGHT and browse stay centered beside the path.
+The refresh icon at the upper right compares the same folders again. Local paths,
+mapped drives, UNC shares, and mounted Linux paths all use the same filesystem
+APIs; paths can be entered through the native dialog.
+
+Click a folder in either tree to expand or collapse the corresponding relative
+path in both. Scrolling is linked, and a dash marks the empty position opposite
+a one-sided item so matching paths stay aligned. **Expand all** and **Collapse
+all** are the stacked plus/minus icons at the upper right and control both trees. Hover
+over an action icon for its label. Tab focuses tree rows; Enter or Space toggles a
+folder, and the left/right arrow keys collapse/expand a focused folder.
+
+- Amber unequal sign: changed files or shared folders containing differences.
+- Cyan left arrow: files and folders present only on the left.
+- Violet right arrow: files and folders present only on the right.
+- Red boxed cross: different entry types.
+- Red warning triangle: a filesystem read error. Hover for details.
+
+Identical files, folders, and lines use ordinary gray text without a status icon
+or a legend entry. The legend sits above the two panes; the same icons replace
+status words in each compact tree row. File sizes and recursive folder totals appear beside the status
+icon, independently for each side, using binary units (KiB, MiB, and so on). Sizes
+reflect filesystem metadata collected during the scan. Folder
+totals count regular-file bytes and exclude symlink targets. Empty folders show
+zero bytes; unknown sizes or incomplete totals show a dash. Hover for status and
+error details. The cursor becomes a pointer over files and folders.
+
+Comparison runs in the background with refresh and cancel icons in the header.
+Files are compared by content, not timestamps. Symlinks are compared by their
+targets and are never recursively followed. Empty folders are included. Changing
+a path clears the prior result so it cannot be mistaken for the new selection.
+
+When comparing folders, double-click a regular file on either side to open a
+read-only, line-by-line file comparison. The same legend colors and icons identify changed, left-only, and
+right-only lines; line numbers and empty placeholders keep both sides aligned.
+File headers use the same LEFT/RIGHT styling as folder headers. Long file paths
+show a leading ellipsis so the filename remains visible; hover for the full path.
+Vertical scrolling stays linked, and each pane can scroll horizontally for long
+lines. The **back arrow**, at the left of the legend, returns to the folder view
+with its selection, expansion, and scroll position preserved. Enter or Space on a
+focused file also opens it.
+
+File contents load in the background. Missing files show an empty side; binary or
+non-UTF-8 files, files above the 32 MiB text limit, and comparisons exceeding the
+two-second diff processing limit show an explanation. Type mismatches do not open
+folders or symlink targets. Read errors are shown in the file view; Back remains
+available for files opened from a folder comparison. Line endings are normalized
+for text comparison. Merge, editing, saving, and other workflows remain
+deferred. Compared files and folders are never modified.
+
+The sun/moon icon at the upper right switches between light and dark themes in
+either view. The logo and window icon preserve the blue half and use a white half
+in dark mode or the original dark half in light mode.
 
 ## Releases
 
