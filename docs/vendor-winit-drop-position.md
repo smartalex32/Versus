@@ -9,12 +9,34 @@ The local patch sends a client-relative physical `WindowEvent::CursorMoved` befo
 events in these files:
 
 - `vendor/winit/src/platform_impl/windows/drop_handler.rs`
+- `vendor/winit/src/platform_impl/windows/definitions.rs`
 - `vendor/winit/src/platform_impl/linux/x11/event_processor.rs`
 - `vendor/winit/src/platform_impl/macos/window_delegate.rs`
 
 Windows converts OLE screen pixels with `ScreenToClient`; X11 converts packed XDND root-window
 coordinates with `TranslateCoordinates`; AppKit converts the drag point through Winit's flipped
 content view and then applies the backing scale factor.
+
+The Windows patch also corrects the OLE callback ABI: `DragEnter`, `DragOver`, and `Drop`
+take `POINTL` **by value**, as required by the Windows SDK. The upstream declarations used a
+pointer; on x64 the mismatch was masked while ignored, but dereferencing it interpreted packed
+coordinates as an address. Both the vtable declarations and callback implementations must use the
+same by-value signature. The handler implements `QueryInterface` for `IUnknown`/`IDropTarget`,
+negotiates only permitted copy effects, clears completed/cancelled drags, and releases every
+successful `GetData` storage medium with `ReleaseStgMedium`, including hover reads and
+provider-owned media. Dragging selects comparison inputs without moving or deleting sources.
+
+Windows-only integration tests in `tests/windows_drop.rs` compile the actual patched handler
+with an event-recording adapter and exercise its vtable using a hidden native window and real
+`CF_HDROP` payloads. They check client coordinates, event order, Unicode/long paths, medium
+release, effects, cancellation, and interface queries. `cargo test --locked --offline` runs
+them on Windows CI; the adapter does not replace the OLE callback implementation. Manual
+Explorer drops into the application window remain useful for end-to-end validation.
+
+References: [DragEnter ABI](https://learn.microsoft.com/en-us/windows/win32/api/oleidl/nf-oleidl-idroptarget-dragenter),
+[DragOver ABI](https://learn.microsoft.com/en-us/windows/win32/api/oleidl/nf-oleidl-idroptarget-dragover),
+[Drop ABI](https://learn.microsoft.com/en-us/windows/win32/api/oleidl/nf-oleidl-idroptarget-drop), and
+[storage-medium ownership](https://learn.microsoft.com/en-us/windows/win32/api/ole2/nf-ole2-releasestgmedium).
 
 The vendored Winit 0.30 Wayland backend has no data-device drag-and-drop implementation and emits
 no `HoveredFile` or `DroppedFile` events. Its ordinary pointer-motion support cannot make native

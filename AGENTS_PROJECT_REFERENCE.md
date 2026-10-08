@@ -44,7 +44,8 @@ APIs and must fail cleanly when unavailable.
   Folder ignores use bounded UTF-8 normalization and fall back to byte comparison
   for binary, invalid UTF-8, or larger files. Native single-path drops select a
   pane and infer file/folder mode through the existing source classifier.
-  Native drag pointer coordinates come from a narrow vendored winit patch,
+  Native drag pointer coordinates come from a narrow vendored winit patch, including
+  corrected Windows OLE by-value coordinates and storage-medium cleanup,
   documented in `docs/vendor-winit-drop-position.md`; preserve it on vendor
   refresh. Linux chooses X11/XWayland when `DISPLAY` exists for native file drops,
   retaining native Wayland browsing when no X11 display is available.

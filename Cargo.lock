@@ -2239,6 +2239,9 @@ name = "tracing-core"
 version = "0.1.36"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
+dependencies = [
+ "once_cell",
+]
 
 [[package]]
 name = "type-map"
@@ -2319,6 +2322,8 @@ dependencies = [
  "eframe",
  "rfd",
  "similar",
+ "tracing",
+ "windows-sys 0.52.0",
  "winit",
 ]
 
