@@ -482,7 +482,7 @@ impl VersusApp {
                     self.folder_differences = tree
                         .all_rows()
                         .into_iter()
-                        .filter(|row| row.node.state != DirectoryEntryState::Same)
+                        .filter(|row| is_file_difference(row.node))
                         .map(|row| row.node.relative_path.clone())
                         .collect();
                     self.counts = count_entries(&tree);
@@ -697,7 +697,7 @@ impl VersusApp {
         let selected = self.selected.is_some();
         let target = if forward {
             all.iter().enumerate().find(|(index, row)| {
-                row.node.state != DirectoryEntryState::Same
+                is_file_difference(row.node)
                     && anchor.is_none_or(|anchor| {
                         if selected {
                             *index > anchor
@@ -708,8 +708,7 @@ impl VersusApp {
             })
         } else {
             all.iter().enumerate().rev().find(|(index, row)| {
-                row.node.state != DirectoryEntryState::Same
-                    && anchor.is_some_and(|anchor| *index < anchor)
+                is_file_difference(row.node) && anchor.is_some_and(|anchor| *index < anchor)
             })
         }
         .map(|(_, row)| row.node.relative_path.clone());
@@ -1182,12 +1181,13 @@ impl VersusApp {
             self.tree.as_ref().map(|_| self.counts)
         };
         ui.horizontal(|ui| {
-            let control_width = 6.0 * (24.0 + ui.spacing().item_spacing.x);
+            let control_width = 5.0 * (24.0 + ui.spacing().item_spacing.x);
             let legend_width = (ui.available_width() - control_width).max(0.0);
             ui.allocate_ui_with_layout(
                 egui::vec2(legend_width, 24.0),
                 egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
+                    ui.set_min_width(legend_width);
                     ui.horizontal_wrapped(|ui| {
                         if back
                             && icon_button(ui, ToolbarIcon::Back, true, "Back to folders").clicked()
@@ -1213,6 +1213,10 @@ impl VersusApp {
                             );
                             ui.label(RichText::new(label).size(10.0).color(icon.color(palette)));
                             ui.add_space(5.0);
+                        }
+                        if icon_button(ui, ToolbarIcon::New, true, "New comparison").clicked() {
+                            self.new_comparison();
+                            ui.ctx().request_repaint();
                         }
                     });
                 },
@@ -1274,10 +1278,6 @@ impl VersusApp {
                     self.jump_difference(forward);
                     ui.ctx().request_repaint();
                 }
-            }
-            if icon_button(ui, ToolbarIcon::New, true, "New comparison").clicked() {
-                self.new_comparison();
-                ui.ctx().request_repaint();
             }
         });
     }
@@ -2036,6 +2036,12 @@ fn progress_text(snapshot: versus::ProgressSnapshot, started: Instant, now: Inst
         "{stage}…{work} · {:.1}s elapsed{eta}",
         now.saturating_duration_since(started).as_secs_f64()
     )
+}
+
+fn is_file_difference(node: &TreeNode) -> bool {
+    node.state != DirectoryEntryState::Same
+        && (node.left.kind == Some(DirectoryEntryKind::File)
+            || node.right.kind == Some(DirectoryEntryKind::File))
 }
 
 fn count_entries(tree: &FolderTree) -> [usize; 6] {
@@ -4459,17 +4465,26 @@ mod tests {
                 state: DirectoryEntryState::Same,
             });
         }
-        entries.push(DirectoryEntry {
-            relative_path: "z_changed/deep/changed.txt".into(),
-            left_exists: true,
-            right_exists: true,
-            left_kind: Some(DirectoryEntryKind::File),
-            right_kind: Some(DirectoryEntryKind::File),
-            left_size: Some(1),
-            right_size: Some(1),
-            kind: DirectoryEntryKind::File,
-            state: DirectoryEntryState::Different,
-        });
+        for (path, state) in [
+            ("z_changed/deep/changed.txt", DirectoryEntryState::Different),
+            ("z_changed/deep/removed.txt", DirectoryEntryState::LeftOnly),
+            ("z_changed/deep/same.txt", DirectoryEntryState::Same),
+            ("z_other/added.txt", DirectoryEntryState::RightOnly),
+        ] {
+            let left_exists = state != DirectoryEntryState::RightOnly;
+            let right_exists = state != DirectoryEntryState::LeftOnly;
+            entries.push(DirectoryEntry {
+                relative_path: path.into(),
+                left_exists,
+                right_exists,
+                left_kind: left_exists.then_some(DirectoryEntryKind::File),
+                right_kind: right_exists.then_some(DirectoryEntryKind::File),
+                left_size: left_exists.then_some(1),
+                right_size: right_exists.then_some(1),
+                kind: DirectoryEntryKind::File,
+                state,
+            });
+        }
         let tree = FolderTree::from_diff(&DirectoryDiff {
             entries,
             cancelled: false,
@@ -4478,10 +4493,11 @@ mod tests {
         let sender = attach_job(&mut app);
         sender.send(Ok(tree)).unwrap();
         app.poll_comparison(&ctx);
-        for path in ["z_changed", "z_changed/deep", "z_changed/deep/changed.txt"] {
-            click_action(&mut app, &ctx, "Next difference");
-            assert_eq!(app.selected.as_deref(), Some(std::path::Path::new(path)));
-        }
+        click_action(&mut app, &ctx, "Next difference");
+        assert_eq!(
+            app.selected.as_deref(),
+            Some(std::path::Path::new("z_changed/deep/changed.txt"))
+        );
         assert!(app.tree.as_ref().unwrap().is_expanded("z_changed"));
         assert!(app.tree.as_ref().unwrap().is_expanded("z_changed/deep"));
         let output = render(&mut app, &ctx, vec![]);
@@ -4494,11 +4510,144 @@ mod tests {
         assert!(text_positions(&output, "a_common_000").is_empty());
         assert_eq!(text_positions(&output, "changed.txt").len(), 2);
         output.drop_without_applying_deltas();
+        for path in ["z_changed/deep/removed.txt", "z_other/added.txt"] {
+            click_action(&mut app, &ctx, "Next difference");
+            assert_eq!(app.selected.as_deref(), Some(std::path::Path::new(path)));
+        }
+        assert!(app.tree.as_ref().unwrap().is_expanded("z_other"));
+        click_action(&mut app, &ctx, "Next difference");
+        assert_eq!(
+            app.selected.as_deref(),
+            Some(std::path::Path::new("z_other/added.txt"))
+        );
         click_action(&mut app, &ctx, "Previous difference");
         assert_eq!(
             app.selected.as_deref(),
-            Some(std::path::Path::new("z_changed/deep"))
+            Some(std::path::Path::new("z_changed/deep/removed.txt"))
         );
+        click_action(&mut app, &ctx, "Previous difference");
+        assert_eq!(
+            app.selected.as_deref(),
+            Some(std::path::Path::new("z_changed/deep/changed.txt"))
+        );
+    }
+
+    #[test]
+    fn folder_navigation_is_disabled_when_only_folders_differ() {
+        let ctx = egui::Context::default();
+        let tree = FolderTree::from_diff(&DirectoryDiff {
+            entries: vec![DirectoryEntry {
+                relative_path: "empty-left-only".into(),
+                left_exists: true,
+                right_exists: false,
+                left_kind: Some(DirectoryEntryKind::Directory),
+                right_kind: None,
+                left_size: Some(0),
+                right_size: None,
+                kind: DirectoryEntryKind::Directory,
+                state: DirectoryEntryState::LeftOnly,
+            }],
+            cancelled: false,
+        });
+        let mut app = VersusApp::default();
+        let sender = attach_job(&mut app);
+        sender.send(Ok(tree)).unwrap();
+        app.poll_comparison(&ctx);
+        render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+        for label in ["Previous difference", "Next difference"] {
+            assert!(!ctx.read_response(egui::Id::new(label)).unwrap().enabled());
+        }
+        assert!(app.folder_differences.is_empty());
+    }
+
+    #[test]
+    fn new_button_stays_with_the_legend_and_options_align_right() {
+        for theme in [egui::Theme::Light, egui::Theme::Dark] {
+            for size in [egui::vec2(900.0, 650.0), egui::vec2(1200.0, 800.0)] {
+                for file in [false, true] {
+                    let ctx = egui::Context::default();
+                    set_theme(&ctx, theme);
+                    let mut app = loaded_app();
+                    if file {
+                        app.file_view = Some(loaded_file_view());
+                    }
+                    let mut output = ctx.run_ui(
+                        egui::RawInput {
+                            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)),
+                            ..Default::default()
+                        },
+                        |ui| app.render(ui),
+                    );
+                    output.textures_delta.clear();
+                    let last_label = output
+                        .shapes
+                        .iter()
+                        .find_map(|shape| match &shape.shape {
+                            egui::Shape::Text(text)
+                                if text.galley.text().starts_with("Read error") =>
+                            {
+                                Some(Rect::from_min_size(text.pos, text.galley.size()))
+                            }
+                            _ => None,
+                        })
+                        .unwrap();
+                    let plus = ctx
+                        .read_response(egui::Id::new("New comparison"))
+                        .unwrap()
+                        .rect;
+                    let filter = ctx
+                        .read_response(egui::Id::new("Show only differences"))
+                        .unwrap()
+                        .rect;
+                    let next = ctx
+                        .read_response(egui::Id::new("Next difference"))
+                        .unwrap()
+                        .rect;
+                    assert!(plus.left() >= last_label.right());
+                    assert!(plus.left() < last_label.right() + 25.0);
+                    assert!(
+                        plus.right() + 30.0 < filter.left(),
+                        "plus {plus:?}, filter {filter:?}, size {size:?}, file {file}"
+                    );
+                    assert!((plus.center().y - filter.center().y).abs() < 1.0);
+                    assert!(next.right() <= size.x && next.right() > size.x - 30.0);
+                    assert!(app.ignore_line_endings);
+                    assert!(
+                        ctx.read_response(egui::Id::new("Ignore line endings"))
+                            .unwrap()
+                            .enabled()
+                    );
+                    output.drop_without_applying_deltas();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn line_ending_ignore_defaults_on_in_both_comparison_views() {
+        let sources = SourceFixture::new();
+        std::fs::write(sources.path("left/model.txt"), "same\r\nnext\r\n").unwrap();
+        std::fs::write(sources.path("right/model.txt"), "same\nnext\n").unwrap();
+        let ctx = egui::Context::default();
+        let mut app = VersusApp::default();
+        assert!(app.ignore_line_endings);
+        app.open_launch_request(crate::cli::LaunchRequest {
+            paths: [sources.path("left"), sources.path("right")],
+            mode: None,
+        });
+        settle_sources(&mut app, &ctx);
+        assert_eq!(app.counts[1], 0);
+        app.open_file("model.txt".into(), [true, true], false);
+        settle_sources(&mut app, &ctx);
+        assert_eq!(app.file_view.as_ref().unwrap().counts[1], 0);
+        click_action(&mut app, &ctx, "Ignore line endings");
+        settle_sources(&mut app, &ctx);
+        assert_eq!(app.counts[1], 1);
+        assert_eq!(app.file_view.as_ref().unwrap().counts[1], 2);
+        click_action(&mut app, &ctx, "Ignore line endings");
+        settle_sources(&mut app, &ctx);
+        assert_eq!(app.counts[1], 0);
+        assert_eq!(app.file_view.as_ref().unwrap().counts[1], 0);
     }
 
     #[test]

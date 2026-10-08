@@ -30,7 +30,7 @@ APIs and must fail cleanly when unavailable.
   without opening devices. `--help`/`--version` exit before GUI initialization.
 - `src/core/tree.rs` builds aligned folder trees with per-side types, ancestor
   status aggregation, shared expansion state, and full-tree traversal for diff
-  navigation that reveals collapsed ancestors.
+  navigation that skips folders and reveals changed files' collapsed ancestors.
 - `src/core/file_view.rs` loads bounded text inputs and aligns numbered line rows.
   Rows retain original line numbers, terminators, and UTF-8 highlight ranges.
   Identical entries are neutral gray; both views share difference status icons.

@@ -59,7 +59,8 @@ Measured stages also show progress and an approximate time remaining for that
 stage. Folder discovery and line alignment have no reliable total, so they show
 activity without a time estimate. File loading can also be cancelled.
 
-The icon buttons beside the legend apply to both comparison views:
+The **+** button stays beside the legend. The other icon controls at the far right
+apply to both comparison views:
 
 - **Show only differences** hides identical lines and tree entries. File line
   numbers still refer to the original files; changed folder ancestors stay visible.
@@ -69,9 +70,9 @@ The icon buttons beside the legend apply to both comparison views:
   It starts on. Turn it off to compare endings exactly; changed endings appear
   as badges beside their lines.
 - **Previous difference** and **Next difference**, the up/down arrows, scroll
-  both panes to the previous or next changed line or tree entry. Folder navigation
-  expands the target's parents, including when they were collapsed. Navigation
-  stops at the first or last difference.
+  both panes to the previous or next changed line or file. Folder navigation skips
+  folders and expands the target file's parents, including when they were
+  collapsed. Navigation stops at the first or last difference.
 
 Selected option icons have a blue outline. Changing an ignore option recomputes
 the comparison in the background; filtering does not reread the sources. Options
