@@ -64,8 +64,9 @@ apply to both comparison views:
 
 - **Show only differences** hides identical lines and tree entries. File line
   numbers still refer to the original files; changed folder ancestors stay visible.
+  It starts on.
 - **Ignore whitespace** ignores inline Unicode whitespace, including spaces and
-  tabs, while preserving line boundaries. It starts off.
+  tabs, while preserving line boundaries. It starts on.
 - **Ignore line endings** ignores CRLF, LF, CR, and final-terminator differences.
   It starts on. Turn it off to compare endings exactly; changed endings appear
   as badges beside their lines.

@@ -2742,8 +2742,17 @@ mod tests {
         })
     }
 
-    fn loaded_app() -> VersusApp {
+    // Interaction fixtures exercise the full list and whitespace toggle in a
+    // known starting state; production defaults are covered separately below.
+    fn unfiltered_app() -> VersusApp {
         let mut app = VersusApp::default();
+        app.show_only_differences = false;
+        app.ignore_whitespace = false;
+        app
+    }
+
+    fn loaded_app() -> VersusApp {
+        let mut app = unfiltered_app();
         app.tree = Some(fixture());
         app.roots = Some(["left".into(), "right".into()]);
         app
@@ -4556,7 +4565,7 @@ mod tests {
         for theme in [egui::Theme::Light, egui::Theme::Dark] {
             let ctx = egui::Context::default();
             set_theme(&ctx, theme);
-            let mut app = VersusApp::default();
+            let mut app = unfiltered_app();
             app.open_launch_request(crate::cli::LaunchRequest {
                 paths: [
                     sources.path("left/model.txt"),
@@ -4612,7 +4621,7 @@ mod tests {
         }
         let ctx = egui::Context::default();
         apply_theme(&ctx);
-        let mut app = VersusApp::default();
+        let mut app = unfiltered_app();
         app.open_launch_request(crate::cli::LaunchRequest {
             paths: [sources.path("left"), sources.path("right")],
             mode: None,
@@ -4850,7 +4859,7 @@ mod tests {
             entries,
             cancelled: false,
         });
-        let mut app = VersusApp::default();
+        let mut app = unfiltered_app();
         let sender = attach_job(&mut app);
         sender.send(Ok(tree)).unwrap();
         app.poll_comparison(&ctx);
@@ -4992,6 +5001,42 @@ mod tests {
     }
 
     #[test]
+    fn default_options_filter_equal_lines_and_ignore_whitespace_and_endings() {
+        let sources = SourceFixture::new();
+        std::fs::write(
+            sources.path("left/model.txt"),
+            "common\nspacing value\nold\n",
+        )
+        .unwrap();
+        std::fs::write(
+            sources.path("right/model.txt"),
+            "common\r\nspacing  value\r\nnew\r\n",
+        )
+        .unwrap();
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut app = VersusApp::default();
+        assert!(app.show_only_differences && app.ignore_whitespace && app.ignore_line_endings);
+        app.open_launch_request(crate::cli::LaunchRequest {
+            paths: [
+                sources.path("left/model.txt"),
+                sources.path("right/model.txt"),
+            ],
+            mode: None,
+        });
+        settle_sources(&mut app, &ctx);
+        let view = app.file_view.as_ref().unwrap();
+        assert_eq!(view.counts[1], 1);
+        assert_eq!(view.visible_rows, vec![2]);
+        let output = render(&mut app, &ctx, vec![]);
+        assert!(text_positions(&output, "common").is_empty());
+        assert!(text_positions(&output, "spacing value").is_empty());
+        assert_eq!(text_positions(&output, "old").len(), 1);
+        assert_eq!(text_positions(&output, "new").len(), 1);
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
     fn line_ending_ignore_defaults_on_in_both_comparison_views() {
         let sources = SourceFixture::new();
         std::fs::write(sources.path("left/model.txt"), "same\r\nnext\r\n").unwrap();
@@ -5035,7 +5080,7 @@ mod tests {
         )
         .unwrap();
         let ctx = egui::Context::default();
-        let mut app = VersusApp::default();
+        let mut app = unfiltered_app();
         app.open_launch_request(crate::cli::LaunchRequest {
             paths: [
                 sources.path("left/model.txt"),
@@ -5099,7 +5144,7 @@ mod tests {
         std::fs::write(sources.path("right/model.txt"), "letvalue=1;\n").unwrap();
         let ctx = egui::Context::default();
         apply_theme(&ctx);
-        let mut app = VersusApp::default();
+        let mut app = unfiltered_app();
         app.open_launch_request(crate::cli::LaunchRequest {
             paths: [sources.path("left"), sources.path("right")],
             mode: None,

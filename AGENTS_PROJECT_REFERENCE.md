@@ -37,7 +37,8 @@ APIs and must fail cleanly when unavailable.
   insertions/deletions without discarding exact line anchors or original numbers.
   Identical entries are neutral gray; both views share difference status icons.
 - Shared UI options filter identical entries and independently ignore inline
-  whitespace or line endings. Changes to ignore rules restart background workers
+  whitespace or line endings. Differences-only filtering and both ignore rules are
+  enabled by default. Changes to ignore rules restart background workers
   while retaining the displayed result until its replacement is ready. Refreshes
   preserve expansion, selection and source-line scroll anchors; progress uses a
   fixed status area, and folder jumps clamp before painting to avoid transient shifts.
