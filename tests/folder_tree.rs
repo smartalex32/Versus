@@ -140,6 +140,68 @@ fn expansion_is_shared_by_relative_path_and_controls_visible_rows() {
 }
 
 #[test]
+fn all_rows_include_changed_descendants_while_tree_is_collapsed() {
+    let tree = tree(vec![
+        entry(
+            "folder",
+            DirectoryEntryKind::Directory,
+            DirectoryEntryState::Different,
+        ),
+        entry(
+            "folder/nested",
+            DirectoryEntryKind::Directory,
+            DirectoryEntryState::Different,
+        ),
+        entry(
+            "folder/nested/changed.txt",
+            DirectoryEntryKind::File,
+            DirectoryEntryState::Different,
+        ),
+    ]);
+    assert_eq!(tree.visible_rows().len(), 1);
+    let rows: Vec<_> = tree
+        .all_rows()
+        .into_iter()
+        .map(|row| (row.node.relative_path.clone(), row.depth))
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            (PathBuf::from("folder"), 0),
+            (PathBuf::from("folder/nested"), 1),
+            (PathBuf::from("folder/nested/changed.txt"), 2),
+        ]
+    );
+}
+
+#[test]
+fn expand_parents_reveals_a_nested_target_without_expanding_its_children() {
+    let mut tree = tree(vec![
+        entry(
+            "folder",
+            DirectoryEntryKind::Directory,
+            DirectoryEntryState::Same,
+        ),
+        entry(
+            "folder/nested",
+            DirectoryEntryKind::Directory,
+            DirectoryEntryState::Same,
+        ),
+        entry(
+            "folder/nested/file.txt",
+            DirectoryEntryKind::File,
+            DirectoryEntryState::Different,
+        ),
+    ]);
+    assert!(tree.expand_parents("folder/nested/file.txt"));
+    assert!(tree.is_expanded("folder"));
+    assert!(tree.is_expanded("folder/nested"));
+    assert!(!tree.is_expanded("folder/nested/file.txt"));
+    assert_eq!(tree.visible_rows().len(), 3);
+    assert!(!tree.expand_parents("missing/file.txt"));
+}
+
+#[test]
 fn type_mismatches_retain_the_exact_kind_on_each_side() {
     let tree = tree(vec![
         type_mismatch(

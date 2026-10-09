@@ -10,8 +10,9 @@ use std::{
     time::{Duration, Instant},
 };
 use versus::{
-    CompareError, DirectoryCompareOptions, DirectoryEntryKind, DirectoryEntryState, FileComparison,
-    FolderTree, TreeNode, load_file_comparison,
+    CompareError, ComparisonProgress, DirectoryCompareOptions, DirectoryEntryKind,
+    DirectoryEntryState, FileComparison, FileViewOptions, FolderTree, ProgressStage, TreeNode,
+    load_file_comparison_with_options,
 };
 
 #[derive(Clone, Copy)]
@@ -76,11 +77,15 @@ struct ComparisonJob {
     cancellation: Arc<AtomicBool>,
     roots: [PathBuf; 2],
     started: Instant,
+    progress: Arc<ComparisonProgress>,
 }
 
 struct FileJob {
     receiver: Receiver<Result<Option<FileComparison>, CompareError>>,
     cancellation: Arc<AtomicBool>,
+    started: Instant,
+    progress: Arc<ComparisonProgress>,
+    ignore_line_endings: bool,
 }
 
 struct SourceJob {
@@ -105,6 +110,11 @@ struct FileView {
     scroll_y: f32,
     content_widths: [f32; 2],
     counts: [usize; 6],
+    visible_rows: Vec<usize>,
+    difference_rows: Vec<usize>,
+    navigation_row: Option<usize>,
+    navigation_scroll_pending: bool,
+    ignore_line_endings: bool,
 }
 
 impl Drop for FileView {
@@ -119,6 +129,10 @@ pub struct VersusApp {
     comparison_mode: ComparisonMode,
     file_view: Option<FileView>,
     paths: [String; 2],
+    // Keep filesystem paths separate from their potentially lossy UI text.
+    source_paths: [Option<PathBuf>; 2],
+    // Some(None) is a pending automatic launch; Some(Some(mode)) forces a mode.
+    launch_mode: Option<Option<ComparisonMode>>,
     source_kinds: [Option<SourceKind>; 2],
     source_jobs: [Option<SourceJob>; 2],
     source_errors: [Option<String>; 2],
@@ -132,6 +146,15 @@ pub struct VersusApp {
     counts: [usize; 6],
     logo_texture: Option<(bool, egui::TextureHandle)>,
     scroll_generation: u64,
+    show_only_differences: bool,
+    ignore_whitespace: bool,
+    ignore_line_endings: bool,
+    tree_scroll_y: f32,
+    folder_differences: Vec<PathBuf>,
+    pane_rects: [Rect; 2],
+    native_drag_position: Option<Pos2>,
+    drop_hover_side: Option<usize>,
+    drop_message: Option<String>,
 }
 
 impl Default for VersusApp {
@@ -140,6 +163,8 @@ impl Default for VersusApp {
             comparison_mode: ComparisonMode::Folder,
             file_view: None,
             paths: Default::default(),
+            source_paths: [None, None],
+            launch_mode: None,
             source_kinds: [None; 2],
             source_jobs: [None, None],
             source_errors: [None, None],
@@ -153,14 +178,57 @@ impl Default for VersusApp {
             counts: [0; 6],
             logo_texture: None,
             scroll_generation: 0,
+            show_only_differences: true,
+            ignore_whitespace: true,
+            ignore_line_endings: true,
+            tree_scroll_y: 0.0,
+            folder_differences: Vec::new(),
+            pane_rects: [Rect::NOTHING; 2],
+            native_drag_position: None,
+            drop_hover_side: None,
+            drop_message: None,
         }
     }
 }
 
 impl VersusApp {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        launch: Option<crate::cli::LaunchRequest>,
+    ) -> Self {
         apply_theme(&cc.egui_ctx);
-        Self::default()
+        let mut app = Self::default();
+        if let Some(launch) = launch {
+            app.open_launch_request(launch);
+            cc.egui_ctx.request_repaint();
+        }
+        app
+    }
+
+    fn open_launch_request(&mut self, launch: crate::cli::LaunchRequest) {
+        self.new_comparison();
+        self.comparison_mode = launch.mode.unwrap_or(ComparisonMode::File);
+        for (side, path) in launch.paths.into_iter().enumerate() {
+            if launch.mode != Some(ComparisonMode::Folder) && empty_diff_side(&path) {
+                // Git represents an added/deleted side with a null-device name.
+                // Model it as absent; never open the device itself.
+                self.paths[side] = path.to_string_lossy().into_owned();
+                self.source_paths[side] = Some(path);
+                self.source_kinds[side] = Some(SourceKind::File);
+            } else {
+                self.select_path(side, path);
+            }
+        }
+        self.launch_mode = Some(launch.mode);
+        self.start_selected_comparison();
+    }
+
+    fn comparison_paths(&self) -> [PathBuf; 2] {
+        std::array::from_fn(|side| {
+            self.source_paths[side]
+                .clone()
+                .unwrap_or_else(|| absolute_path(&self.paths[side]))
+        })
     }
 
     fn invalidate(&mut self) {
@@ -174,13 +242,19 @@ impl VersusApp {
         self.error = None;
         self.elapsed = None;
         self.counts = [0; 6];
+        self.folder_differences.clear();
+        self.tree_scroll_y = 0.0;
         self.message = "Source selection changed.".into();
         self.scroll_generation += 1;
     }
 
     fn select_path(&mut self, side: usize, path: PathBuf) {
         self.invalidate();
+        self.drop_message = None;
+        self.launch_mode = None;
+        let path = absolute_native_path(path);
         self.paths[side] = path.to_string_lossy().into_owned();
+        self.source_paths[side] = Some(path.clone());
         self.source_kinds[side] = None;
         self.source_errors[side] = None;
         self.source_jobs[side] = None;
@@ -258,9 +332,12 @@ impl VersusApp {
     fn new_comparison(&mut self) {
         self.invalidate();
         self.paths = Default::default();
+        self.source_paths = [None, None];
+        self.launch_mode = None;
         self.source_kinds = [None; 2];
         self.source_jobs = [None, None];
         self.source_errors = [None, None];
+        self.drop_message = None;
         self.message = format!(
             "Choose a {} on each side to begin.",
             self.comparison_mode.source_label()
@@ -276,14 +353,51 @@ impl VersusApp {
         if self.source_jobs.iter().any(Option::is_some) {
             return;
         }
+        if let Some(requested_mode) = self.launch_mode.take() {
+            if let Some(mode) = requested_mode {
+                let expected = match mode {
+                    ComparisonMode::File => SourceKind::File,
+                    ComparisonMode::Folder => SourceKind::Folder,
+                };
+                if self.source_kinds.iter().any(|kind| *kind != Some(expected)) {
+                    self.error = Some(format!(
+                        "{} requires two {}. Choose matching sources.",
+                        mode.label(),
+                        match mode {
+                            ComparisonMode::File => "regular files",
+                            ComparisonMode::Folder => "folders",
+                        }
+                    ));
+                    self.message = "Cannot compare these command-line sources.".into();
+                    return;
+                }
+            } else {
+                self.comparison_mode = match selection::selection_mode(self.source_kinds) {
+                    SelectionMode::Folder => ComparisonMode::Folder,
+                    _ => ComparisonMode::File,
+                };
+            }
+        }
         match selection::selection_mode(self.source_kinds) {
             SelectionMode::File => {
-                let paths = self.paths.clone().map(|path| absolute_path(&path));
+                let paths = self.comparison_paths();
                 let sources = std::array::from_fn(|side| {
-                    (self.source_kinds[side] == Some(SourceKind::File)).then(|| paths[side].clone())
+                    (self.source_kinds[side] == Some(SourceKind::File)
+                        && !empty_diff_side(&paths[side]))
+                    .then(|| paths[side].clone())
                 });
-                let ready = sources.iter().all(Option::is_some);
-                self.file_view = Some(Self::create_file_view(paths, sources, false, false, ready));
+                let ready = self
+                    .source_kinds
+                    .iter()
+                    .all(|kind| *kind == Some(SourceKind::File));
+                self.file_view = Some(Self::create_file_view(
+                    paths,
+                    sources,
+                    false,
+                    false,
+                    ready,
+                    self.file_options(),
+                ));
                 self.message = "Choose a file on the other side to compare.".into();
             }
             SelectionMode::Folder => {
@@ -315,17 +429,24 @@ impl VersusApp {
         if let Some(job) = self.job.take() {
             job.cancellation.store(true, Ordering::Relaxed);
         }
-        let roots = self.paths.clone().map(|path| absolute_path(&path));
+        let roots = self.comparison_paths();
         let worker_roots = roots.clone();
         let cancellation = Arc::new(AtomicBool::new(false));
         let worker_cancellation = cancellation.clone();
         let (sender, receiver) = mpsc::channel();
+        let progress = Arc::new(ComparisonProgress::default());
+        let worker_progress = progress.clone();
+        let ignore_whitespace = self.ignore_whitespace;
+        let ignore_line_endings = self.ignore_line_endings;
         std::thread::spawn(move || {
             let result = versus::compare_directories(
                 &worker_roots[0],
                 &worker_roots[1],
                 &DirectoryCompareOptions {
                     cancellation: Some(worker_cancellation),
+                    ignore_whitespace,
+                    ignore_line_endings,
+                    progress: Some(worker_progress),
                     ..Default::default()
                 },
             )
@@ -337,6 +458,7 @@ impl VersusApp {
             cancellation,
             roots,
             started: Instant::now(),
+            progress,
         });
         self.error = None;
         self.message = "Scanning folders and comparing file contents…".into();
@@ -360,13 +482,66 @@ impl VersusApp {
                 return;
             }
             match result {
-                Ok(tree) => {
+                Ok(mut tree) => {
+                    let same_roots = self.roots.as_ref() == Some(&job.roots);
+                    if same_roots {
+                        let anchor = self.tree.as_ref().and_then(|previous| {
+                            previous
+                                .visible_rows()
+                                .into_iter()
+                                .filter(|row| {
+                                    !self.show_only_differences
+                                        || row.node.state != DirectoryEntryState::Same
+                                })
+                                .nth((self.tree_scroll_y / ROW_HEIGHT).floor() as usize)
+                                .map(|row| row.node.relative_path.clone())
+                        });
+                        if let Some(previous) = &self.tree {
+                            let expanded: Vec<_> = tree
+                                .all_rows()
+                                .into_iter()
+                                .filter(|row| previous.is_expanded(&row.node.relative_path))
+                                .map(|row| row.node.relative_path.clone())
+                                .collect();
+                            for path in expanded {
+                                tree.set_expanded(path, true);
+                            }
+                        }
+                        if self.selected.as_ref().is_some_and(|path| {
+                            !tree
+                                .all_rows()
+                                .iter()
+                                .any(|row| &row.node.relative_path == path)
+                        }) {
+                            self.selected = None;
+                        }
+                        if let Some(top) = anchor.and_then(|path| {
+                            tree.visible_rows()
+                                .into_iter()
+                                .filter(|row| {
+                                    !self.show_only_differences
+                                        || row.node.state != DirectoryEntryState::Same
+                                })
+                                .position(|row| row.node.relative_path == path)
+                        }) {
+                            self.tree_scroll_y =
+                                top as f32 * ROW_HEIGHT + self.tree_scroll_y % ROW_HEIGHT;
+                        }
+                    } else {
+                        self.selected = None;
+                        self.tree_scroll_y = 0.0;
+                        self.scroll_generation += 1;
+                    }
+                    self.folder_differences = tree
+                        .all_rows()
+                        .into_iter()
+                        .filter(|row| is_file_difference(row.node))
+                        .map(|row| row.node.relative_path.clone())
+                        .collect();
                     self.counts = count_entries(&tree);
                     self.tree = Some(tree);
                     self.roots = Some(job.roots);
                     self.elapsed = Some(job.started.elapsed());
-                    self.selected = None;
-                    self.scroll_generation += 1;
                     self.message = "Comparison complete.".into();
                 }
                 Err(error) => {
@@ -390,6 +565,7 @@ impl VersusApp {
             true,
             type_mismatch,
             true,
+            self.file_options(),
         ));
     }
 
@@ -399,14 +575,22 @@ impl VersusApp {
         from_folders: bool,
         type_mismatch: bool,
         ready: bool,
+        mut options: FileViewOptions,
     ) -> FileView {
         let cancellation = Arc::new(AtomicBool::new(false));
         let worker_cancellation = cancellation.clone();
         let worker_sources = sources.clone();
         let (sender, receiver) = mpsc::channel();
+        let progress = Arc::new(ComparisonProgress::default());
+        options.progress = Some(progress.clone());
+        let ignore_line_endings = options.ignore_line_endings;
         if ready && !type_mismatch {
             std::thread::spawn(move || {
-                let result = load_file_comparison(&worker_sources, &worker_cancellation);
+                let result = load_file_comparison_with_options(
+                    &worker_sources,
+                    &worker_cancellation,
+                    &options,
+                );
                 let _ = sender.send(result);
             });
         }
@@ -417,6 +601,9 @@ impl VersusApp {
             job: (ready && !type_mismatch).then_some(FileJob {
                 receiver,
                 cancellation,
+                started: Instant::now(),
+                progress,
+                ignore_line_endings,
             }),
             comparison: None,
             error: type_mismatch.then(|| "Entry types differ. Line comparison requires regular files; folders and symlink targets are not opened.".into()),
@@ -424,6 +611,11 @@ impl VersusApp {
             scroll_y: 0.0,
             content_widths: [0.0; 2],
             counts: [0; 6],
+            visible_rows: Vec::new(),
+            difference_rows: Vec::new(),
+            navigation_row: None,
+            navigation_scroll_pending: false,
+            ignore_line_endings,
         }
     }
 
@@ -440,9 +632,25 @@ impl VersusApp {
             Err(TryRecvError::Empty) => None,
         };
         if let Some(result) = result {
-            view.job = None;
+            let job = view.job.take().unwrap();
+            if job.cancellation.load(Ordering::Relaxed) {
+                view.error = Some("File comparison cancelled.".into());
+                return;
+            }
             match result {
                 Ok(Some(comparison)) => {
+                    // Ignore rules can change row alignment. Restore the viewport
+                    // and navigation by source line number, rather than row index.
+                    let anchor = file_line_anchor(
+                        view,
+                        view.visible_rows
+                            .get((view.scroll_y / ROW_HEIGHT).floor() as usize)
+                            .copied(),
+                    );
+                    let navigation = file_line_anchor(view, view.navigation_row);
+                    let fraction = view.scroll_y % ROW_HEIGHT;
+                    view.counts = [0; 6];
+                    view.content_widths = [0.0; 2];
                     for row in &comparison.rows {
                         view.counts[state_index(&row.state)] += 1;
                         for (side, line) in [&row.left, &row.right].into_iter().enumerate() {
@@ -455,12 +663,324 @@ impl VersusApp {
                         }
                     }
                     view.comparison = Some(comparison);
+                    view.ignore_line_endings = job.ignore_line_endings;
+                    view.error = None;
+                    update_visible_file_rows(view, self.show_only_differences);
+                    let comparison = view.comparison.as_ref().unwrap();
+                    if let Some(row) = find_file_line(comparison, anchor) {
+                        let top = view
+                            .visible_rows
+                            .iter()
+                            .position(|index| *index >= row)
+                            .unwrap_or_else(|| view.visible_rows.len().saturating_sub(1));
+                        view.scroll_y = if view.visible_rows.is_empty() {
+                            0.0
+                        } else {
+                            top as f32 * ROW_HEIGHT + fraction
+                        };
+                    }
+                    view.navigation_row = find_file_line(comparison, navigation)
+                        .filter(|index| view.difference_rows.contains(index));
+                    view.navigation_scroll_pending = true;
                 }
                 Ok(None) => view.error = Some("File comparison cancelled.".into()),
                 Err(error) => view.error = Some(error),
             }
         } else {
             ctx.request_repaint_after(Duration::from_millis(60));
+        }
+    }
+
+    fn file_options(&self) -> FileViewOptions {
+        FileViewOptions {
+            ignore_whitespace: self.ignore_whitespace,
+            ignore_line_endings: self.ignore_line_endings,
+            progress: None,
+        }
+    }
+
+    fn recompare(&mut self) {
+        if self.source_jobs.iter().any(Option::is_some) {
+            return; // Pending source classification will use the latest options.
+        }
+        if self
+            .source_kinds
+            .iter()
+            .all(|kind| *kind == Some(SourceKind::Folder))
+        {
+            self.start_comparison();
+        }
+        let options = self.file_options();
+        if let Some(view) = &mut self.file_view {
+            let ready = view.from_folders
+                || self
+                    .source_kinds
+                    .iter()
+                    .all(|kind| *kind == Some(SourceKind::File));
+            let mut refreshed = Self::create_file_view(
+                view.paths.clone(),
+                view.sources.clone(),
+                view.from_folders,
+                matches!(view.error_icon, StatusIcon::TypeMismatch),
+                ready,
+                options,
+            );
+            if let Some(job) = view.job.take() {
+                job.cancellation.store(true, Ordering::Relaxed);
+            }
+            view.job = refreshed.job.take();
+            if !matches!(view.error_icon, StatusIcon::TypeMismatch) {
+                view.error = None;
+            }
+        }
+    }
+
+    fn jump_difference(&mut self, forward: bool) {
+        if let Some(view) = &mut self.file_view {
+            let top = (view.scroll_y / ROW_HEIGHT).floor() as usize;
+            let anchor = view
+                .navigation_row
+                .or_else(|| view.visible_rows.get(top).copied());
+            let target = if forward {
+                view.difference_rows.iter().copied().find(|row| {
+                    anchor.is_none_or(|anchor| {
+                        if view.navigation_row.is_some() {
+                            *row > anchor
+                        } else {
+                            *row >= anchor
+                        }
+                    })
+                })
+            } else {
+                view.difference_rows
+                    .iter()
+                    .rev()
+                    .copied()
+                    .find(|row| anchor.is_some_and(|anchor| *row < anchor))
+            };
+            if let Some(target) = target {
+                if let Some(index) = view.visible_rows.iter().position(|row| *row == target) {
+                    view.scroll_y = index as f32 * ROW_HEIGHT;
+                    view.navigation_row = Some(target);
+                    view.navigation_scroll_pending = true;
+                }
+            }
+            return;
+        }
+        let Some(tree) = &mut self.tree else { return };
+        let all = tree.all_rows();
+        let anchor = self
+            .selected
+            .as_ref()
+            .and_then(|path| all.iter().position(|row| &row.node.relative_path == path))
+            .or_else(|| {
+                let visible: Vec<_> = tree
+                    .visible_rows()
+                    .into_iter()
+                    .filter(|row| {
+                        !self.show_only_differences || row.node.state != DirectoryEntryState::Same
+                    })
+                    .collect();
+                let top = (self.tree_scroll_y / ROW_HEIGHT).floor() as usize;
+                visible.get(top).and_then(|row| {
+                    all.iter()
+                        .position(|item| item.node.relative_path == row.node.relative_path)
+                })
+            });
+        let selected = self.selected.is_some();
+        let target = if forward {
+            all.iter().enumerate().find(|(index, row)| {
+                is_file_difference(row.node)
+                    && anchor.is_none_or(|anchor| {
+                        if selected {
+                            *index > anchor
+                        } else {
+                            *index >= anchor
+                        }
+                    })
+            })
+        } else {
+            all.iter().enumerate().rev().find(|(index, row)| {
+                is_file_difference(row.node) && anchor.is_some_and(|anchor| *index < anchor)
+            })
+        }
+        .map(|(_, row)| row.node.relative_path.clone());
+        if let Some(path) = target {
+            tree.expand_parents(&path);
+            let visible: Vec<_> = tree
+                .visible_rows()
+                .into_iter()
+                .filter(|row| {
+                    !self.show_only_differences || row.node.state != DirectoryEntryState::Same
+                })
+                .collect();
+            if let Some(index) = visible
+                .iter()
+                .position(|row| row.node.relative_path == path)
+            {
+                self.tree_scroll_y = index as f32 * ROW_HEIGHT;
+            }
+            self.selected = Some(path);
+        }
+    }
+
+    fn progress_indicator(&self, ui: &mut egui::Ui) {
+        if let Some(message) = &self.drop_message {
+            ui.label(
+                RichText::new(message)
+                    .size(11.0)
+                    .color(Palette::for_context(ui.ctx()).error),
+            );
+            return;
+        }
+        let file_job = self.file_view.as_ref().and_then(|view| view.job.as_ref());
+        let job = file_job
+            .map(|job| (&job.progress, job.started))
+            .or_else(|| self.job.as_ref().map(|job| (&job.progress, job.started)));
+        if let Some((progress, started)) = job {
+            let snapshot = progress.snapshot();
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(
+                    RichText::new(progress_text(snapshot, started, Instant::now())).size(11.0),
+                );
+                if let Some(total) = snapshot.total.filter(|total| *total > 0) {
+                    ui.add(
+                        egui::ProgressBar::new(snapshot.completed as f32 / total as f32)
+                            .desired_width(90.0),
+                    );
+                }
+                if let Some(job) = file_job {
+                    if icon_button(
+                        ui,
+                        ToolbarIcon::Cancel,
+                        !job.cancellation.load(Ordering::Relaxed),
+                        "Cancel file comparison",
+                    )
+                    .clicked()
+                    {
+                        job.cancellation.store(true, Ordering::Relaxed);
+                    }
+                }
+            });
+            ui.ctx().request_repaint_after(Duration::from_millis(60));
+        } else if self.source_jobs.iter().any(Option::is_some) {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Opening selected sources…");
+            });
+            ui.ctx().request_repaint_after(Duration::from_millis(60));
+        } else if let Some(view) = &self.file_view {
+            if view.comparison.is_some() {
+                if let Some(error) = &view.error {
+                    ui.colored_label(Palette::for_context(ui.ctx()).error, error);
+                }
+            }
+        }
+    }
+
+    fn drag_and_drop(&mut self, ui: &mut egui::Ui) {
+        let (hovering, frame_position, retained_position) = ui.input(|input| {
+            (
+                !input.raw.hovered_files.is_empty(),
+                // A position delivered with Drop is more precise than a later
+                // live-cursor sample taken when the UI redraws.
+                input.raw.events.iter().rev().find_map(|event| match event {
+                    egui::Event::PointerMoved(position) => Some(*position),
+                    _ => None,
+                }),
+                // Native drags can report PointerGone after the drag position
+                // in the same frame. Keep that position for hit testing the drop.
+                input.pointer.interact_pos(),
+            )
+        });
+        let position = frame_position
+            .or(self.native_drag_position.take())
+            .or(retained_position);
+        let dropped = ui
+            .ctx()
+            .input_mut(|input| std::mem::take(&mut input.raw.dropped_files));
+        let side =
+            position.and_then(|pos| self.pane_rects.iter().position(|rect| rect.contains(pos)));
+        if hovering {
+            // OLE drags can suppress ordinary mouse motion. Keep polling the
+            // native cursor so the highlight follows it even without events.
+            if cfg!(windows) {
+                ui.ctx().request_repaint_after(Duration::from_millis(33));
+            }
+            if position.is_some() {
+                self.drop_hover_side = side;
+            }
+            if let Some(side) = side.or(self.drop_hover_side) {
+                let rect = self.pane_rects[side].shrink(3.0);
+                let palette = Palette::for_context(ui.ctx());
+                // Draw above the empty-state text and rows. Native
+                // drops are hit-tested by geometry, not intercepted by widgets.
+                let painter = ui.ctx().layer_painter(egui::LayerId::new(
+                    egui::Order::Foreground,
+                    egui::Id::new("native-drop-highlight"),
+                ));
+                painter.rect_filled(rect, 4, palette.accent.gamma_multiply(0.1));
+                painter.rect_stroke(
+                    rect,
+                    4,
+                    Stroke::new(3.0, palette.accent),
+                    egui::StrokeKind::Inside,
+                );
+                let label = painter.layout_no_wrap(
+                    format!(
+                        "Drop a file or folder on {}",
+                        if side == 0 { "LEFT" } else { "RIGHT" }
+                    ),
+                    FontId::proportional(16.0),
+                    palette.text,
+                );
+                let label_rect = Rect::from_center_size(
+                    egui::pos2(rect.center().x, rect.top() + 64.0),
+                    label.size() + egui::vec2(24.0, 16.0),
+                );
+                painter.rect_filled(label_rect, 4, palette.panel);
+                painter.galley(
+                    label_rect.center() - label.size() * 0.5,
+                    label,
+                    palette.text,
+                );
+            }
+        }
+        if !dropped.is_empty() {
+            let target = if position.is_some() {
+                side
+            } else {
+                self.drop_hover_side
+            };
+            if dropped.len() == 1 && !dropped[0].path().as_os_str().is_empty() && target.is_some() {
+                let side = target.unwrap();
+                let path = dropped[0].path().to_path_buf();
+                // A drop in a drilled-down file view retains the other displayed
+                // file, rather than accidentally pairing it with the folder root.
+                if let Some(view) = self.file_view.as_ref().filter(|view| view.from_folders) {
+                    let peer = view.sources[1 - side].clone();
+                    self.new_comparison();
+                    if let Some(peer) = peer {
+                        self.select_path(1 - side, peer);
+                    }
+                }
+                self.select_path(side, path);
+                self.launch_mode = Some(None);
+            } else {
+                self.drop_message = Some(if dropped.len() != 1 {
+                    "Drop one file or folder at a time.".into()
+                } else if dropped[0].path().as_os_str().is_empty() {
+                    "This drag did not include a file or folder path. Use Browse to select it."
+                        .into()
+                } else {
+                    "Drop into the large LEFT or RIGHT view below the path bars.".into()
+                });
+            }
+            ui.ctx().request_repaint();
+        }
+        if !hovering {
+            self.drop_hover_side = None;
         }
     }
 
@@ -495,7 +1015,15 @@ impl VersusApp {
                 ui.add_space(5.0);
                 self.legend(ui);
                 ui.add_space(5.0);
+                // Keep the pane geometry and widget identities stable while
+                // background work starts and finishes.
+                let (status_rect, _) =
+                    ui.allocate_exact_size(egui::vec2(ui.available_width(), 24.0), Sense::hover());
+                let mut status_ui = ui.new_child(egui::UiBuilder::new().max_rect(status_rect));
+                status_ui.set_clip_rect(ui.clip_rect().intersect(status_rect));
+                self.progress_indicator(&mut status_ui);
                 if self.file_view.is_some() {
+                    self.pane_rects = split_rect(ui.available_rect_before_wrap());
                     self.file_area(ui);
                     return;
                 }
@@ -526,6 +1054,7 @@ impl VersusApp {
                         (footer_rect.top() - 5.0).max(available.top()),
                     ),
                 );
+                self.pane_rects = split_rect(tree_rect);
                 ui.scope_builder(egui::UiBuilder::new().max_rect(tree_rect), |ui| {
                     ui.set_clip_rect(ui.clip_rect().intersect(tree_rect));
                     self.tree_area(ui, (tree_rect.height() - 2.0).max(0.0));
@@ -535,6 +1064,7 @@ impl VersusApp {
                     self.footer(ui);
                 });
             });
+        self.drag_and_drop(ui);
     }
 
     fn header(&mut self, ui: &mut egui::Ui) {
@@ -792,11 +1322,13 @@ impl VersusApp {
             self.tree.as_ref().map(|_| self.counts)
         };
         ui.horizontal(|ui| {
-            let legend_width = (ui.available_width() - 32.0).max(0.0);
+            let control_width = 5.0 * (24.0 + ui.spacing().item_spacing.x);
+            let legend_width = (ui.available_width() - control_width).max(0.0);
             ui.allocate_ui_with_layout(
                 egui::vec2(legend_width, 24.0),
                 egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
+                    ui.set_min_width(legend_width);
                     ui.horizontal_wrapped(|ui| {
                         if back
                             && icon_button(ui, ToolbarIcon::Back, true, "Back to folders").clicked()
@@ -823,12 +1355,70 @@ impl VersusApp {
                             ui.label(RichText::new(label).size(10.0).color(icon.color(palette)));
                             ui.add_space(5.0);
                         }
+                        if icon_button(ui, ToolbarIcon::New, true, "New comparison").clicked() {
+                            self.new_comparison();
+                            ui.ctx().request_repaint();
+                        }
                     });
                 },
             );
-            if icon_button(ui, ToolbarIcon::New, true, "New comparison").clicked() {
-                self.new_comparison();
+            if icon_button_state(
+                ui,
+                ToolbarIcon::Differences,
+                true,
+                self.show_only_differences,
+                "Show only differences",
+            )
+            .clicked()
+            {
+                self.show_only_differences = !self.show_only_differences;
+                if let Some(view) = &mut self.file_view {
+                    update_visible_file_rows(view, self.show_only_differences);
+                }
+                self.tree_scroll_y = 0.0;
                 ui.ctx().request_repaint();
+            }
+            let mut changed = false;
+            if icon_button_state(
+                ui,
+                ToolbarIcon::Whitespace,
+                true,
+                self.ignore_whitespace,
+                "Ignore whitespace",
+            )
+            .clicked()
+            {
+                self.ignore_whitespace = !self.ignore_whitespace;
+                changed = true;
+            }
+            if icon_button_state(
+                ui,
+                ToolbarIcon::LineEndings,
+                true,
+                self.ignore_line_endings,
+                "Ignore line endings",
+            )
+            .clicked()
+            {
+                self.ignore_line_endings = !self.ignore_line_endings;
+                changed = true;
+            }
+            if changed {
+                self.recompare();
+                ui.ctx().request_repaint();
+            }
+            let has_differences = self.file_view.as_ref().map_or_else(
+                || !self.folder_differences.is_empty(),
+                |view| !view.difference_rows.is_empty(),
+            );
+            for (icon, forward, label) in [
+                (ToolbarIcon::Previous, false, "Previous difference"),
+                (ToolbarIcon::Next, true, "Next difference"),
+            ] {
+                if icon_button(ui, icon, has_differences, label).clicked() {
+                    self.jump_difference(forward);
+                    ui.ctx().request_repaint();
+                }
             }
         });
     }
@@ -891,7 +1481,9 @@ impl VersusApp {
                         }
                     });
                 }
-                if let Some(error) = &view.error {
+                if let Some(error) = &view.error
+                    && view.comparison.is_none()
+                {
                     ui.horizontal(|ui| {
                         let (rect, _) =
                             ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::hover());
@@ -920,6 +1512,13 @@ impl VersusApp {
                     }
                     return;
                 }
+                if view.visible_rows.is_empty() {
+                    ui.label(
+                        RichText::new("No differences with the current options.")
+                            .color(palette.muted),
+                    );
+                    return;
+                }
                 let height = (ui.available_height() - 2.0).max(0.0);
                 let previous_y = view.scroll_y;
                 let mut next_y = previous_y;
@@ -946,7 +1545,7 @@ impl VersusApp {
                             .show_viewport(column, |ui, _| {
                                 ui.set_min_size(egui::vec2(
                                     ui.available_width().max(view.content_widths[side]),
-                                    ROW_HEIGHT * comparison.rows.len() as f32,
+                                    ROW_HEIGHT * view.visible_rows.len() as f32,
                                 ));
                             });
                         next_y = output.state.offset.y;
@@ -959,8 +1558,9 @@ impl VersusApp {
                     let painter = ui.painter().with_clip_rect(viewport);
                     let first = (next_y / ROW_HEIGHT).floor() as usize;
                     let last = ((next_y + viewport.height()) / ROW_HEIGHT).ceil() as usize;
-                    for index in first..last.min(comparison.rows.len()) {
-                        let row = &comparison.rows[index];
+                    for index in first..last.min(view.visible_rows.len()) {
+                        let original_index = view.visible_rows[index];
+                        let row = &comparison.rows[original_index];
                         let line = if side == 0 { &row.left } else { &row.right };
                         let rect = Rect::from_min_size(
                             egui::pos2(
@@ -969,13 +1569,39 @@ impl VersusApp {
                             ),
                             egui::vec2(viewport.width().max(view.content_widths[side]), ROW_HEIGHT),
                         );
-                        paint_file_line(&painter, rect, line.as_ref(), &row.state, index % 2 == 1);
+                        let changed = if side == 0 {
+                            &row.left_changed
+                        } else {
+                            &row.right_changed
+                        };
+                        let ending = if side == 0 {
+                            row.left_ending
+                        } else {
+                            row.right_ending
+                        };
+                        let ending_diff =
+                            !view.ignore_line_endings && row.left_ending != row.right_ending;
+                        paint_file_line(
+                            &painter,
+                            rect,
+                            line.as_ref(),
+                            &row.state,
+                            index % 2 == 1,
+                            changed,
+                            ending_diff.then_some(ending).flatten(),
+                            view.navigation_row == Some(original_index),
+                        );
                     }
                 }
                 if (next_y - previous_y).abs() > 0.1 {
                     view.scroll_y = next_y;
+                    // Scrolling by hand starts navigation from the new viewport.
+                    if !view.navigation_scroll_pending {
+                        view.navigation_row = None;
+                    }
                     ui.ctx().request_repaint();
                 }
+                view.navigation_scroll_pending = false;
             });
     }
 
@@ -1001,22 +1627,43 @@ impl VersusApp {
                 );
                 let body_height = (height - header_height - 2.0).max(60.0);
                 if let Some(tree) = &mut self.tree {
-                    let rows = tree.visible_rows();
+                    let rows: Vec<_> = tree
+                        .visible_rows()
+                        .into_iter()
+                        .filter(|row| {
+                            !self.show_only_differences
+                                || row.node.state != DirectoryEntryState::Same
+                        })
+                        .collect();
                     if rows.is_empty() {
                         empty_display(
                             ui,
                             body_height,
-                            "Both folders are empty",
-                            "There are no files or folders to compare.",
+                            if self.show_only_differences {
+                                "No differences"
+                            } else {
+                                "Both folders are empty"
+                            },
+                            if self.show_only_differences {
+                                "No files or folders differ with the current options."
+                            } else {
+                                "There are no files or folders to compare."
+                            },
                         );
                         return;
                     }
                     let mut toggle = None;
                     let mut selected = None;
-                    egui::ScrollArea::vertical()
+                    // show_rows paints before ScrollArea clamps its offset. Clamp
+                    // first so a jump near the end is correct on its first frame.
+                    self.tree_scroll_y = self
+                        .tree_scroll_y
+                        .clamp(0.0, (rows.len() as f32 * ROW_HEIGHT - body_height).max(0.0));
+                    let output = egui::ScrollArea::vertical()
                         .id_salt(("linked-trees", self.scroll_generation))
                         .auto_shrink([false, false])
                         .max_height(body_height)
+                        .vertical_scroll_offset(self.tree_scroll_y)
                         .show_rows(ui, ROW_HEIGHT, rows.len(), |ui, range| {
                             for index in range {
                                 let row = &rows[index];
@@ -1128,6 +1775,7 @@ impl VersusApp {
                                 );
                             }
                         });
+                    self.tree_scroll_y = output.state.offset.y;
                     if let Some(path) = toggle {
                         tree.toggle_expanded(path);
                     }
@@ -1209,13 +1857,32 @@ impl eframe::App for VersusApp {
         self.poll_comparison(ctx);
         self.poll_file_comparison(ctx);
     }
-    fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        #[cfg(windows)]
+        if ui.input(|input| {
+            !input.raw.hovered_files.is_empty() || !input.raw.dropped_files.is_empty()
+        }) {
+            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            self.native_drag_position = _frame.window_handle().ok().and_then(|handle| {
+                if let RawWindowHandle::Win32(handle) = handle.as_raw() {
+                    crate::native_drop::cursor_position(
+                        handle.hwnd.get(),
+                        ui.ctx().pixels_per_point(),
+                    )
+                } else {
+                    None
+                }
+            });
+        }
         self.render(ui);
     }
 }
 
 fn absolute_path(path: &str) -> PathBuf {
-    let path = PathBuf::from(path);
+    absolute_native_path(PathBuf::from(path))
+}
+
+fn absolute_native_path(path: PathBuf) -> PathBuf {
     if path.is_absolute() {
         path
     } else {
@@ -1223,6 +1890,15 @@ fn absolute_path(path: &str) -> PathBuf {
             .map(|cwd| cwd.join(&path))
             .unwrap_or(path)
     }
+}
+
+fn empty_diff_side(path: &std::path::Path) -> bool {
+    path.as_os_str() == "/dev/null"
+        || (cfg!(windows)
+            && path
+                .as_os_str()
+                .to_str()
+                .is_some_and(|name| name.eq_ignore_ascii_case("NUL")))
 }
 
 fn comparison_mode_button(
@@ -1359,6 +2035,9 @@ fn paint_file_line(
     line: Option<&(usize, String)>,
     state: &DirectoryEntryState,
     alternate: bool,
+    changed: &[std::ops::Range<usize>],
+    ending: Option<versus::DisplayLineEnding>,
+    selected: bool,
 ) {
     let palette = Palette::for_context(painter.ctx());
     let painter = painter.with_clip_rect(rect);
@@ -1372,6 +2051,9 @@ fn paint_file_line(
             palette.panel
         },
     );
+    if selected {
+        painter.rect_filled(rect, 0, palette.accent.gamma_multiply(0.13));
+    }
     if *state != DirectoryEntryState::Same {
         painter.rect_filled(
             Rect::from_min_size(rect.min, egui::vec2(3.0, rect.height())),
@@ -1399,13 +2081,152 @@ fn paint_file_line(
     if let Some(icon) = status_icon(state) {
         paint_status_icon(&painter, rect.left_center() + egui::vec2(54.0, 0.0), icon);
     }
-    painter.text(
-        rect.left_center() + egui::vec2(68.0, 0.0),
-        Align2::LEFT_CENTER,
-        text.replace('\t', "    "),
-        FontId::monospace(11.0),
-        color,
+    let mut job = egui::text::LayoutJob::default();
+    let mut start = 0;
+    for range in changed {
+        if range.start < start
+            || range.end > text.len()
+            || !text.is_char_boundary(range.start)
+            || !text.is_char_boundary(range.end)
+        {
+            continue;
+        }
+        append_file_text(
+            &mut job,
+            &text[start..range.start],
+            color,
+            Color32::TRANSPARENT,
+        );
+        append_file_text(
+            &mut job,
+            &text[range.clone()],
+            palette.text,
+            color.gamma_multiply(0.3),
+        );
+        start = range.end;
+    }
+    append_file_text(&mut job, &text[start..], color, Color32::TRANSPARENT);
+    let galley = painter.layout_job(job);
+    let position = egui::pos2(rect.left() + 68.0, rect.center().y - galley.size().y / 2.0);
+    let end_x = position.x + galley.size().x;
+    painter.galley(position, galley, color);
+    if let Some(ending) = ending {
+        let badge = Rect::from_min_size(
+            egui::pos2(end_x + 8.0, rect.top() + 3.0),
+            egui::vec2(58.0, 16.0),
+        );
+        painter.rect_filled(badge, 2, color.gamma_multiply(0.3));
+        painter.text(
+            badge.center(),
+            Align2::CENTER_CENTER,
+            ending.label(),
+            FontId::monospace(9.0),
+            palette.text,
+        );
+    }
+}
+
+fn append_file_text(
+    job: &mut egui::text::LayoutJob,
+    text: &str,
+    color: Color32,
+    background: Color32,
+) {
+    job.append(
+        &text.replace('\t', "    "),
+        0.0,
+        egui::TextFormat {
+            font_id: FontId::monospace(11.0),
+            color,
+            background,
+            ..Default::default()
+        },
     );
+}
+
+fn file_line_anchor(view: &FileView, index: Option<usize>) -> [Option<usize>; 2] {
+    index
+        .and_then(|index| view.comparison.as_ref()?.rows.get(index))
+        .map(|row| {
+            [
+                row.left.as_ref().map(|line| line.0),
+                row.right.as_ref().map(|line| line.0),
+            ]
+        })
+        .unwrap_or([None; 2])
+}
+
+fn find_file_line(comparison: &FileComparison, anchor: [Option<usize>; 2]) -> Option<usize> {
+    let side = if anchor[0].is_some() { 0 } else { 1 };
+    let number = anchor[side]?;
+    comparison.rows.iter().position(|row| {
+        let line = if side == 0 { &row.left } else { &row.right };
+        line.as_ref().is_some_and(|line| line.0 == number)
+    })
+}
+
+fn update_visible_file_rows(view: &mut FileView, differences_only: bool) {
+    let anchor = view
+        .visible_rows
+        .get((view.scroll_y / ROW_HEIGHT).floor() as usize)
+        .copied();
+    let Some(comparison) = &view.comparison else {
+        return;
+    };
+    view.difference_rows = comparison
+        .rows
+        .iter()
+        .enumerate()
+        .filter_map(|(index, row)| (row.state != DirectoryEntryState::Same).then_some(index))
+        .collect();
+    view.visible_rows = if differences_only {
+        view.difference_rows.clone()
+    } else {
+        (0..comparison.rows.len()).collect()
+    };
+    let top = anchor
+        .and_then(|anchor| view.visible_rows.iter().position(|index| *index >= anchor))
+        .unwrap_or(0);
+    view.scroll_y = top as f32 * ROW_HEIGHT;
+}
+
+fn progress_text(snapshot: versus::ProgressSnapshot, started: Instant, now: Instant) -> String {
+    let stage = match snapshot.stage {
+        ProgressStage::Scanning => "Scanning folders",
+        ProgressStage::Reading => "Reading files",
+        ProgressStage::ComparingFiles => "Comparing files",
+        ProgressStage::ComparingLines => "Comparing lines",
+        ProgressStage::Highlighting => "Highlighting differences",
+        ProgressStage::Finished => "Preparing comparison",
+    };
+    let work = match (snapshot.stage, snapshot.total) {
+        (ProgressStage::Reading, Some(total)) => format!(
+            " · {} / {}",
+            format_size(Some(snapshot.completed)),
+            format_size(Some(total))
+        ),
+        (ProgressStage::Scanning, _) => format!(" · {} entries found", snapshot.completed),
+        (_, Some(total)) if total > 0 => format!(" · {} / {}", snapshot.completed, total),
+        _ => String::new(),
+    };
+    let eta = snapshot
+        .remaining_at(now)
+        .map_or_else(String::new, |remaining| {
+            format!(
+                " · ~{}s left in this stage",
+                remaining.as_secs_f64().ceil().max(1.0) as u64
+            )
+        });
+    format!(
+        "{stage}…{work} · {:.1}s elapsed{eta}",
+        now.saturating_duration_since(started).as_secs_f64()
+    )
+}
+
+fn is_file_difference(node: &TreeNode) -> bool {
+    node.state != DirectoryEntryState::Same
+        && (node.left.kind == Some(DirectoryEntryKind::File)
+            || node.right.kind == Some(DirectoryEntryKind::File))
 }
 
 fn count_entries(tree: &FolderTree) -> [usize; 6] {
@@ -1532,18 +2353,34 @@ enum ToolbarIcon {
     Cancel,
     Sun,
     Moon,
+    Differences,
+    Whitespace,
+    LineEndings,
+    Previous,
+    Next,
 }
 
 fn icon_button(ui: &mut egui::Ui, icon: ToolbarIcon, enabled: bool, label: &str) -> egui::Response {
+    icon_button_state(ui, icon, enabled, false, label)
+}
+
+fn icon_button_state(
+    ui: &mut egui::Ui,
+    icon: ToolbarIcon,
+    enabled: bool,
+    selected: bool,
+    label: &str,
+) -> egui::Response {
     let palette = Palette::for_context(ui.ctx());
     ui.add_enabled_ui(enabled, |ui| {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), Sense::hover());
         let response = ui.interact(rect, egui::Id::new(label), Sense::click());
-        response
-            .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
+        response.widget_info(|| {
+            egui::WidgetInfo::selected(egui::WidgetType::Button, enabled, selected, label)
+        });
         let color = if !enabled {
             palette.muted.gamma_multiply(0.4)
-        } else if response.hovered() || response.has_focus() {
+        } else if selected || response.hovered() || response.has_focus() {
             palette.accent
         } else {
             palette.text
@@ -1551,10 +2388,69 @@ fn icon_button(ui: &mut egui::Ui, icon: ToolbarIcon, enabled: bool, label: &str)
         if response.hovered() || response.has_focus() {
             ui.painter().rect_filled(rect, 3, palette.border);
         }
+        if selected {
+            ui.painter()
+                .rect_filled(rect, 3, palette.accent.gamma_multiply(0.15));
+            ui.painter().rect_stroke(
+                rect,
+                3,
+                Stroke::new(1.0, palette.accent),
+                egui::StrokeKind::Inside,
+            );
+        }
         let center = rect.center();
         let point = |x, y| center + egui::vec2(x, y);
         let stroke = Stroke::new(1.4, color);
         match icon {
+            ToolbarIcon::Differences => {
+                for y in [-4.0, 4.0] {
+                    ui.painter()
+                        .line_segment([point(-6.0, y), point(6.0, y)], stroke);
+                }
+                ui.painter()
+                    .line_segment([point(3.0, -8.0), point(-3.0, 8.0)], stroke);
+            }
+            ToolbarIcon::Whitespace => {
+                ui.painter().line(
+                    vec![
+                        point(-7.0, -2.0),
+                        point(-7.0, 5.0),
+                        point(7.0, 5.0),
+                        point(7.0, -2.0),
+                    ],
+                    stroke,
+                );
+                ui.painter().circle_filled(point(0.0, -3.0), 1.3, color);
+            }
+            ToolbarIcon::LineEndings => {
+                ui.painter().line(
+                    vec![point(6.0, -6.0), point(6.0, 3.0), point(-6.0, 3.0)],
+                    stroke,
+                );
+                ui.painter().line(
+                    vec![point(-1.0, -2.0), point(-6.0, 3.0), point(-1.0, 8.0)],
+                    stroke,
+                );
+            }
+            ToolbarIcon::Previous | ToolbarIcon::Next => {
+                let direction = if matches!(icon, ToolbarIcon::Next) {
+                    1.0
+                } else {
+                    -1.0
+                };
+                ui.painter().line_segment(
+                    [point(0.0, -7.0 * direction), point(0.0, 7.0 * direction)],
+                    stroke,
+                );
+                ui.painter().line(
+                    vec![
+                        point(-5.0, 2.0 * direction),
+                        point(0.0, 7.0 * direction),
+                        point(5.0, 2.0 * direction),
+                    ],
+                    stroke,
+                );
+            }
             ToolbarIcon::New => {
                 ui.painter().line_segment(
                     [center - egui::vec2(6.0, 0.0), center + egui::vec2(6.0, 0.0)],
@@ -1899,8 +2795,17 @@ mod tests {
         })
     }
 
-    fn loaded_app() -> VersusApp {
+    // Interaction fixtures exercise the full list and whitespace toggle in a
+    // known starting state; production defaults are covered separately below.
+    fn unfiltered_app() -> VersusApp {
         let mut app = VersusApp::default();
+        app.show_only_differences = false;
+        app.ignore_whitespace = false;
+        app
+    }
+
+    fn loaded_app() -> VersusApp {
+        let mut app = unfiltered_app();
         app.tree = Some(fixture());
         app.roots = Some(["left".into(), "right".into()]);
         app
@@ -2072,6 +2977,21 @@ mod tests {
                 .iter()
                 .all(|rect| rect.right() <= 890.0 && rect.left() > 700.0 && rect.bottom() <= 45.0)
         );
+        for label in [
+            "Show only differences",
+            "Ignore whitespace",
+            "Ignore line endings",
+            "Previous difference",
+            "Next difference",
+            "New comparison",
+        ] {
+            let rect = ctx.read_response(egui::Id::new(label)).unwrap().rect;
+            assert!(
+                rect.left() >= 0.0 && rect.right() <= 890.0,
+                "{label}: {rect:?}"
+            );
+            assert!(rect.top() >= 45.0 && rect.bottom() < app.pane_rects[0].top());
+        }
         for text in ["Choose a folder on each side to begin."] {
             let positions = text_positions(&output, text);
             assert!(!positions.is_empty(), "Missing {text}");
@@ -2403,6 +3323,22 @@ mod tests {
         assert_eq!(format_size(None), "—");
     }
 
+    fn test_file_row(
+        left: Option<(usize, String)>,
+        right: Option<(usize, String)>,
+        state: DirectoryEntryState,
+    ) -> versus::FileComparisonRow {
+        versus::FileComparisonRow {
+            left_ending: left.as_ref().map(|_| versus::DisplayLineEnding::Lf),
+            right_ending: right.as_ref().map(|_| versus::DisplayLineEnding::Lf),
+            left_changed: Vec::new(),
+            right_changed: Vec::new(),
+            left,
+            right,
+            state,
+        }
+    }
+
     fn loaded_file_view() -> FileView {
         FileView {
             from_folders: true,
@@ -2414,21 +3350,21 @@ mod tests {
             job: None,
             comparison: Some(FileComparison {
                 rows: vec![
-                    versus::FileComparisonRow {
-                        left: Some((1, "unchanged".into())),
-                        right: Some((1, "unchanged".into())),
-                        state: DirectoryEntryState::Same,
-                    },
-                    versus::FileComparisonRow {
-                        left: Some((2, "old value".into())),
-                        right: Some((2, "new value".into())),
-                        state: DirectoryEntryState::Different,
-                    },
-                    versus::FileComparisonRow {
-                        left: Some((3, "removed".into())),
-                        right: None,
-                        state: DirectoryEntryState::LeftOnly,
-                    },
+                    test_file_row(
+                        Some((1, "unchanged".into())),
+                        Some((1, "unchanged".into())),
+                        DirectoryEntryState::Same,
+                    ),
+                    test_file_row(
+                        Some((2, "old value".into())),
+                        Some((2, "new value".into())),
+                        DirectoryEntryState::Different,
+                    ),
+                    test_file_row(
+                        Some((3, "removed".into())),
+                        None,
+                        DirectoryEntryState::LeftOnly,
+                    ),
                 ],
                 message: None,
             }),
@@ -2437,6 +3373,11 @@ mod tests {
             scroll_y: 0.0,
             content_widths: [300.0; 2],
             counts: [1, 1, 1, 0, 0, 0],
+            visible_rows: vec![0, 1, 2],
+            difference_rows: vec![1, 2],
+            navigation_row: None,
+            navigation_scroll_pending: false,
+            ignore_line_endings: true,
         }
     }
 
@@ -2618,12 +3559,15 @@ mod tests {
             let mut app = loaded_app();
             let mut view = loaded_file_view();
             view.comparison.as_mut().unwrap().rows = (1..=200)
-                .map(|number| versus::FileComparisonRow {
-                    left: Some((number, format!("line {number}"))),
-                    right: Some((number, format!("line {number}"))),
-                    state: DirectoryEntryState::Same,
+                .map(|number| {
+                    test_file_row(
+                        Some((number, format!("line {number}"))),
+                        Some((number, format!("line {number}"))),
+                        DirectoryEntryState::Same,
+                    )
                 })
                 .collect();
+            update_visible_file_rows(&mut view, false);
             app.file_view = Some(view);
             render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
             let pointer = egui::pos2(if side == 0 { 300.0 } else { 900.0 }, 300.0);
@@ -2811,6 +3755,9 @@ mod tests {
         view.job = Some(FileJob {
             receiver,
             cancellation: Arc::new(AtomicBool::new(false)),
+            started: Instant::now(),
+            progress: Arc::new(ComparisonProgress::default()),
+            ignore_line_endings: true,
         });
         app.file_view = Some(view);
         sender
@@ -2846,6 +3793,7 @@ mod tests {
             cancellation: Arc::new(AtomicBool::new(false)),
             roots: ["new-left".into(), "new-right".into()],
             started: Instant::now(),
+            progress: Arc::new(ComparisonProgress::default()),
         });
         sender
     }
@@ -2894,11 +3842,17 @@ mod tests {
 
     impl SourceFixture {
         fn new() -> Self {
+            static NEXT_FIXTURE: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(0);
             let unique = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos();
-            let root = std::env::temp_dir().join(format!("versus-source-ui-{unique}"));
+            let root = std::env::temp_dir().join(format!(
+                "versus-source-ui-{unique}-{}-{}",
+                std::process::id(),
+                NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
+            ));
             std::fs::create_dir_all(root.join("left")).unwrap();
             std::fs::create_dir_all(root.join("right")).unwrap();
             std::fs::write(root.join("left/model.txt"), "common\nold\n").unwrap();
@@ -2934,6 +3888,171 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(1));
         }
+    }
+
+    #[test]
+    fn command_line_files_open_direct_comparison_in_supplied_order_without_writes() {
+        let sources = SourceFixture::new();
+        let paths = [
+            sources.path("left/model.txt"),
+            sources.path("right/model.txt"),
+        ];
+        for mode in [None, Some(ComparisonMode::File)] {
+            let ctx = egui::Context::default();
+            apply_theme(&ctx);
+            let mut app = VersusApp::default();
+            app.open_launch_request(crate::cli::LaunchRequest {
+                paths: paths.clone(),
+                mode,
+            });
+            settle_sources(&mut app, &ctx);
+            assert_eq!(app.comparison_mode, ComparisonMode::File);
+            let view = app.file_view.as_ref().unwrap();
+            assert_eq!(view.paths, paths);
+            assert_eq!(view.sources, paths.clone().map(Some));
+            assert!(!view.from_folders);
+            assert_eq!(view.counts[1], 1);
+            let output = render(&mut app, &ctx, vec![]);
+            assert_eq!(text_positions(&output, "old").len(), 1);
+            assert_eq!(text_positions(&output, "new").len(), 1);
+            assert!(
+                ctx.read_response(egui::Id::new("Back to folders"))
+                    .is_none()
+            );
+            output.drop_without_applying_deltas();
+        }
+        assert_eq!(std::fs::read_to_string(&paths[0]).unwrap(), "common\nold\n");
+        assert_eq!(std::fs::read_to_string(&paths[1]).unwrap(), "common\nnew\n");
+    }
+
+    #[test]
+    fn command_line_folders_choose_folder_mode_and_reject_forced_file_mode() {
+        let sources = SourceFixture::new();
+        let ctx = egui::Context::default();
+        let paths = [sources.path("left"), sources.path("right")];
+        for mode in [None, Some(ComparisonMode::Folder)] {
+            let mut app = VersusApp::default();
+            app.open_launch_request(crate::cli::LaunchRequest {
+                paths: paths.clone(),
+                mode,
+            });
+            settle_sources(&mut app, &ctx);
+            assert_eq!(app.comparison_mode, ComparisonMode::Folder);
+            assert_eq!(app.roots, Some(paths.clone()));
+            assert!(app.tree.is_some() && app.file_view.is_none());
+        }
+        for (mode, paths) in [
+            (ComparisonMode::File, paths),
+            (
+                ComparisonMode::Folder,
+                [
+                    sources.path("left/model.txt"),
+                    sources.path("right/model.txt"),
+                ],
+            ),
+        ] {
+            let mut app = VersusApp::default();
+            app.open_launch_request(crate::cli::LaunchRequest {
+                paths,
+                mode: Some(mode),
+            });
+            settle_sources(&mut app, &ctx);
+            assert!(app.error.as_ref().unwrap().contains("requires two"));
+            assert!(app.tree.is_none() && app.file_view.is_none());
+        }
+    }
+
+    #[test]
+    fn command_line_invalid_sources_show_errors_and_new_discards_pending_launch() {
+        let sources = SourceFixture::new();
+        let ctx = egui::Context::default();
+        for paths in [
+            [sources.path("left/model.txt"), sources.path("missing")],
+            [sources.path("left/model.txt"), sources.path("right")],
+        ] {
+            let mut app = VersusApp::default();
+            app.open_launch_request(crate::cli::LaunchRequest { paths, mode: None });
+            settle_sources(&mut app, &ctx);
+            assert!(app.error.is_some() || app.mode() == SelectionMode::Incompatible);
+            assert!(app.tree.is_none() && app.file_view.is_none());
+        }
+        let mut app = VersusApp::default();
+        app.open_launch_request(crate::cli::LaunchRequest {
+            paths: [
+                sources.path("left/model.txt"),
+                sources.path("right/model.txt"),
+            ],
+            mode: None,
+        });
+        app.new_comparison();
+        settle_sources(&mut app, &ctx);
+        assert!(app.paths.iter().all(String::is_empty));
+        assert!(app.source_paths.iter().all(Option::is_none));
+        assert!(app.launch_mode.is_none());
+        assert!(app.tree.is_none() && app.file_view.is_none());
+    }
+
+    #[test]
+    fn git_null_device_inputs_show_added_and_deleted_lines_without_opening_devices() {
+        let sources = SourceFixture::new();
+        let ctx = egui::Context::default();
+        let mut nulls = vec![PathBuf::from("/dev/null")];
+        if cfg!(windows) {
+            nulls.extend([PathBuf::from("NUL"), PathBuf::from("nul")]);
+        }
+        for null in nulls {
+            for empty_side in 0..2 {
+                let mut paths = [
+                    sources.path("left/model.txt"),
+                    sources.path("right/model.txt"),
+                ];
+                paths[empty_side] = null.clone();
+                let mut app = VersusApp::default();
+                app.open_launch_request(crate::cli::LaunchRequest {
+                    paths,
+                    mode: Some(ComparisonMode::File),
+                });
+                settle_sources(&mut app, &ctx);
+                let view = app.file_view.as_ref().unwrap();
+                assert!(view.error.is_none());
+                assert!(view.sources[empty_side].is_none());
+                let expected = if empty_side == 0 {
+                    DirectoryEntryState::RightOnly
+                } else {
+                    DirectoryEntryState::LeftOnly
+                };
+                let rows = &view.comparison.as_ref().unwrap().rows;
+                assert_eq!(rows.len(), 2);
+                assert!(rows.iter().all(|row| row.state == expected));
+            }
+        }
+    }
+
+    #[test]
+    fn command_line_native_paths_survive_display_conversion() {
+        #[cfg(target_os = "linux")]
+        use std::os::unix::ffi::OsStringExt;
+        let sources = SourceFixture::new();
+        let ctx = egui::Context::default();
+        // Linux permits non-UTF-8 filenames; macOS filesystems require Unicode.
+        #[cfg(target_os = "linux")]
+        let left_name = std::ffi::OsString::from_vec(b"left \xff.txt".to_vec());
+        #[cfg(not(target_os = "linux"))]
+        let left_name = std::ffi::OsString::from("left space é.txt");
+        let left = sources.0.join(left_name);
+        let right = sources.path("right space \u{6bd4}\u{8f03}.txt");
+        std::fs::write(&left, "before\n").unwrap();
+        std::fs::write(&right, "after\n").unwrap();
+        let mut app = VersusApp::default();
+        app.open_launch_request(crate::cli::LaunchRequest {
+            paths: [left.clone(), right.clone()],
+            mode: Some(ComparisonMode::File),
+        });
+        settle_sources(&mut app, &ctx);
+        let view = app.file_view.as_ref().unwrap();
+        assert_eq!(view.sources, [Some(left), Some(right)]);
+        assert!(view.error.is_none());
+        assert_eq!(view.counts[1], 1);
     }
 
     #[test]
@@ -3254,6 +4373,9 @@ mod tests {
         view.job = Some(FileJob {
             receiver: file_receiver,
             cancellation: file_flag.clone(),
+            started: Instant::now(),
+            progress: Arc::new(ComparisonProgress::default()),
+            ignore_line_endings: true,
         });
         app.file_view = Some(view);
         let (source_sender, source_receiver) = mpsc::channel();
@@ -3448,5 +4570,1137 @@ mod tests {
         assert!(app.tree.as_ref().unwrap().is_expanded("assembly"));
         assert_eq!(app.selected, Some("assembly/model.step".into()));
         assert_eq!(app.scroll_generation, generation);
+    }
+
+    fn click_action(app: &mut VersusApp, ctx: &egui::Context, label: &str) {
+        click_action_frame(app, ctx, label).drop_without_applying_deltas();
+    }
+
+    fn click_action_frame(
+        app: &mut VersusApp,
+        ctx: &egui::Context,
+        label: &str,
+    ) -> egui::FullOutput {
+        render(app, ctx, vec![]).drop_without_applying_deltas();
+        let response = ctx.read_response(egui::Id::new(label)).unwrap();
+        assert!(response.enabled(), "{label} should be enabled");
+        let position = response.rect.center();
+        let events = |pressed| {
+            vec![
+                egui::Event::PointerMoved(position),
+                egui::Event::PointerButton {
+                    pos: position,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: Default::default(),
+                },
+            ]
+        };
+        render(app, ctx, events(true)).drop_without_applying_deltas();
+        render(app, ctx, events(false))
+    }
+
+    #[test]
+    fn ignore_refresh_keeps_file_rows_and_viewport_until_results_are_ready() {
+        let sources = SourceFixture::new();
+        let left: String = (1..=200)
+            .map(|number| format!("line {number}: value\n"))
+            .collect();
+        let right: String = (1..=200)
+            .map(|number| match number {
+                81 => "line 81: changed\n".into(),
+                100 => "line 100:  value\n".into(),
+                _ => format!("line {number}: value\n"),
+            })
+            .collect();
+        std::fs::write(sources.path("left/model.txt"), left).unwrap();
+        std::fs::write(sources.path("right/model.txt"), right).unwrap();
+        for theme in [egui::Theme::Light, egui::Theme::Dark] {
+            let ctx = egui::Context::default();
+            set_theme(&ctx, theme);
+            let mut app = unfiltered_app();
+            app.open_launch_request(crate::cli::LaunchRequest {
+                paths: [
+                    sources.path("left/model.txt"),
+                    sources.path("right/model.txt"),
+                ],
+                mode: None,
+            });
+            settle_sources(&mut app, &ctx);
+            let view = app.file_view.as_mut().unwrap();
+            view.scroll_y = 80.0 * ROW_HEIGHT + 7.0;
+            view.navigation_row = Some(80);
+            let before = render(&mut app, &ctx, vec![]);
+            let positions = text_positions(&before, "line 81: value");
+            assert_eq!(positions.len(), 1);
+            let panes = app.pane_rects;
+            before.drop_without_applying_deltas();
+            let updating = click_action_frame(&mut app, &ctx, "Ignore whitespace");
+            assert_eq!(positions, text_positions(&updating, "line 81: value"));
+            assert_eq!(panes, app.pane_rects);
+            assert!(text_positions(&updating, "Loading file comparison…").is_empty());
+            updating.drop_without_applying_deltas();
+            let view = app.file_view.as_ref().unwrap();
+            assert!(view.job.is_some() && view.comparison.is_some());
+            assert_eq!(view.navigation_row, Some(80));
+            assert_eq!(view.counts[1], 2);
+            settle_sources(&mut app, &ctx);
+            let after = render(&mut app, &ctx, vec![]);
+            assert_eq!(positions, text_positions(&after, "line 81: value"));
+            assert_eq!(panes, app.pane_rects);
+            let view = app.file_view.as_ref().unwrap();
+            assert_eq!(view.counts.iter().sum::<usize>(), 200);
+            assert_eq!(view.counts[1], 1);
+            assert_eq!(view.navigation_row, Some(80));
+            assert_eq!(view.scroll_y, 80.0 * ROW_HEIGHT + 7.0);
+            after.drop_without_applying_deltas();
+        }
+    }
+
+    #[test]
+    fn ignore_refresh_keeps_folder_rows_expansion_selection_and_scroll() {
+        let sources = SourceFixture::new();
+        for side in ["left", "right"] {
+            std::fs::create_dir_all(sources.path(&format!("{side}/z_group"))).unwrap();
+            std::fs::write(sources.path(&format!("{side}/z_group/detail.txt")), side).unwrap();
+            for number in 0..80 {
+                let text = if side == "right" && number == 20 {
+                    "same  value\n"
+                } else {
+                    "same value\n"
+                };
+                std::fs::write(sources.path(&format!("{side}/a_{number:03}.txt")), text).unwrap();
+            }
+        }
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut app = unfiltered_app();
+        app.open_launch_request(crate::cli::LaunchRequest {
+            paths: [sources.path("left"), sources.path("right")],
+            mode: None,
+        });
+        settle_sources(&mut app, &ctx);
+        app.tree.as_mut().unwrap().expand_all();
+        app.selected = Some("z_group/detail.txt".into());
+        app.tree_scroll_y = 20.0 * ROW_HEIGHT + 7.0;
+        let before = render(&mut app, &ctx, vec![]);
+        let positions = text_positions(&before, "a_020.txt");
+        assert_eq!(positions.len(), 2);
+        let panes = app.pane_rects;
+        let generation = app.scroll_generation;
+        before.drop_without_applying_deltas();
+        let updating = click_action_frame(&mut app, &ctx, "Ignore whitespace");
+        assert_eq!(positions, text_positions(&updating, "a_020.txt"));
+        assert_eq!(panes, app.pane_rects);
+        assert!(app.tree.is_some() && app.job.is_some());
+        updating.drop_without_applying_deltas();
+        settle_sources(&mut app, &ctx);
+        let after = render(&mut app, &ctx, vec![]);
+        assert_eq!(positions, text_positions(&after, "a_020.txt"));
+        assert_eq!(panes, app.pane_rects);
+        assert_eq!(app.scroll_generation, generation);
+        assert_eq!(
+            app.selected.as_deref(),
+            Some(std::path::Path::new("z_group/detail.txt"))
+        );
+        assert!(app.tree.as_ref().unwrap().is_expanded("z_group"));
+        assert_eq!(app.tree_scroll_y, 20.0 * ROW_HEIGHT + 7.0);
+        assert_eq!(app.counts[1], 3); // model.txt, z_group and its detail.txt
+        after.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn file_refresh_preserves_source_line_anchors_when_alignment_changes() {
+        let ctx = egui::Context::default();
+        let mut app = loaded_app();
+        let mut view = loaded_file_view();
+        view.scroll_y = ROW_HEIGHT + 5.0;
+        view.navigation_row = Some(1);
+        let mut replacement = view.comparison.as_ref().unwrap().clone();
+        replacement.rows.insert(
+            1,
+            test_file_row(
+                None,
+                Some((99, "inserted".into())),
+                DirectoryEntryState::RightOnly,
+            ),
+        );
+        let (sender, receiver) = mpsc::channel();
+        view.job = Some(FileJob {
+            receiver,
+            cancellation: Arc::new(AtomicBool::new(false)),
+            started: Instant::now(),
+            progress: Arc::new(ComparisonProgress::default()),
+            ignore_line_endings: false,
+        });
+        app.file_view = Some(view);
+        sender.send(Ok(Some(replacement))).unwrap();
+        app.poll_file_comparison(&ctx);
+        let view = app.file_view.as_ref().unwrap();
+        assert_eq!(view.scroll_y, 2.0 * ROW_HEIGHT + 5.0);
+        assert_eq!(view.navigation_row, Some(2));
+        assert_eq!(view.counts, [1, 1, 1, 1, 0, 0]);
+        assert!(!view.ignore_line_endings);
+    }
+
+    #[test]
+    fn failed_or_cancelled_file_refresh_keeps_the_last_result_visible() {
+        for cancelled in [false, true] {
+            let ctx = egui::Context::default();
+            apply_theme(&ctx);
+            let mut app = loaded_app();
+            let mut view = loaded_file_view();
+            let before = view.comparison.clone();
+            let (sender, receiver) = mpsc::channel();
+            view.job = Some(FileJob {
+                receiver,
+                cancellation: Arc::new(AtomicBool::new(cancelled)),
+                started: Instant::now(),
+                progress: Arc::new(ComparisonProgress::default()),
+                ignore_line_endings: false,
+            });
+            app.file_view = Some(view);
+            if cancelled {
+                sender
+                    .send(Ok(Some(FileComparison {
+                        rows: vec![],
+                        message: None,
+                    })))
+                    .unwrap();
+            } else {
+                sender
+                    .send(Err(CompareError {
+                        path: None,
+                        kind: versus::CompareErrorKind::InvalidPath,
+                        message: "file unavailable".into(),
+                    }))
+                    .unwrap();
+            }
+            app.poll_file_comparison(&ctx);
+            let output = render(&mut app, &ctx, vec![]);
+            assert_eq!(text_positions(&output, "old value").len(), 1);
+            let view = app.file_view.as_ref().unwrap();
+            assert_eq!(view.comparison, before);
+            assert!(view.error.is_some() && view.job.is_none());
+            assert!(view.ignore_line_endings);
+            output.drop_without_applying_deltas();
+        }
+    }
+
+    #[test]
+    fn differences_filter_hides_equal_lines_and_preserves_original_numbers() {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut app = loaded_app();
+        app.file_view = Some(loaded_file_view());
+        click_action(&mut app, &ctx, "Show only differences");
+        let output = render(&mut app, &ctx, vec![]);
+        assert!(text_positions(&output, "unchanged").is_empty());
+        assert!(text_positions(&output, "1").is_empty());
+        assert_eq!(text_positions(&output, "2").len(), 2);
+        assert_eq!(text_positions(&output, "3").len(), 1);
+        let left = text_positions(&output, "old value")[0];
+        let right = text_positions(&output, "new value")[0];
+        assert!((left.y - right.y).abs() < 0.1);
+        output.drop_without_applying_deltas();
+        click_action(&mut app, &ctx, "Show only differences");
+        let output = render(&mut app, &ctx, vec![]);
+        assert_eq!(text_positions(&output, "unchanged").len(), 2);
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn navigation_scrolls_both_file_panes_and_advances_when_rows_fit_the_window() {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut app = loaded_app();
+        let mut view = loaded_file_view();
+        view.comparison.as_mut().unwrap().rows = (1..=200)
+            .map(|number| {
+                let changed = [20, 80, 150, 200].contains(&number);
+                test_file_row(
+                    Some((number, format!("left line {number}"))),
+                    Some((number, format!("right line {number}"))),
+                    if changed {
+                        DirectoryEntryState::Different
+                    } else {
+                        DirectoryEntryState::Same
+                    },
+                )
+            })
+            .collect();
+        update_visible_file_rows(&mut view, false);
+        app.file_view = Some(view);
+        for (action, number) in [
+            ("Next difference", 20),
+            ("Next difference", 80),
+            ("Next difference", 150),
+            ("Next difference", 200),
+            ("Previous difference", 150),
+            ("Previous difference", 80),
+            ("Previous difference", 20),
+        ] {
+            let first = click_action_frame(&mut app, &ctx, action);
+            let first_positions = text_positions(&first, &format!("left line {number}"));
+            assert_eq!(first_positions.len(), 1);
+            first.drop_without_applying_deltas();
+            let output = render(&mut app, &ctx, vec![]);
+            let left = text_positions(&output, &format!("left line {number}"))[0];
+            let right = text_positions(&output, &format!("right line {number}"))[0];
+            assert!((left.y - right.y).abs() < 0.1);
+            assert_eq!(
+                first_positions,
+                vec![left],
+                "Jump should settle on its first frame"
+            );
+            assert_eq!(
+                app.file_view.as_ref().unwrap().navigation_row,
+                Some(number - 1)
+            );
+            output.drop_without_applying_deltas();
+        }
+        app.file_view = Some(loaded_file_view());
+        for (action, index) in [
+            ("Next difference", 1),
+            ("Next difference", 2),
+            ("Previous difference", 1),
+        ] {
+            click_action(&mut app, &ctx, action);
+            assert_eq!(app.file_view.as_ref().unwrap().navigation_row, Some(index));
+        }
+    }
+
+    #[test]
+    fn folder_navigation_reveals_collapsed_parents_in_both_panes() {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut entries = Vec::new();
+        for index in 0..100 {
+            entries.push(DirectoryEntry {
+                relative_path: format!("a_common_{index:03}").into(),
+                left_exists: true,
+                right_exists: true,
+                left_kind: Some(DirectoryEntryKind::Directory),
+                right_kind: Some(DirectoryEntryKind::Directory),
+                left_size: Some(0),
+                right_size: Some(0),
+                kind: DirectoryEntryKind::Directory,
+                state: DirectoryEntryState::Same,
+            });
+        }
+        for (path, state) in [
+            ("z_changed/deep/changed.txt", DirectoryEntryState::Different),
+            ("z_changed/deep/removed.txt", DirectoryEntryState::LeftOnly),
+            ("z_changed/deep/same.txt", DirectoryEntryState::Same),
+            ("z_other/added.txt", DirectoryEntryState::RightOnly),
+        ] {
+            let left_exists = state != DirectoryEntryState::RightOnly;
+            let right_exists = state != DirectoryEntryState::LeftOnly;
+            entries.push(DirectoryEntry {
+                relative_path: path.into(),
+                left_exists,
+                right_exists,
+                left_kind: left_exists.then_some(DirectoryEntryKind::File),
+                right_kind: right_exists.then_some(DirectoryEntryKind::File),
+                left_size: left_exists.then_some(1),
+                right_size: right_exists.then_some(1),
+                kind: DirectoryEntryKind::File,
+                state,
+            });
+        }
+        let tree = FolderTree::from_diff(&DirectoryDiff {
+            entries,
+            cancelled: false,
+        });
+        let mut app = unfiltered_app();
+        let sender = attach_job(&mut app);
+        sender.send(Ok(tree)).unwrap();
+        app.poll_comparison(&ctx);
+        let first = click_action_frame(&mut app, &ctx, "Next difference");
+        let first_positions = text_positions(&first, "changed.txt");
+        assert_eq!(first_positions.len(), 2);
+        first.drop_without_applying_deltas();
+        assert_eq!(
+            app.selected.as_deref(),
+            Some(std::path::Path::new("z_changed/deep/changed.txt"))
+        );
+        assert!(app.tree.as_ref().unwrap().is_expanded("z_changed"));
+        assert!(app.tree.as_ref().unwrap().is_expanded("z_changed/deep"));
+        let output = render(&mut app, &ctx, vec![]);
+        let rows = text_positions(&output, "changed.txt");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            first_positions, rows,
+            "Jump should settle on its first frame"
+        );
+        assert!((rows[0].y - rows[1].y).abs() < 0.1);
+        output.drop_without_applying_deltas();
+        click_action(&mut app, &ctx, "Show only differences");
+        let output = render(&mut app, &ctx, vec![]);
+        assert!(text_positions(&output, "a_common_000").is_empty());
+        assert_eq!(text_positions(&output, "changed.txt").len(), 2);
+        output.drop_without_applying_deltas();
+        for path in ["z_changed/deep/removed.txt", "z_other/added.txt"] {
+            click_action(&mut app, &ctx, "Next difference");
+            assert_eq!(app.selected.as_deref(), Some(std::path::Path::new(path)));
+        }
+        assert!(app.tree.as_ref().unwrap().is_expanded("z_other"));
+        click_action(&mut app, &ctx, "Next difference");
+        assert_eq!(
+            app.selected.as_deref(),
+            Some(std::path::Path::new("z_other/added.txt"))
+        );
+        click_action(&mut app, &ctx, "Previous difference");
+        assert_eq!(
+            app.selected.as_deref(),
+            Some(std::path::Path::new("z_changed/deep/removed.txt"))
+        );
+        click_action(&mut app, &ctx, "Previous difference");
+        assert_eq!(
+            app.selected.as_deref(),
+            Some(std::path::Path::new("z_changed/deep/changed.txt"))
+        );
+    }
+
+    #[test]
+    fn folder_navigation_is_disabled_when_only_folders_differ() {
+        let ctx = egui::Context::default();
+        let tree = FolderTree::from_diff(&DirectoryDiff {
+            entries: vec![DirectoryEntry {
+                relative_path: "empty-left-only".into(),
+                left_exists: true,
+                right_exists: false,
+                left_kind: Some(DirectoryEntryKind::Directory),
+                right_kind: None,
+                left_size: Some(0),
+                right_size: None,
+                kind: DirectoryEntryKind::Directory,
+                state: DirectoryEntryState::LeftOnly,
+            }],
+            cancelled: false,
+        });
+        let mut app = VersusApp::default();
+        let sender = attach_job(&mut app);
+        sender.send(Ok(tree)).unwrap();
+        app.poll_comparison(&ctx);
+        render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+        for label in ["Previous difference", "Next difference"] {
+            assert!(!ctx.read_response(egui::Id::new(label)).unwrap().enabled());
+        }
+        assert!(app.folder_differences.is_empty());
+    }
+
+    #[test]
+    fn new_button_stays_with_the_legend_and_options_align_right() {
+        for theme in [egui::Theme::Light, egui::Theme::Dark] {
+            for size in [egui::vec2(900.0, 650.0), egui::vec2(1200.0, 800.0)] {
+                for file in [false, true] {
+                    let ctx = egui::Context::default();
+                    set_theme(&ctx, theme);
+                    let mut app = loaded_app();
+                    if file {
+                        app.file_view = Some(loaded_file_view());
+                    }
+                    let mut output = ctx.run_ui(
+                        egui::RawInput {
+                            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)),
+                            ..Default::default()
+                        },
+                        |ui| app.render(ui),
+                    );
+                    output.textures_delta.clear();
+                    let last_label = output
+                        .shapes
+                        .iter()
+                        .find_map(|shape| match &shape.shape {
+                            egui::Shape::Text(text)
+                                if text.galley.text().starts_with("Read error") =>
+                            {
+                                Some(Rect::from_min_size(text.pos, text.galley.size()))
+                            }
+                            _ => None,
+                        })
+                        .unwrap();
+                    let plus = ctx
+                        .read_response(egui::Id::new("New comparison"))
+                        .unwrap()
+                        .rect;
+                    let filter = ctx
+                        .read_response(egui::Id::new("Show only differences"))
+                        .unwrap()
+                        .rect;
+                    let next = ctx
+                        .read_response(egui::Id::new("Next difference"))
+                        .unwrap()
+                        .rect;
+                    assert!(plus.left() >= last_label.right());
+                    assert!(plus.left() < last_label.right() + 25.0);
+                    assert!(
+                        plus.right() + 30.0 < filter.left(),
+                        "plus {plus:?}, filter {filter:?}, size {size:?}, file {file}"
+                    );
+                    assert!((plus.center().y - filter.center().y).abs() < 1.0);
+                    assert!(next.right() <= size.x && next.right() > size.x - 30.0);
+                    assert!(app.ignore_line_endings);
+                    assert!(
+                        ctx.read_response(egui::Id::new("Ignore line endings"))
+                            .unwrap()
+                            .enabled()
+                    );
+                    output.drop_without_applying_deltas();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn default_options_filter_equal_lines_and_ignore_whitespace_and_endings() {
+        let sources = SourceFixture::new();
+        std::fs::write(
+            sources.path("left/model.txt"),
+            "common\nspacing value\nold\n",
+        )
+        .unwrap();
+        std::fs::write(
+            sources.path("right/model.txt"),
+            "common\r\nspacing  value\r\nnew\r\n",
+        )
+        .unwrap();
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut app = VersusApp::default();
+        assert!(app.show_only_differences && app.ignore_whitespace && app.ignore_line_endings);
+        app.open_launch_request(crate::cli::LaunchRequest {
+            paths: [
+                sources.path("left/model.txt"),
+                sources.path("right/model.txt"),
+            ],
+            mode: None,
+        });
+        settle_sources(&mut app, &ctx);
+        let view = app.file_view.as_ref().unwrap();
+        assert_eq!(view.counts[1], 1);
+        assert_eq!(view.visible_rows, vec![2]);
+        let output = render(&mut app, &ctx, vec![]);
+        assert!(text_positions(&output, "common").is_empty());
+        assert!(text_positions(&output, "spacing value").is_empty());
+        assert_eq!(text_positions(&output, "old").len(), 1);
+        assert_eq!(text_positions(&output, "new").len(), 1);
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn line_ending_ignore_defaults_on_in_both_comparison_views() {
+        let sources = SourceFixture::new();
+        std::fs::write(sources.path("left/model.txt"), "same\r\nnext\r\n").unwrap();
+        std::fs::write(sources.path("right/model.txt"), "same\nnext\n").unwrap();
+        let ctx = egui::Context::default();
+        let mut app = VersusApp::default();
+        assert!(app.ignore_line_endings);
+        app.open_launch_request(crate::cli::LaunchRequest {
+            paths: [sources.path("left"), sources.path("right")],
+            mode: None,
+        });
+        settle_sources(&mut app, &ctx);
+        assert_eq!(app.counts[1], 0);
+        app.open_file("model.txt".into(), [true, true], false);
+        settle_sources(&mut app, &ctx);
+        assert_eq!(app.file_view.as_ref().unwrap().counts[1], 0);
+        click_action(&mut app, &ctx, "Ignore line endings");
+        settle_sources(&mut app, &ctx);
+        assert_eq!(app.counts[1], 1);
+        assert_eq!(app.file_view.as_ref().unwrap().counts[1], 2);
+        click_action(&mut app, &ctx, "Ignore line endings");
+        settle_sources(&mut app, &ctx);
+        assert_eq!(app.counts[1], 0);
+        assert_eq!(app.file_view.as_ref().unwrap().counts[1], 0);
+    }
+
+    #[test]
+    fn inserted_line_and_commented_peers_align_with_original_numbers_in_both_panes() {
+        let sources = SourceFixture::new();
+        let prefix: String = (1..50)
+            .map(|line| format!("unchanged line {line}\n"))
+            .collect();
+        std::fs::write(
+            sources.path("left/model.txt"),
+            format!("{prefix}extra_call();\n    first_action();\n    second_action();\ntail\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            sources.path("right/model.txt"),
+            format!("{prefix}    // first_action();\n    // second_action();\ntail\n"),
+        )
+        .unwrap();
+        let ctx = egui::Context::default();
+        let mut app = unfiltered_app();
+        app.open_launch_request(crate::cli::LaunchRequest {
+            paths: [
+                sources.path("left/model.txt"),
+                sources.path("right/model.txt"),
+            ],
+            mode: Some(ComparisonMode::File),
+        });
+        settle_sources(&mut app, &ctx);
+        let comparison = app.file_view.as_ref().unwrap().comparison.as_ref().unwrap();
+        assert_eq!(comparison.rows[49].left.as_ref().unwrap().0, 50);
+        assert!(comparison.rows[49].right.is_none());
+        for (index, left_number, right_number) in [(50, 51, 50), (51, 52, 51)] {
+            let row = &comparison.rows[index];
+            assert_eq!(row.left.as_ref().unwrap().0, left_number);
+            assert_eq!(row.right.as_ref().unwrap().0, right_number);
+            assert_eq!(row.state, DirectoryEntryState::Different);
+        }
+        click_action(&mut app, &ctx, "Next difference");
+        for differences_only in [false, true] {
+            if differences_only {
+                click_action(&mut app, &ctx, "Show only differences");
+            }
+            let mut output = render(&mut app, &ctx, vec![]);
+            output.textures_delta.clear();
+            for (left, right) in [
+                ("    first_action();", "    // first_action();"),
+                ("    second_action();", "    // second_action();"),
+            ] {
+                let left_position = text_positions(&output, left)[0];
+                let right_position = text_positions(&output, right)[0];
+                assert!((left_position.y - right_position.y).abs() < 0.1);
+                let highlighted: Vec<_> = output
+                    .shapes
+                    .iter()
+                    .filter_map(|shape| match &shape.shape {
+                        egui::Shape::Text(text) if text.galley.text() == right => {
+                            Some(&text.galley)
+                        }
+                        _ => None,
+                    })
+                    .flat_map(|galley| {
+                        galley.job.sections.iter().filter_map(|section| {
+                            (section.format.background != Color32::TRANSPARENT).then(|| {
+                                galley.job.text
+                                    [section.byte_range.start.0..section.byte_range.end.0]
+                                    .to_owned()
+                            })
+                        })
+                    })
+                    .collect();
+                assert_eq!(highlighted.concat(), "// ");
+            }
+            output.drop_without_applying_deltas();
+        }
+    }
+
+    #[test]
+    fn ignore_buttons_recompare_file_and_folder_results_and_show_ending_changes() {
+        let sources = SourceFixture::new();
+        std::fs::write(sources.path("left/model.txt"), "let value = 1;\r\n").unwrap();
+        std::fs::write(sources.path("right/model.txt"), "letvalue=1;\n").unwrap();
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut app = unfiltered_app();
+        app.open_launch_request(crate::cli::LaunchRequest {
+            paths: [sources.path("left"), sources.path("right")],
+            mode: None,
+        });
+        settle_sources(&mut app, &ctx);
+        assert_eq!(app.counts[1], 1);
+        app.open_file("model.txt".into(), [true, true], false);
+        settle_sources(&mut app, &ctx);
+        click_action(&mut app, &ctx, "Ignore whitespace");
+        settle_sources(&mut app, &ctx);
+        assert_eq!(app.counts[1], 0);
+        assert_eq!(app.file_view.as_ref().unwrap().counts[1], 0);
+        click_action(&mut app, &ctx, "Show only differences");
+        let output = render(&mut app, &ctx, vec![]);
+        assert!(!text_positions(&output, "No differences with the current options.").is_empty());
+        output.drop_without_applying_deltas();
+        click_action(&mut app, &ctx, "Ignore line endings");
+        settle_sources(&mut app, &ctx);
+        assert_eq!(app.counts[1], 1);
+        assert_eq!(app.file_view.as_ref().unwrap().counts[1], 1);
+        let output = render(&mut app, &ctx, vec![]);
+        assert_eq!(text_positions(&output, "CRLF").len(), 1);
+        assert_eq!(text_positions(&output, "LF").len(), 1);
+        output.drop_without_applying_deltas();
+        click_action(&mut app, &ctx, "Back to folders");
+        assert!(app.file_view.is_none());
+        assert_eq!(app.counts[1], 1);
+    }
+
+    #[test]
+    fn changed_text_is_highlighted_while_common_text_stays_unhighlighted() {
+        let sources = SourceFixture::new();
+        std::fs::write(sources.path("left/model.txt"), "old stable old\n").unwrap();
+        std::fs::write(sources.path("right/model.txt"), "new stable new\n").unwrap();
+        for theme in [egui::Theme::Light, egui::Theme::Dark] {
+            let ctx = egui::Context::default();
+            set_theme(&ctx, theme);
+            let mut app = VersusApp::default();
+            app.open_launch_request(crate::cli::LaunchRequest {
+                paths: [
+                    sources.path("left/model.txt"),
+                    sources.path("right/model.txt"),
+                ],
+                mode: None,
+            });
+            settle_sources(&mut app, &ctx);
+            let output = render(&mut app, &ctx, vec![]);
+            for expected in ["old stable old", "new stable new"] {
+                let galley = output
+                    .shapes
+                    .iter()
+                    .find_map(|shape| match &shape.shape {
+                        egui::Shape::Text(text) if text.galley.text() == expected => {
+                            Some(&text.galley)
+                        }
+                        _ => None,
+                    })
+                    .unwrap();
+                let highlighted: Vec<_> = galley
+                    .job
+                    .sections
+                    .iter()
+                    .filter(|section| section.format.background != Color32::TRANSPARENT)
+                    .map(|section| {
+                        &galley.job.text[section.byte_range.start.0..section.byte_range.end.0]
+                    })
+                    .collect();
+                assert_eq!(
+                    highlighted,
+                    if expected.starts_with("old") {
+                        vec!["old", "old"]
+                    } else {
+                        vec!["new", "new"]
+                    }
+                );
+            }
+            output.drop_without_applying_deltas();
+        }
+    }
+
+    #[derive(Debug)]
+    struct TestDrop(PathBuf);
+    impl egui::DroppedFile for TestDrop {
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+        fn bytes(&self) -> Result<Vec<u8>, String> {
+            panic!("Drop handlers must not read file contents on the UI thread")
+        }
+    }
+
+    fn drop_sources(app: &mut VersusApp, ctx: &egui::Context, side: usize, paths: Vec<PathBuf>) {
+        render(app, ctx, vec![]).drop_without_applying_deltas();
+        let position = app.pane_rects[side].center();
+        ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0))),
+                events: vec![egui::Event::PointerMoved(position)],
+                dropped_files: paths
+                    .into_iter()
+                    .map(|path| Arc::new(TestDrop(path)) as egui::DroppedFileHandle)
+                    .collect(),
+                ..Default::default()
+            },
+            |ui| app.render(ui),
+        )
+        .drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn dropped_files_and_folders_open_on_the_chosen_side_and_cancel_old_work() {
+        let sources = SourceFixture::new();
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut app = VersusApp::default();
+        drop_sources(&mut app, &ctx, 1, vec![sources.path("right/model.txt")]);
+        settle_sources(&mut app, &ctx);
+        assert_eq!(app.comparison_mode, ComparisonMode::File);
+        assert_eq!(
+            app.paths[1],
+            sources.path("right/model.txt").display().to_string()
+        );
+        drop_sources(&mut app, &ctx, 0, vec![sources.path("left/model.txt")]);
+        settle_sources(&mut app, &ctx);
+        assert!(app.file_view.as_ref().unwrap().comparison.is_some());
+        drop_sources(&mut app, &ctx, 0, vec![sources.path("left")]);
+        settle_sources(&mut app, &ctx);
+        assert_eq!(app.mode(), SelectionMode::Incompatible);
+        drop_sources(&mut app, &ctx, 1, vec![sources.path("right")]);
+        settle_sources(&mut app, &ctx);
+        assert!(app.tree.is_some());
+        let sender = attach_job(&mut app);
+        let flag = app.job.as_ref().unwrap().cancellation.clone();
+        drop_sources(&mut app, &ctx, 0, vec![sources.path("left/model.txt")]);
+        assert!(flag.load(Ordering::Relaxed));
+        assert!(sender.send(Ok(fixture())).is_err());
+        settle_sources(&mut app, &ctx);
+    }
+
+    #[test]
+    fn dropping_on_a_file_drilldown_retains_the_other_file_and_rejects_multiple_drops() {
+        let sources = SourceFixture::new();
+        let ctx = egui::Context::default();
+        let mut app = VersusApp::default();
+        app.open_launch_request(crate::cli::LaunchRequest {
+            paths: [sources.path("left"), sources.path("right")],
+            mode: None,
+        });
+        settle_sources(&mut app, &ctx);
+        app.open_file("model.txt".into(), [true, true], false);
+        settle_sources(&mut app, &ctx);
+        drop_sources(&mut app, &ctx, 0, vec![sources.path("left/model.txt")]);
+        settle_sources(&mut app, &ctx);
+        let view = app.file_view.as_ref().unwrap();
+        assert!(!view.from_folders);
+        assert_eq!(view.paths[1], sources.path("right/model.txt"));
+        let paths = app.paths.clone();
+        drop_sources(
+            &mut app,
+            &ctx,
+            0,
+            vec![sources.path("left"), sources.path("right")],
+        );
+        assert_eq!(app.paths, paths);
+        assert!(app.drop_message.is_some());
+    }
+
+    #[test]
+    fn native_drag_positions_survive_pointer_gone_for_hover_and_drop_on_both_sides() {
+        let sources = SourceFixture::new();
+        for side in 0..2 {
+            for relative in ["left", "left/model.txt"] {
+                let ctx = egui::Context::default();
+                apply_theme(&ctx);
+                let mut app = VersusApp::default();
+                render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+                let position = app.pane_rects[side].center();
+                let input = |dropped: bool| egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0))),
+                    events: vec![
+                        egui::Event::PointerMoved(position),
+                        egui::Event::PointerGone,
+                    ],
+                    hovered_files: if dropped {
+                        vec![]
+                    } else {
+                        vec![egui::HoveredFile {
+                            path: Some(sources.path(relative)),
+                            ..Default::default()
+                        }]
+                    },
+                    dropped_files: if dropped {
+                        vec![Arc::new(TestDrop(sources.path(relative))) as egui::DroppedFileHandle]
+                    } else {
+                        vec![]
+                    },
+                    ..Default::default()
+                };
+                let mut hover = ctx.run_ui(input(false), |ui| app.render(ui));
+                hover.textures_delta.clear();
+                assert_eq!(app.drop_hover_side, Some(side));
+                assert!(ctx.input(|input| input.pointer.latest_pos()).is_none());
+                assert_eq!(
+                    text_positions(
+                        &hover,
+                        if side == 0 {
+                            "Drop a file or folder on LEFT"
+                        } else {
+                            "Drop a file or folder on RIGHT"
+                        }
+                    )
+                    .len(),
+                    1
+                );
+                hover.drop_without_applying_deltas();
+                let mut dropped = ctx.run_ui(input(true), |ui| app.render(ui));
+                dropped.textures_delta.clear();
+                assert_eq!(app.source_paths[side], Some(sources.path(relative)));
+                assert!(app.source_paths[1 - side].is_none());
+                assert!(app.drop_message.is_none());
+                dropped.drop_without_applying_deltas();
+                settle_sources(&mut app, &ctx);
+                assert_eq!(
+                    app.source_kinds[side],
+                    Some(if relative.ends_with(".txt") {
+                        SourceKind::File
+                    } else {
+                        SourceKind::Folder
+                    })
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn drop_position_survives_pointer_gone_without_a_hover_frame() {
+        let sources = SourceFixture::new();
+        let ctx = egui::Context::default();
+        let mut app = VersusApp::default();
+        render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+        let position = app.pane_rects[1].center();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0))),
+                events: vec![
+                    egui::Event::PointerMoved(position),
+                    egui::Event::PointerGone,
+                ],
+                dropped_files: vec![Arc::new(TestDrop(sources.path("right")))],
+                ..Default::default()
+            },
+            |ui| app.render(ui),
+        );
+        output.textures_delta.clear();
+        assert_eq!(app.source_paths[1], Some(sources.path("right")));
+        assert!(app.drop_message.is_none());
+        output.drop_without_applying_deltas();
+        settle_sources(&mut app, &ctx);
+    }
+
+    #[test]
+    fn drop_hover_marks_the_target_and_outside_drops_preserve_selection() {
+        let sources = SourceFixture::new();
+        let ctx = egui::Context::default();
+        let mut app = VersusApp::default();
+        render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+        let position = app.pane_rects[1].center();
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0))),
+                events: vec![egui::Event::PointerMoved(position)],
+                hovered_files: vec![egui::HoveredFile {
+                    path: Some(sources.path("right/model.txt")),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            |ui| app.render(ui),
+        );
+        assert_eq!(app.drop_hover_side, Some(1));
+        assert!(!text_positions(&output, "Drop a file or folder on RIGHT").is_empty());
+        output.drop_without_applying_deltas();
+        let paths = app.paths.clone();
+        ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0))),
+                events: vec![
+                    egui::Event::PointerMoved(egui::pos2(600.0, 20.0)),
+                    egui::Event::PointerGone,
+                ],
+                dropped_files: vec![Arc::new(TestDrop(sources.path("right/model.txt")))],
+                ..Default::default()
+            },
+            |ui| app.render(ui),
+        )
+        .drop_without_applying_deltas();
+        assert_eq!(app.paths, paths);
+        assert_eq!(
+            app.drop_message.as_deref(),
+            Some("Drop into the large LEFT or RIGHT view below the path bars.")
+        );
+        assert!(app.source_jobs.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn drag_highlight_borders_only_the_hovered_pane_above_empty_or_loaded_content() {
+        let sources = SourceFixture::new();
+        for dark in [true, false] {
+            for loaded in [false, true] {
+                let ctx = egui::Context::default();
+                set_theme(
+                    &ctx,
+                    if dark {
+                        egui::Theme::Dark
+                    } else {
+                        egui::Theme::Light
+                    },
+                );
+                let mut app = if loaded {
+                    loaded_app()
+                } else {
+                    VersusApp::default()
+                };
+                render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+                for side in [0, 1] {
+                    let mut output = ctx.run_ui(
+                        egui::RawInput {
+                            screen_rect: Some(Rect::from_min_size(
+                                Pos2::ZERO,
+                                egui::vec2(1200.0, 800.0),
+                            )),
+                            events: vec![egui::Event::PointerMoved(app.pane_rects[side].center())],
+                            hovered_files: vec![egui::HoveredFile {
+                                path: Some(sources.path("left")),
+                                ..Default::default()
+                            }],
+                            ..Default::default()
+                        },
+                        |ui| app.render(ui),
+                    );
+                    output.textures_delta.clear();
+                    let borders: Vec<_> = output
+                        .shapes
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, shape)| match &shape.shape {
+                            egui::Shape::Rect(rect)
+                                if rect.stroke.width == 3.0
+                                    && rect.stroke.color == Palette::new(dark).accent =>
+                            {
+                                Some((index, rect.rect))
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    assert_eq!(borders.len(), 1);
+                    assert_eq!(borders[0].1, app.pane_rects[side].shrink(3.0));
+                    assert!(
+                        output.shapes[..borders[0].0]
+                            .iter()
+                            .any(|shape| matches!(shape.shape, egui::Shape::Text(_)))
+                    );
+                    assert_eq!(app.drop_hover_side, Some(side));
+                    output.drop_without_applying_deltas();
+                }
+                let mut output = render(&mut app, &ctx, vec![egui::Event::PointerGone]);
+                output.textures_delta.clear();
+                assert!(app.drop_hover_side.is_none());
+                assert!(!output.shapes.iter().any(|shape| matches!(&shape.shape,
+                    egui::Shape::Rect(rect) if rect.stroke.width == 3.0 && rect.stroke.color == Palette::new(dark).accent)));
+                output.drop_without_applying_deltas();
+            }
+        }
+    }
+
+    #[test]
+    fn native_cursor_targets_hover_and_drop_without_pointer_events() {
+        let sources = SourceFixture::new();
+        let ctx = egui::Context::default();
+        let mut app = VersusApp::default();
+        // Explorer can retain focus and leave egui's pointer at an old location.
+        render(
+            &mut app,
+            &ctx,
+            vec![egui::Event::PointerMoved(egui::pos2(600.0, 20.0))],
+        )
+        .drop_without_applying_deltas();
+        for side in [1, 0] {
+            app.native_drag_position = Some(app.pane_rects[side].center());
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0))),
+                    hovered_files: vec![egui::HoveredFile {
+                        path: Some(sources.path("left")),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                |ui| app.render(ui),
+            );
+            output.textures_delta.clear();
+            assert_eq!(app.drop_hover_side, Some(side));
+            assert!(app.native_drag_position.is_none());
+            assert!(
+                !text_positions(
+                    &output,
+                    if side == 0 {
+                        "Drop a file or folder on LEFT"
+                    } else {
+                        "Drop a file or folder on RIGHT"
+                    }
+                )
+                .is_empty()
+            );
+            output.drop_without_applying_deltas();
+        }
+        app.native_drag_position = Some(app.pane_rects[0].center());
+        ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0))),
+                dropped_files: vec![Arc::new(TestDrop(sources.path("left")))],
+                ..Default::default()
+            },
+            |ui| app.render(ui),
+        )
+        .drop_without_applying_deltas();
+        assert_eq!(app.source_paths[0], Some(sources.path("left")));
+        assert!(app.source_paths[1].is_none());
+        assert!(app.drop_message.is_none());
+        settle_sources(&mut app, &ctx);
+
+        // An up-to-date native position outside the panes must reject the drop,
+        // even if egui still retains an old, valid pane position.
+        let pane = app.pane_rects[1].center();
+        render(&mut app, &ctx, vec![egui::Event::PointerMoved(pane)])
+            .drop_without_applying_deltas();
+        app.native_drag_position = Some(egui::pos2(600.0, 20.0));
+        ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0))),
+                dropped_files: vec![Arc::new(TestDrop(sources.path("right")))],
+                ..Default::default()
+            },
+            |ui| app.render(ui),
+        )
+        .drop_without_applying_deltas();
+        assert!(app.source_paths[1].is_none());
+        assert!(app.drop_message.is_some());
+    }
+
+    #[test]
+    fn drop_event_position_takes_priority_over_a_later_native_cursor_sample() {
+        let sources = SourceFixture::new();
+        let ctx = egui::Context::default();
+        let mut app = VersusApp::default();
+        render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+        let position = app.pane_rects[1].center();
+        app.native_drag_position = Some(egui::pos2(600.0, 20.0));
+        ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0))),
+                events: vec![
+                    egui::Event::PointerMoved(position),
+                    egui::Event::PointerGone,
+                ],
+                dropped_files: vec![Arc::new(TestDrop(sources.path("right")))],
+                ..Default::default()
+            },
+            |ui| app.render(ui),
+        )
+        .drop_without_applying_deltas();
+        assert_eq!(app.source_paths[1], Some(sources.path("right")));
+        assert!(app.drop_message.is_none());
+        assert!(app.native_drag_position.is_none());
+        settle_sources(&mut app, &ctx);
+    }
+
+    #[test]
+    fn progress_displays_measured_stage_estimates_and_hides_unknown_estimates() {
+        let ctx = egui::Context::default();
+        let mut app = loaded_app();
+        let _sender = attach_job(&mut app);
+        let job = app.job.as_mut().unwrap();
+        job.started = Instant::now() - Duration::from_secs(3);
+        job.progress.begin(ProgressStage::ComparingFiles, Some(100));
+        job.progress.advance(25);
+        let snapshot = job.progress.snapshot();
+        let now = snapshot.started + Duration::from_secs(2);
+        let text = progress_text(snapshot, job.started, now);
+        assert!(text.contains("25 / 100"));
+        assert!(text.contains("~6s left in this stage"));
+        let output = render(&mut app, &ctx, vec![]);
+        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text().starts_with("Comparing files…"))));
+        output.drop_without_applying_deltas();
+        let job = app.job.as_mut().unwrap();
+        job.progress.begin(ProgressStage::Scanning, None);
+        let snapshot = job.progress.snapshot();
+        let text = progress_text(
+            snapshot,
+            job.started,
+            snapshot.started + Duration::from_secs(2),
+        );
+        assert!(text.contains("entries found"));
+        assert!(!text.contains("left in this stage"));
     }
 }

@@ -54,12 +54,60 @@ Comparison runs in the background with refresh and cancel icons in the header.
 Files are compared by content, not timestamps. Symlinks are compared by their
 targets and are never recursively followed. Empty folders are included. Changing
 a path clears the prior result so it cannot be mistaken for the new selection.
+While loading, a status indicator shows the current stage and elapsed time.
+Measured stages also show progress and an approximate time remaining for that
+stage. Folder discovery and line alignment have no reliable total, so they show
+activity without a time estimate. File loading can also be cancelled.
+
+The **+** button stays beside the legend. The other icon controls at the far right
+apply to both comparison views:
+
+- **Show only differences** hides identical lines and tree entries. File line
+  numbers still refer to the original files; changed folder ancestors stay visible.
+  It starts on.
+- **Ignore whitespace** ignores inline Unicode whitespace, including spaces and
+  tabs, while preserving line boundaries. It starts on.
+- **Ignore line endings** ignores CRLF, LF, CR, and final-terminator differences.
+  It starts on. Turn it off to compare endings exactly; changed endings appear
+  as badges beside their lines.
+- **Previous difference** and **Next difference**, the up/down arrows, scroll
+  both panes to the previous or next changed line or file. Folder navigation skips
+  folders and expands the target file's parents, including when they were
+  collapsed. Navigation stops at the first or last difference.
+
+Selected option icons have a blue outline. Changing an ignore option recomputes
+the comparison in the background; filtering does not reread the sources. Options
+remain selected when starting a new comparison or changing modes. Folder ignore
+options apply to valid UTF-8 text up to 32 MiB; binary, invalid UTF-8, and larger
+files retain byte-for-byte comparison.
+
+Drag one file or folder from your file explorer into the large view on the left
+or right, below the path bars, to replace that side. A blue border and drop label
+identify LEFT or RIGHT above the pane contents, including the empty chooser view.
+Windows follows the live cursor during native drags even when ordinary pointer
+events are unavailable. The source type
+selects the corresponding view automatically; mixed file/folder pairs show why
+they cannot compare. A drop in a file opened from the folder tree keeps the other
+displayed file and starts a direct comparison. Multiple-item drops are rejected
+without replacing the current selection.
+On Linux, Versus uses X11 or XWayland when `DISPLAY` is available so native
+file drops work. Pure Wayland sessions retain browse selection; the windowing
+backend does not support file drops there.
 
 When comparing folders, double-click a regular file on either side to open a
 read-only, line-by-line file comparison. The same legend colors and icons identify changed, left-only, and
 right-only lines; line numbers and empty placeholders keep both sides aligned.
 File headers use the same LEFT/RIGHT styling as folder headers. Long file paths
 show a leading ellipsis so the filename remains visible; hover for the full path.
+Changed text within a line has a stronger highlight in that line's status color;
+unchanged text remains unhighlighted. Very long lines or exhausted highlight
+processing time use a whole-line highlight to keep loading responsive.
+Within a changed block, similar lines are aligned even when an added or removed
+line shifts their original numbers. For example, an inserted left line appears
+opposite an empty placeholder, and following code aligns with its commented-out
+version on the right while the comment text remains highlighted as a change.
+Similarity alignment uses bounded extra work; very large changed blocks or an
+exhausted processing budget retain positional pairing.
 Vertical scrolling stays linked, and each pane can scroll horizontally for long
 lines. The **back arrow**, at the left of the legend, returns to the folder view
 with its selection, expansion, and scroll position preserved. Enter or Space on a
@@ -70,12 +118,130 @@ non-UTF-8 files, files above the 32 MiB text limit, and comparisons exceeding th
 two-second diff processing limit show an explanation. Type mismatches do not open
 folders or symlink targets. Read errors are shown in the file view; Back remains
 available for files opened from a folder comparison. Line endings are normalized
-for text comparison. Merge, editing, saving, and other workflows remain
+when **Ignore line endings** is selected. Merge, editing, saving, and other workflows remain
 deferred. Compared files and folders are never modified.
 
 The sun/moon icon at the upper right switches between light and dark themes in
 either view. The logo and window icon preserve the blue half and use a white half
 in dark mode or the original dark half in light mode.
+
+## Git and IDE integration
+
+Launch Versus with two paths to open their comparison immediately:
+
+```sh
+versus --diff -- "left file.txt" "right file.txt"
+versus --folder -- "left folder" "right folder"
+```
+
+Without a mode flag, two paths select file or folder comparison automatically.
+With no arguments, the normal empty workspace opens. Relative paths resolve from
+the caller's working directory; quote paths containing spaces. `--` lets filenames
+begin with a dash. `--diff` requires regular files and `--folder` requires folders;
+unavailable or incompatible sources show an explanation in the window. Git's
+`/dev/null` (and `NUL` on Windows) represents an empty file side for additions and
+deletions. Other devices and symlink targets are not opened.
+
+Versus runs in the foreground until its window closes, keeping Git/IDE temporary
+inputs available. `--wait` is accepted for callers that supply it and has the same
+behavior. Each invocation opens its own window. Closing normally returns zero,
+including when files differ; this is a visual comparison, not a command-line
+equality check. `--help` and `--version` print without opening a window. Invalid
+arguments return 2; failure to start the window returns 1. Read failures appear
+in the window. Save editor buffers first: Versus reads files from disk and never
+writes back to them.
+
+Use the installed executable on your PATH, or replace `versus` with its quoted
+full path (`Versus.exe` on Windows or `Versus.AppImage` on Linux). In PowerShell,
+invoke a quoted executable path with `&`:
+
+```powershell
+& 'C:\Tools\Versus.exe' --diff -- 'left file.txt' 'right file.txt'
+```
+
+### Git
+
+Run these once in a shell (Git Bash on Windows). Omit `--global` to configure only
+the current repository:
+
+```sh
+git config --global diff.tool versus
+git config --global diff.guitool versus
+git config --global difftool.versus.cmd 'versus --diff -- "$LOCAL" "$REMOTE"'
+```
+
+For an executable outside PATH, set the command with its full path instead:
+
+```sh
+git config --global difftool.versus.cmd '"C:/Program Files/Versus/Versus.exe" --diff -- "$LOCAL" "$REMOTE"'
+```
+
+Then compare working-tree changes, staged changes, or two revisions:
+
+```sh
+git difftool --no-prompt
+git difftool --no-prompt --cached
+git difftool --no-prompt HEAD~1 HEAD -- path/to/file.txt
+```
+
+Close each Versus window to advance to the next changed file. For a single folder
+comparison, temporarily select folder mode and ask Git to copy working-tree
+files instead of creating symlinks:
+
+```sh
+git -c difftool.versus.cmd='versus --folder -- "$LOCAL" "$REMOTE"' difftool --tool=versus --dir-diff --no-symlinks
+```
+
+The command receives Git's pre-image on the left and post-image on the right.
+See the [Git difftool reference](https://git-scm.com/docs/git-difftool) for revision
+and path options. Versus currently provides read-only two-way comparison.
+
+### VS Code and other IDEs
+
+Add the following tasks to your project's `.vscode/tasks.json` (merge them into
+any existing tasks). Replace the first task's `command` with your executable path
+if Versus is outside PATH. Open a saved file, then use **Tasks: Run Task** to
+compare it with another file or view its Git changes in a Versus window. The Git
+task uses the configuration above. Tasks require an open workspace folder.
+
+```json
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Versus: Compare active file",
+      "type": "process",
+      "command": "versus",
+      "args": ["--diff", "--", "${file}", "${input:versusOtherFile}"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    },
+    {
+      "label": "Versus: Git changes for active file",
+      "type": "process",
+      "command": "git",
+      "args": ["difftool", "--tool=versus", "--no-prompt", "--", "${file}"],
+      "options": { "cwd": "${fileDirname}" },
+      "problemMatcher": []
+    }
+  ],
+  "inputs": [
+    {
+      "id": "versusOtherFile",
+      "type": "promptString",
+      "description": "Other file path (absolute or relative to the workspace)"
+    }
+  ]
+}
+```
+
+The process tasks pass paths as separate arguments, including spaces. See VS
+Code's [external-tool tasks](https://code.visualstudio.com/docs/debugtest/tasks)
+and [input variables](https://code.visualstudio.com/docs/reference/variables-reference).
+For an IDE with an external diff-tool setting, choose the Versus executable and
+set its arguments to `--diff -- <left-file> <right-file>`, substituting that IDE's
+two filename placeholders. Enable waiting for the tool to exit if the IDE offers
+that option.
 
 ## Releases
 
@@ -122,6 +288,8 @@ Review and commit the resulting `vendor/`, `.cargo/config.toml`, lockfile, and
 inventory output used for a release. Do not run the vendor refresh in an air-gapped
 environment. A separate Rust toolchain bundle is required where Rust is not already
 installed; it is intentionally outside this repository.
+The vendor tree includes a [native drop-position patch](docs/vendor-winit-drop-position.md).
+Reapply it and update its checksums after refreshing dependencies.
 
 On Linux, install the host development libraries required by the native windowing
 backend, then use the same Cargo command. The release workflow lists the Ubuntu

@@ -167,6 +167,185 @@ fn directory_comparison_reports_states_and_does_not_follow_symlinks() {
     fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn directory_ignore_options_apply_only_to_bounded_valid_utf8_text() {
+    let root = sandbox("directory-ignore-options");
+    let left = root.join("left");
+    let right = root.join("right");
+    fs::create_dir_all(&left).unwrap();
+    fs::create_dir_all(&right).unwrap();
+    fs::write(left.join("text.txt"), "one\tvalue\r\ntwo\r\n").unwrap();
+    fs::write(right.join("text.txt"), "one value\ntwo\n").unwrap();
+    fs::write(left.join("real-change.txt"), "left\n").unwrap();
+    fs::write(right.join("real-change.txt"), "right\n").unwrap();
+    fs::write(left.join("binary.bin"), [0, 1, 2]).unwrap();
+    fs::write(right.join("binary.bin"), [0, 1, 3]).unwrap();
+    fs::write(left.join("invalid-utf8.txt"), [0xff, b' ']).unwrap();
+    fs::write(right.join("invalid-utf8.txt"), [0xff, b'\t']).unwrap();
+
+    let exact = compare_directories(&left, &right, &DirectoryCompareOptions::default()).unwrap();
+    assert_eq!(
+        exact
+            .entries
+            .iter()
+            .find(|entry| entry.relative_path == PathBuf::from("text.txt"))
+            .unwrap()
+            .state,
+        DirectoryEntryState::Different
+    );
+    let ignored = compare_directories(
+        &left,
+        &right,
+        &DirectoryCompareOptions {
+            ignore_whitespace: true,
+            ignore_line_endings: true,
+            ..DirectoryCompareOptions::default()
+        },
+    )
+    .unwrap();
+    for (name, expected) in [
+        ("text.txt", DirectoryEntryState::Same),
+        ("real-change.txt", DirectoryEntryState::Different),
+        ("binary.bin", DirectoryEntryState::Different),
+        ("invalid-utf8.txt", DirectoryEntryState::Different),
+    ] {
+        assert_eq!(
+            ignored
+                .entries
+                .iter()
+                .find(|entry| entry.relative_path == PathBuf::from(name))
+                .unwrap()
+                .state,
+            expected,
+            "{name}"
+        );
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn directory_ignores_preserve_equal_large_text_and_oversize_byte_comparison() {
+    let root = sandbox("directory-ignore-large");
+    let left = root.join("left");
+    let right = root.join("right");
+    fs::create_dir_all(&left).unwrap();
+    fs::create_dir_all(&right).unwrap();
+    let text = "engineering value\r\n".repeat(32 * 1024);
+    for index in 0..8 {
+        let name = format!("same-{index}.txt");
+        fs::write(left.join(&name), &text).unwrap();
+        fs::write(right.join(&name), &text).unwrap();
+    }
+    // These would normalize identically, but exceed the bounded text limit.
+    fs::write(
+        left.join("large.txt"),
+        vec![b' '; DEFAULT_TEXT_SIZE_LIMIT as usize + 1],
+    )
+    .unwrap();
+    fs::write(
+        right.join("large.txt"),
+        vec![b'\t'; DEFAULT_TEXT_SIZE_LIMIT as usize + 1],
+    )
+    .unwrap();
+    let result = compare_directories(
+        &left,
+        &right,
+        &DirectoryCompareOptions {
+            ignore_whitespace: true,
+            ignore_line_endings: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(result.entries.len(), 9);
+    for entry in result.entries {
+        assert_eq!(
+            entry.state,
+            if entry.relative_path == PathBuf::from("large.txt") {
+                DirectoryEntryState::Different
+            } else {
+                DirectoryEntryState::Same
+            }
+        );
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn exact_text_comparison_preserves_line_endings_and_final_newline() {
+    let strict = FileCompareOptions {
+        ignore_line_endings: false,
+        ..FileCompareOptions::default()
+    };
+    assert!(!compare_texts("line\n", "line", &strict).hunks.is_empty());
+    assert!(
+        !compare_texts("line\r\n", "line\n", &strict)
+            .hunks
+            .is_empty()
+    );
+    let ignore_endings = FileCompareOptions {
+        ignore_line_endings: true,
+        ..strict
+    };
+    assert!(
+        compare_texts("line\r\n", "line", &ignore_endings)
+            .hunks
+            .is_empty()
+    );
+    for options in [strict, ignore_endings] {
+        let result = compare_texts("one\rtwo\r", "one\rchanged\r", &options);
+        assert_eq!(result.left_lines, ["one", "two"]);
+        assert_eq!(result.right_lines, ["one", "changed"]);
+        assert_eq!(result.hunks[0].left_range, 1..2);
+        assert_eq!(result.hunks[0].right_range, 1..2);
+    }
+}
+
+#[test]
+fn directory_progress_counts_distinct_entries_and_does_not_finish_when_cancelled() {
+    let root = sandbox("directory-progress");
+    let left = root.join("left");
+    let right = root.join("right");
+    fs::create_dir_all(&left).unwrap();
+    fs::create_dir_all(&right).unwrap();
+    fs::write(left.join("same.txt"), "same").unwrap();
+    fs::write(right.join("same.txt"), "same").unwrap();
+    fs::write(left.join("left.txt"), "left").unwrap();
+    let progress = Arc::new(ComparisonProgress::default());
+    let diff = compare_directories(
+        &left,
+        &right,
+        &DirectoryCompareOptions {
+            progress: Some(progress.clone()),
+            ..DirectoryCompareOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(diff.entries.len(), 2);
+    let complete = progress.snapshot();
+    assert_eq!(complete.stage, ProgressStage::Finished);
+    assert_eq!(complete.completed, 2);
+    assert_eq!(complete.total, Some(2));
+
+    let cancelled = Arc::new(AtomicBool::new(true));
+    let cancelled_progress = Arc::new(ComparisonProgress::default());
+    assert!(
+        compare_directories(
+            &left,
+            &right,
+            &DirectoryCompareOptions {
+                cancellation: Some(cancelled),
+                progress: Some(cancelled_progress.clone()),
+                ..DirectoryCompareOptions::default()
+            },
+        )
+        .unwrap()
+        .cancelled
+    );
+    assert_ne!(cancelled_progress.snapshot().stage, ProgressStage::Finished);
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[cfg(unix)]
 #[test]
 fn directory_comparison_reports_symlinks_without_traversing_them() {
@@ -212,7 +391,8 @@ fn cancellation_stops_directory_scan() {
             &right,
             &DirectoryCompareOptions {
                 buffer_size: 4,
-                cancellation: Some(cancellation)
+                cancellation: Some(cancellation),
+                ..DirectoryCompareOptions::default()
             }
         )
         .unwrap()

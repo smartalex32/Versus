@@ -11,6 +11,33 @@ eframe = { version = "=0.36.2", default-features = false, features = ["default_f
 rfd = "=0.17.2"
 similar = "=3.2.0"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# Reuse eframe's windowing crate to choose its file-drop-capable X11 backend.
+winit = { version = "=0.30.13", default-features = false, features = ["x11"] }
+
+[target.'cfg(windows)'.dev-dependencies]
+# Match the vendored winit Windows backend ABI exercised by tests/windows_drop.rs.
+tracing = { version = "=0.1.44", default-features = false, features = ["std"] }
+windows-sys = { version = "=0.52.0", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(windows)'.dependencies]
+# Query the native cursor during Explorer drags when ordinary pointer events stop.
+raw-window-handle = "=0.6.2"
+windows-sys = { version = "=0.52.0", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
 [profile.release]
 codegen-units = 1
 lto = "thin"
