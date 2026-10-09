@@ -70,6 +70,7 @@ done
 test -d "$xkb_dir" || die "missing bundled XKB data: $xkb_dir"
 test -d "$mesa_dri" || die "missing bundled Mesa DRI drivers: $mesa_dri"
 test -r "$openbox_config" || die "missing bundled Openbox configuration: $openbox_config"
+export __EGL_VENDOR_LIBRARY_FILENAMES="$appdir/usr/share/glvnd/egl_vendor.d/50_mesa.json"
 
 umask 077
 state_dir="$(mktemp -d "${TMPDIR:-/tmp}/versus-x11.XXXXXX")" || die "cannot create private temporary directory"

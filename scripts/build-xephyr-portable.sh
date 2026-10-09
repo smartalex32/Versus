@@ -5,6 +5,11 @@
 set -euo pipefail
 
 source_rpm="$(rpm -q --qf '%{SOURCERPM}' xorg-x11-server-Xephyr)"
+installed_release="$(rpm -q --qf '%{RELEASE}' xorg-x11-server-Xephyr)"
+# Rocky errata use .el8_10 while the container's default RPM macros use .el8.
+# Preserve that dist macro so rebuilt packages keep the installed identity.
+dist_tag="$(sed -n 's/.*\(\.el8[^.]*\).*/\1/p' <<< "$installed_release")"
+test -n "$dist_tag"
 source_rpm_url="https://download.rockylinux.org/pub/rocky/8.10/AppStream/source/tree/Packages/x/$source_rpm"
 build_root="$(mktemp -d)"
 trap 'rm -rf "$build_root"' EXIT
@@ -33,10 +38,13 @@ sed -i '/^[[:space:]]*%configure[[:space:]].*\\[[:space:]]*$/a\
 # Rocky keeps some server build headers (notably libdmx-devel) in its
 # build-only Devel repository. Enable it for this dependency transaction only.
 dnf builddep --assumeyes --enablerepo=devel "$spec"
-rpmbuild --define "_topdir $rpm_root" -bb "$spec"
+rpmbuild --define "_topdir $rpm_root" --define "dist $dist_tag" -bb "$spec"
 
 xephyr_rpm="$(find "$rpm_root/RPMS/x86_64" -maxdepth 1 -type f -name 'xorg-x11-server-Xephyr-*.rpm' -print -quit)"
 test -n "$xephyr_rpm"
+identity_format='%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}'
+test "$(rpm -qp --qf "$identity_format" "$xephyr_rpm")" = \
+  "$(rpm -q --qf "$identity_format" xorg-x11-server-Xephyr)"
 # Reinstall the rebuilt RPM over the build image package without changing its
 # package identity or pulling newer host libraries.
 rpm -Uvh --replacepkgs "$xephyr_rpm"

@@ -76,6 +76,11 @@ cp -a /usr/share/themes/Onyx-Citrus/openbox-3 "$appdir/usr/share/themes/Onyx-Cit
 # Zenity's GTK settings (including its compiled schema cache) must travel with
 # the fallback picker when a host portal is unavailable.
 cp -a /usr/share/glib-2.0 "$appdir/usr/share/"
+# GLVND discovers EGL providers through JSON, not ELF dependency scanning.
+# Use a bare library name so its lookup follows the bundle's library path.
+mkdir -p "$appdir/usr/share/glvnd/egl_vendor.d"
+printf '{"file_format_version":"1.0.0","ICD":{"library_path":"libEGL_mesa.so.0"}}\n' \
+  > "$appdir/usr/share/glvnd/egl_vendor.d/50_mesa.json"
 
 # Preserve the licenses shipped by the primary Rocky runtime packages.  RPM's
 # license-file manifest avoids guessing the installed license paths.
