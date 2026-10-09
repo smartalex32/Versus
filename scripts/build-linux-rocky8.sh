@@ -7,7 +7,7 @@ test "$(getconf GNU_LIBC_VERSION)" = 'glibc 2.28'
 dnf install --assumeyes dnf-plugins-core
 dnf config-manager --set-enabled powertools
 dnf install --assumeyes gcc gcc-c++ make pkgconf-pkg-config curl ca-certificates \
-  binutils file python3 fontconfig-devel mesa-libGL-devel gtk3-devel \
+  binutils file findutils tar gzip python3 fontconfig-devel mesa-libGL-devel gtk3-devel \
   libX11-devel libXrandr-devel libXi-devel libXcursor-devel libxkbcommon-devel \
   wayland-devel xorg-x11-server-Xvfb xorg-x11-utils mesa-dri-drivers
 
