@@ -71,6 +71,8 @@ impl Palette {
 }
 
 const ROW_HEIGHT: f32 = 22.0;
+const MIN_ZOOM: f32 = 0.2;
+const MAX_ZOOM: f32 = 5.0;
 
 struct ComparisonJob {
     receiver: Receiver<Result<FolderTree, CompareError>>,
@@ -1006,6 +1008,15 @@ impl VersusApp {
 
     fn render(&mut self, ui: &mut egui::Ui) {
         self.preferences_context = Some(ui.ctx().clone());
+        // egui separates modified wheel input from scrolling and smooths it.
+        // Apply each delta once, including its tail across repaint frames.
+        if ui.ctx().current_pass_index() == 0 {
+            let delta = ui.input(|input| input.zoom_delta());
+            if delta.is_finite() && delta > 0.0 && delta != 1.0 {
+                ui.ctx()
+                    .set_zoom_factor((ui.ctx().zoom_factor() * delta).clamp(MIN_ZOOM, MAX_ZOOM));
+            }
+        }
         if self.file_view.is_none()
             && self.tree_focus_id.is_some()
             && ui.memory(|memory| memory.focused()) == self.tree_focus_id
@@ -1065,24 +1076,29 @@ impl VersusApp {
                 ui.add_space(5.0);
                 // Keep the pane geometry and widget identities stable while
                 // background work starts and finishes.
-                let (status_rect, _) =
-                    ui.allocate_exact_size(egui::vec2(ui.available_width(), control_extent(ui)), Sense::hover());
+                let (status_rect, _) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), control_extent(ui)),
+                    Sense::hover(),
+                );
                 let mut status_ui = ui.new_child(egui::UiBuilder::new().max_rect(status_rect));
                 status_ui.set_clip_rect(ui.clip_rect().intersect(status_rect));
                 status_ui.horizontal(|ui| {
                     self.progress_indicator(ui);
-                    if self.job.is_none() && self.file_view.as_ref().is_none_or(|view| view.job.is_none())
-                        && (self.tree.is_some() || self.file_view.as_ref().is_some_and(|view| view.comparison.is_some()))
+                    if self.job.is_none()
+                        && self
+                            .file_view
+                            .as_ref()
+                            .is_none_or(|view| view.job.is_none())
+                        && (self.tree.is_some()
+                            || self
+                                .file_view
+                                .as_ref()
+                                .is_some_and(|view| view.comparison.is_some()))
                     {
                         ui.label(RichText::new(self.navigation_status()).color(palette.muted));
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let zoom = format!("Zoom {:.0}%", ui.ctx().zoom_factor() * 100.0);
-                        let shortcuts = [egui::gui_zoom::kb_shortcuts::ZOOM_IN, egui::gui_zoom::kb_shortcuts::ZOOM_OUT, egui::gui_zoom::kb_shortcuts::ZOOM_RESET]
-                            .map(|shortcut| ui.ctx().format_shortcut(&shortcut));
-                        if ui.add(egui::Button::new(RichText::new(zoom).color(palette.muted)).frame(false))
-                            .on_hover_text(format!("{} to enlarge · {} to reduce · {} to reset\nClick to reset zoom. Your zoom is saved for next time.", shortcuts[0], shortcuts[1], shortcuts[2]))
-                            .clicked() { ui.ctx().set_zoom_factor(1.0); }
+                        zoom_controls(ui);
                     });
                 });
                 if self.file_view.is_some() {
@@ -2185,9 +2201,29 @@ fn restore_zoom(ctx: &egui::Context, storage: &dyn eframe::Storage) {
     if let Some(zoom) = storage
         .get_string("versus.zoom")
         .and_then(|value| value.parse::<f32>().ok())
-        .filter(|zoom| zoom.is_finite() && (0.2..=5.0).contains(zoom))
+        .filter(|zoom| zoom.is_finite() && (MIN_ZOOM..=MAX_ZOOM).contains(zoom))
     {
         ctx.set_zoom_factor(zoom);
+    }
+}
+
+fn zoom_controls(ui: &mut egui::Ui) {
+    let zoom_factor = ui.ctx().zoom_factor();
+    if icon_button(ui, ToolbarIcon::ZoomIn, zoom_factor < MAX_ZOOM, "Zoom in").clicked() {
+        egui::gui_zoom::zoom_in(ui.ctx());
+    }
+    let zoom = format!("Zoom {:.0}%", zoom_factor * 100.0);
+    let shortcuts = [
+        egui::gui_zoom::kb_shortcuts::ZOOM_IN,
+        egui::gui_zoom::kb_shortcuts::ZOOM_OUT,
+        egui::gui_zoom::kb_shortcuts::ZOOM_RESET,
+    ]
+    .map(|shortcut| ui.ctx().format_shortcut(&shortcut));
+    if ui.add(egui::Button::new(RichText::new(zoom).color(Palette::for_context(ui.ctx()).muted)).frame(false))
+        .on_hover_text(format!("{} to enlarge · {} to reduce · {} to reset\nCtrl + mouse wheel to zoom. Click to reset. Your zoom is saved for next time.", shortcuts[0], shortcuts[1], shortcuts[2]))
+        .clicked() { ui.ctx().set_zoom_factor(1.0); }
+    if icon_button(ui, ToolbarIcon::ZoomOut, zoom_factor > MIN_ZOOM, "Zoom out").clicked() {
+        egui::gui_zoom::zoom_out(ui.ctx());
     }
 }
 
@@ -2751,6 +2787,8 @@ fn paint_status_icon(painter: &egui::Painter, center: Pos2, icon: StatusIcon) {
 
 #[derive(Clone, Copy)]
 enum ToolbarIcon {
+    ZoomIn,
+    ZoomOut,
     New,
     Back,
     Refresh,
@@ -2821,6 +2859,18 @@ fn icon_button_state(
         let point = |x, y| center + egui::vec2(x, y);
         let stroke = Stroke::new(1.4, color);
         match icon {
+            ToolbarIcon::ZoomIn | ToolbarIcon::ZoomOut => {
+                let lens = point(-2.0, -2.0);
+                ui.painter().circle_stroke(lens, 5.5, stroke);
+                ui.painter()
+                    .line_segment([point(2.0, 2.0), point(7.0, 7.0)], stroke);
+                ui.painter()
+                    .line_segment([point(-5.0, -2.0), point(1.0, -2.0)], stroke);
+                if matches!(icon, ToolbarIcon::ZoomIn) {
+                    ui.painter()
+                        .line_segment([point(-2.0, -5.0), point(-2.0, 1.0)], stroke);
+                }
+            }
             ToolbarIcon::Differences => {
                 for y in [-4.0, 4.0] {
                     ui.painter()
@@ -3191,6 +3241,10 @@ fn empty_display(ui: &mut egui::Ui, height: f32, title: &str, subtitle: &str) {
 }
 
 fn apply_theme(ctx: &egui::Context) {
+    // Support literal Ctrl on every platform as well as the platform command key.
+    ctx.options_mut(|options| {
+        options.input_options.zoom_modifier = egui::Modifiers::CTRL | egui::Modifiers::COMMAND
+    });
     set_theme(ctx, egui::Theme::Dark);
 }
 
@@ -3287,9 +3341,13 @@ mod tests {
         ctx: &egui::Context,
         events: Vec<egui::Event>,
     ) -> egui::FullOutput {
+        // Keep the simulated physical window size fixed when the UI scale changes.
         let mut output = ctx.run_ui(
             egui::RawInput {
-                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0))),
+                screen_rect: Some(Rect::from_min_size(
+                    Pos2::ZERO,
+                    egui::vec2(1200.0, 800.0) / ctx.zoom_factor(),
+                )),
                 events,
                 ..Default::default()
             },
@@ -6417,6 +6475,207 @@ mod tests {
             self.0.remove(key);
         }
         fn flush(&mut self) {}
+    }
+
+    #[test]
+    fn magnifier_buttons_zoom_and_percentage_resets_in_both_views() {
+        for file_view in [false, true] {
+            for theme in [egui::Theme::Light, egui::Theme::Dark] {
+                let ctx = egui::Context::default();
+                apply_theme(&ctx);
+                set_theme(&ctx, theme);
+                let mut app = loaded_app();
+                app.selected = Some("assembly".into());
+                if file_view {
+                    app.file_view = Some(loaded_file_view());
+                }
+                let paths = app.paths.clone();
+                let output = render(&mut app, &ctx, vec![]);
+                let out = ctx.read_response(egui::Id::new("Zoom out")).unwrap().rect;
+                let zoom = text_centers(&output, "Zoom 100%")[0];
+                let inside = ctx.read_response(egui::Id::new("Zoom in")).unwrap().rect;
+                assert!(out.right() < zoom.x && zoom.x < inside.left());
+                for rect in [out, inside] {
+                    assert!(output.shapes.iter().any(|shape| matches!(&shape.shape,
+                        egui::Shape::Circle(circle) if circle.radius == 5.5 && rect.contains(circle.center))));
+                }
+                output.drop_without_applying_deltas();
+                click_action(&mut app, &ctx, "Zoom in");
+                render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+                assert!((ctx.zoom_factor() - 1.1).abs() < 0.001);
+                click_action(&mut app, &ctx, "Zoom out");
+                render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+                assert_eq!(ctx.zoom_factor(), 1.0);
+                click_action(&mut app, &ctx, "Zoom in");
+                let output = render(&mut app, &ctx, vec![]);
+                let reset = text_centers(&output, "Zoom 110%")[0];
+                output.drop_without_applying_deltas();
+                click(&mut app, &ctx, reset);
+                render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+                assert_eq!(ctx.zoom_factor(), 1.0);
+                assert_eq!(app.paths, paths);
+                assert_eq!(
+                    app.selected.as_deref(),
+                    Some(std::path::Path::new("assembly"))
+                );
+                assert_eq!(app.file_view.is_some(), file_view);
+                assert_eq!(ctx.theme(), theme);
+                for (limit, label) in [(MIN_ZOOM, "Zoom out"), (MAX_ZOOM, "Zoom in")] {
+                    ctx.set_zoom_factor(limit);
+                    render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+                    // egui derives interaction/disabled state from the preceding pass.
+                    render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+                    assert!(
+                        !ctx.read_response(egui::Id::new(label)).unwrap().enabled(),
+                        "limit {limit}, actual {}: {label}",
+                        ctx.zoom_factor()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ctrl_wheel_zooms_without_scrolling_and_plain_wheel_still_scrolls() {
+        for file_view in [false, true] {
+            let ctx = egui::Context::default();
+            apply_theme(&ctx);
+            let mut app = unfiltered_app();
+            if file_view {
+                let mut view = loaded_file_view();
+                view.comparison.as_mut().unwrap().rows = (1..=200)
+                    .map(|number| {
+                        test_file_row(
+                            Some((number, format!("line {number}"))),
+                            Some((number, format!("line {number}"))),
+                            DirectoryEntryState::Same,
+                        )
+                    })
+                    .collect();
+                update_visible_file_rows(&mut view, false);
+                view.scroll_y = 200.0;
+                app.file_view = Some(view);
+            } else {
+                app.tree = Some(FolderTree::from_diff(&DirectoryDiff {
+                    cancelled: false,
+                    entries: (0..200)
+                        .map(|index| DirectoryEntry {
+                            relative_path: format!("entry-{index:03}.txt").into(),
+                            left_size: Some(1),
+                            right_size: Some(1),
+                            left_exists: true,
+                            right_exists: true,
+                            left_kind: Some(DirectoryEntryKind::File),
+                            right_kind: Some(DirectoryEntryKind::File),
+                            kind: DirectoryEntryKind::File,
+                            state: DirectoryEntryState::Same,
+                        })
+                        .collect(),
+                }));
+                app.tree_scroll_y = 200.0;
+            }
+            render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+            let scroll = |app: &VersusApp| {
+                app.file_view
+                    .as_ref()
+                    .map_or(app.tree_scroll_y, |view| view.scroll_y)
+            };
+            let pointer = app.pane_rects[0].center();
+            let wheel = |delta, ctrl, unit| {
+                vec![
+                    egui::Event::PointerMoved(pointer),
+                    egui::Event::MouseWheel {
+                        unit,
+                        phase: egui::TouchPhase::Move,
+                        delta: egui::vec2(0.0, delta),
+                        modifiers: egui::Modifiers {
+                            ctrl,
+                            ..Default::default()
+                        },
+                    },
+                ]
+            };
+            // Line-based wheel ticks keep zooming during egui's smoothing tail.
+            render(&mut app, &ctx, wheel(1.0, true, egui::MouseWheelUnit::Line))
+                .drop_without_applying_deltas();
+            render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+            let first_zoom = ctx.zoom_factor();
+            assert!(first_zoom > 1.0);
+            for _ in 0..30 {
+                render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+            }
+            assert!(ctx.zoom_factor() > first_zoom);
+            assert_eq!(scroll(&app), 200.0);
+            render(
+                &mut app,
+                &ctx,
+                wheel(-1.0, true, egui::MouseWheelUnit::Line),
+            )
+            .drop_without_applying_deltas();
+            for _ in 0..30 {
+                render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+            }
+            assert!((ctx.zoom_factor() - 1.0).abs() < 0.01);
+            assert_eq!(scroll(&app), 200.0);
+            let zoom = ctx.zoom_factor();
+            render(
+                &mut app,
+                &ctx,
+                wheel(-100.0, false, egui::MouseWheelUnit::Point),
+            )
+            .drop_without_applying_deltas();
+            for _ in 0..30 {
+                render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+            }
+            assert!(scroll(&app) > 200.0);
+            assert_eq!(ctx.zoom_factor(), zoom);
+            for (start, delta, expected) in [(4.99, 100.0, MAX_ZOOM), (0.21, -100.0, MIN_ZOOM)] {
+                ctx.set_zoom_factor(start);
+                render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+                render(
+                    &mut app,
+                    &ctx,
+                    wheel(delta, true, egui::MouseWheelUnit::Point),
+                )
+                .drop_without_applying_deltas();
+                for _ in 0..30 {
+                    render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+                }
+                assert_eq!(ctx.zoom_factor(), expected);
+            }
+            let mut storage = ZoomStorage::default();
+            eframe::App::save(&mut app, &mut storage);
+            assert_eq!(storage.get_string("versus.zoom").as_deref(), Some("0.2"));
+        }
+    }
+
+    #[test]
+    fn wheel_zoom_is_not_applied_twice_during_a_layout_retry() {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut app = loaded_app();
+        render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0))),
+                events: vec![egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, 4.0),
+                    phase: egui::TouchPhase::Move,
+                    modifiers: egui::Modifiers::CTRL,
+                }],
+                ..Default::default()
+            },
+            |ui| {
+                app.render(ui);
+                if ui.ctx().current_pass_index() == 0 {
+                    ui.ctx().request_discard("test layout retry");
+                }
+            },
+        );
+        assert_eq!(output.platform_output.num_completed_passes, 2);
+        assert!((ctx.zoom_factor() - (4.0_f32 / 200.0).exp()).abs() < 0.001);
+        output.drop_without_applying_deltas();
     }
 
     #[test]

@@ -133,10 +133,13 @@ The sun/moon icon at the upper right switches between light and dark themes in
 either view. The logo and window icon preserve the blue half and use a white half
 in dark mode or the original dark half in light mode.
 
-The status area shows the current **Zoom** percentage. Use Ctrl + / Ctrl - / Ctrl 0
-(Command on macOS) to enlarge, reduce, or reset the interface, or click Zoom to
-reset. Zoom is restored across launches; source paths and compared content are
-not saved. Row and control heights follow font metrics while staying compact at
+The status area shows the current **Zoom** percentage between magnifying-glass
+**−** and **+** buttons. Click them to reduce or enlarge the interface. Hold
+**Ctrl** and scroll the mouse wheel up/down to zoom in/out; the wheel alone
+scrolls the comparison. Command + wheel also works on macOS. Use
+Ctrl + / Ctrl - / Ctrl 0 (Command on macOS) for the keyboard shortcuts,
+or click the percentage to reset to 100%. Zoom is restored across launches;
+source paths and compared content are not saved. Row and control heights follow font metrics while staying compact at
 the default size. Toolbar buttons highlight when pressed and activate on release;
 releasing outside cancels the action.
 

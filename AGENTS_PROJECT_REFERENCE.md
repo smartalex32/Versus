@@ -41,6 +41,9 @@ APIs and must fail cleanly when unavailable.
   status, and text. Up/Down tree navigation preserves focus side and Tab escapes.
   Focusable file panes support keyboard scrolling. Empty panes show persistent
   drop outlines; toolbar press feedback precedes release activation.
+  Magnifier −/+ buttons flank the zoom percentage; Ctrl/Command + wheel changes
+  UI scale using egui’s smooth zoom delta, without scrolling the comparison.
+  Zoom is applied once per frame and bounded to egui’s 20–500% range.
   UI zoom alone is saved through eframe storage; compared content and paths are
   session-local. Row/control geometry follows font metrics.
 - Shared UI options filter identical entries and independently ignore inline
