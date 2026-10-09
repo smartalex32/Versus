@@ -218,8 +218,13 @@ def main():
                                    "native Browse picker did not cancel", launcher)
 
                     authority = Path(nested["XAUTHORITY"])
-                    command(["xdotool", "windowclose", outer], host)
-                    launcher.wait(timeout=10)
+                    protocols = command(["xprop", "-id", outer, "WM_PROTOCOLS"], host).stdout
+                    if "WM_DELETE_WINDOW" not in protocols:
+                        raise RuntimeError("outer display does not advertise normal WM close")
+                    command(["xdotool", "windowactivate", "--sync", outer], host)
+                    command(["xdotool", "key", "alt+F4"], host)
+                    if launcher.wait(timeout=10) != 0:
+                        raise RuntimeError("normal outer-window close returned a difftool error")
                     if authority.parent.exists():
                         raise RuntimeError("launcher left private state after outer-window close")
                     print("NX compatibility passed: authenticated GUI, resize, Ctrl+wheel, file/folder pickers, cleanup.")

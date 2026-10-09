@@ -34,10 +34,15 @@ Xvfb :99 -screen 0 1600x1000x24 -nolisten tcp &
 display_pid=$!
 app_pid=''
 nx_pid=''
+host_wm_pid=''
 cleanup() {
   if test -n "$app_pid"; then
     kill "$app_pid" 2>/dev/null || true
     wait "$app_pid" 2>/dev/null || true
+  fi
+  if test -n "$host_wm_pid"; then
+    kill "$host_wm_pid" 2>/dev/null || true
+    wait "$host_wm_pid" 2>/dev/null || true
   fi
   if test -n "$nx_pid"; then
     kill "$nx_pid" 2>/dev/null || true
@@ -112,4 +117,16 @@ for attempt in {1..100}; do
   sleep 0.1
 done
 DISPLAY=:100 xdpyinfo -ext XInputExtension
+# An ordinary host window manager gives the outer display the same close
+# protocol a user gets from the title-bar button in a remote desktop.
+DISPLAY=:100 openbox --sm-disable --config-file /etc/xdg/openbox/rc.xml &
+host_wm_pid=$!
+for attempt in {1..100}; do
+  if DISPLAY=:100 xprop -root _NET_SUPPORTING_WM_CHECK | grep -q 'window id # 0x'; then
+    break
+  fi
+  kill -0 "$host_wm_pid"
+  sleep 0.1
+done
+DISPLAY=:100 xprop -root _NET_SUPPORTING_WM_CHECK | grep -q 'window id # 0x'
 DISPLAY=:100 PYTHONDONTWRITEBYTECODE=1 python3 scripts/smoke-linux-x11.py dist/Versus.AppImage

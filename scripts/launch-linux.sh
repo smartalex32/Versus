@@ -79,6 +79,7 @@ umask 077
 state_dir="$(mktemp -d "${TMPDIR:-/tmp}/versus-x11.XXXXXX")" || die "cannot create private temporary directory"
 display_file="$state_dir/display"
 authority_file="$state_dir/Xauthority"
+close_marker="$state_dir/close-requested"
 : > "$authority_file"
 chmod 600 "$authority_file"
 
@@ -143,11 +144,13 @@ exec {display_fd}>"$display_file"
 if test -v XAUTHORITY; then
   DISPLAY="$host_display" XAUTHORITY="$XAUTHORITY" \
     PATH="$appdir/usr/bin:$PATH" XKB_CONFIG_ROOT="$xkb_dir" \
+    VERSUS_X11_CLOSE_MARKER="$close_marker" \
     LIBGL_ALWAYS_SOFTWARE=1 LIBGL_DRIVERS_PATH="$mesa_dri" \
     "$xephyr" -displayfd "$display_fd" -auth "$authority_file" -nolisten tcp \
       -noreset -resizeable -screen 1280x800 -xkbdir "$xkb_dir" &
 else
   DISPLAY="$host_display" PATH="$appdir/usr/bin:$PATH" XKB_CONFIG_ROOT="$xkb_dir" \
+    VERSUS_X11_CLOSE_MARKER="$close_marker" \
     LIBGL_ALWAYS_SOFTWARE=1 LIBGL_DRIVERS_PATH="$mesa_dri" \
     "$xephyr" -displayfd "$display_fd" -auth "$authority_file" -nolisten tcp \
       -noreset -resizeable -screen 1280x800 -xkbdir "$xkb_dir" &
@@ -212,8 +215,45 @@ DISPLAY="$nested_display" XAUTHORITY="$authority_file" VERSUS_X11_COMPAT=1 \
   "$versus" "${arguments[@]}" &
 app_pid=$!
 
+shutdown_timeout="${VERSUS_X11_SHUTDOWN_TIMEOUT:-5}"
+case "$shutdown_timeout" in
+  ''|*[!0-9]*) die "VERSUS_X11_SHUTDOWN_TIMEOUT must be a positive whole number" ;;
+esac
+test "$shutdown_timeout" -gt 0 || die "VERSUS_X11_SHUTDOWN_TIMEOUT must be positive"
+closing_deadline=''
+
 while :; do
+  # Close intent precedes client disconnects during server cleanup. Neither an
+  # app XIO error nor a window-manager exit should turn a normal close into an
+  # error for Git/IDE callers. Only successful server shutdown completes it.
+  if test -f "$close_marker" && test -z "$closing_deadline"; then
+    closing_deadline=$((SECONDS + shutdown_timeout))
+  fi
+  # The private server distinguishes a normal WM close request from display
+  # connection failure. Observe it before a client XIO/TERM cleanup outcome.
+  if ! process_running "$xephyr_pid"; then
+    set +e
+    wait "$xephyr_pid"
+    display_status=$?
+    set -e
+    xephyr_pid=''
+    stop_process "$app_pid"
+    app_pid=''
+    stop_process "$openbox_pid"
+    openbox_pid=''
+    if test "$display_status" -eq 0 && test ! -f "$close_marker"; then
+      die "private display exited without a window-close request"
+    fi
+    exit "$display_status"
+  fi
+  if test -n "$closing_deadline"; then
+    test "$SECONDS" -lt "$closing_deadline" \
+      || die "private display did not finish closing within ${shutdown_timeout}s"
+    sleep 0.05
+    continue
+  fi
   if ! process_running "$app_pid"; then
+    test ! -f "$close_marker" || continue
     set +e
     wait "$app_pid"
     app_status=$?
@@ -224,6 +264,7 @@ while :; do
     exit "$app_status"
   fi
   if ! process_running "$openbox_pid"; then
+    test ! -f "$close_marker" || continue
     # A maximized compatibility window depends on Openbox for its workspace.
     # Do not leave it running after the private window manager exits.
     stop_process "$app_pid"
@@ -233,17 +274,6 @@ while :; do
     openbox_pid=''
     exit "$app_status"
   fi
-  if ! process_running "$xephyr_pid"; then
-    # Closing the nested Xephyr window must also end the application.  Return
-    # the application's resulting status so callers retain normal CLI status.
-    stop_process "$app_pid"
-    app_status=$stopped_status
-    app_pid=''
-    stop_process "$openbox_pid"
-    openbox_pid=''
-    wait "$xephyr_pid" 2>/dev/null || true
-    xephyr_pid=''
-    exit "$app_status"
-  fi
+
   sleep 0.05
 done

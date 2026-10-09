@@ -26,5 +26,11 @@
     <strength>0</strength>
     <screen_edge_strength>0</screen_edge_strength>
   </resistance>
-  <applications/>
+  <applications>
+    <!-- eframe maps the window after first paint. Apply maximize at manage
+         time so its earlier request on the hidden window cannot be lost. -->
+    <application class="versus" type="normal">
+      <maximized>yes</maximized>
+    </application>
+  </applications>
 </openbox_config>

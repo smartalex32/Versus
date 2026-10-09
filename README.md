@@ -315,7 +315,8 @@ The AppImage bundles a private Xephyr display, Openbox window management, Mesa
 software rendering, keyboard data/compiler, and a native picker fallback. Nothing
 is installed on the host, no administrator access is needed, and no X11 forwarding
 or alternative remote desktop is required. The outer window resizes the comparison;
-closing it also shuts down the private display and its helpers. Each instance has
+closing it finishes normally for Git/IDE callers and shuts down the private
+display and its helpers. Each instance has
 its own authenticated local display, with TCP listening disabled.
 
 Use the same option with Git or IDE launches, for example:

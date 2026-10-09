@@ -49,7 +49,16 @@ printf 'xephyr:%s:%s\\n' "$DISPLAY" "$XAUTHORITY" >> "$TEST_LOG"
 test -n "$fd" || exit 2
 eval "printf '%s\\n' \"${XEPHYR_DISPLAY:-77}\" >&$fd"
 trap 'printf "xephyr-term\\n" >> "$TEST_LOG"; exit 0' TERM HUP INT
-if test -n "${XEPHYR_EXIT_AFTER:-}"; then sleep "$XEPHYR_EXIT_AFTER"; exit 0; fi
+if test -n "${XEPHYR_EXIT_AFTER:-}"; then
+  sleep "$XEPHYR_EXIT_AFTER"
+  if test "${XEPHYR_MARK_CLOSE:-0}" = 1; then
+    : > "$VERSUS_X11_CLOSE_MARKER"
+    printf 'xephyr-close-intent\\n' >> "$TEST_LOG"
+    sleep "${XEPHYR_CLOSE_DELAY:-0}"
+    if test "${XEPHYR_STALL_CLOSE:-0}" = 1; then while :; do sleep 1; done; fi
+  fi
+  exit "${XEPHYR_EXIT_STATUS:-0}"
+fi
 while :; do sleep 1; done
 """)
         self._write_helper("xkbcomp", "#!/bin/sh\nexit 0\n")
@@ -62,14 +71,30 @@ printf '_NET_SUPPORTING_WM_CHECK(WINDOW): window id # 0x42\\n'
 printf 'openbox:%s:%s:%s\\n' "$DISPLAY" "$XAUTHORITY" "$*" >> "$TEST_LOG"
 trap 'printf "openbox-term\\n" >> "$TEST_LOG"; exit 0' TERM HUP INT
 if test -n "${OPENBOX_EXIT_AFTER:-}"; then sleep "$OPENBOX_EXIT_AFTER"; exit 0; fi
-while :; do sleep 1; done
+while :; do
+  if test "${OPENBOX_DISCONNECT_ON_CLOSE:-0}" = 1; then
+    for marker in "$TEST_ROOT"/versus-x11.*/close-requested; do
+      test ! -f "$marker" || { printf 'openbox-disconnect\\n' >> "$TEST_LOG"; exit 1; }
+    done
+  fi
+  sleep 0.05
+done
 """)
         self._write_helper("versus", """#!/bin/sh
 printf 'versus:' >> "$TEST_LOG"
 for argument in "$@"; do printf '<%s>' "$argument" >> "$TEST_LOG"; done
 printf ':%s:%s:%s:%s:%s\\n' "$DISPLAY" "$XAUTHORITY" "$VERSUS_X11_COMPAT" "$LIBGL_DRIVERS_PATH" "$LD_LIBRARY_PATH" >> "$TEST_LOG"
 trap 'printf "versus-term\\n" >> "$TEST_LOG"; exit 42' TERM HUP INT
-if test "${VERSUS_WAIT:-0}" = 1; then while :; do sleep 1; done; fi
+if test "${VERSUS_WAIT:-0}" = 1; then
+  while :; do
+    if test "${VERSUS_DISCONNECT_ON_CLOSE:-0}" = 1; then
+      for marker in "$TEST_ROOT"/versus-x11.*/close-requested; do
+        test ! -f "$marker" || { printf 'versus-disconnect\\n' >> "$TEST_LOG"; exit 1; }
+      done
+    fi
+    sleep 0.05
+  done
+fi
 exit "${VERSUS_EXIT:-0}"
 """)
 
@@ -83,7 +108,7 @@ exit "${VERSUS_EXIT:-0}"
 
     def _environment(self, **extra):
         environment = os.environ.copy()
-        environment.update({"TEST_LOG": str(self.log), **extra})
+        environment.update({"TEST_LOG": str(self.log), "TEST_ROOT": str(self.root), **extra})
         return environment
 
     def _run(self, *arguments, **environment):
@@ -203,9 +228,82 @@ exit "${VERSUS_EXIT:-0}"
     def test_closing_xephyr_terminates_its_nested_application(self):
         result = self._run(
             "--compat-x11", DISPLAY=":42", VERSUS_WAIT="1", XEPHYR_EXIT_AFTER="1",
+            XEPHYR_MARK_CLOSE="1", TMPDIR=str(self.root),
         )
-        self.assertEqual(result.returncode, 42)
+        self.assertEqual(result.returncode, 0)
         self.assertIn("versus-term", self.log.read_text().splitlines())
+
+    def test_xephyr_failure_preserves_the_display_error(self):
+        result = self._run(
+            "--compat-x11", DISPLAY=":42", VERSUS_WAIT="1", XEPHYR_EXIT_AFTER="1",
+            XEPHYR_EXIT_STATUS="7",
+        )
+        self.assertEqual(result.returncode, 7)
+        self.assertIn("versus-term", self.log.read_text().splitlines())
+
+    def test_marked_close_waits_through_app_and_wm_disconnects(self):
+        for disconnect in ["VERSUS_DISCONNECT_ON_CLOSE", "OPENBOX_DISCONNECT_ON_CLOSE"]:
+            with self.subTest(disconnect=disconnect):
+                result = self._run(
+                    "--compat-x11", DISPLAY=":42", VERSUS_WAIT="1",
+                    XEPHYR_EXIT_AFTER="1", XEPHYR_MARK_CLOSE="1", XEPHYR_CLOSE_DELAY="1",
+                    TMPDIR=str(self.root), **{disconnect: "1"},
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("versus-disconnect" if disconnect.startswith("VERSUS")
+                              else "openbox-disconnect", self.log.read_text().splitlines())
+                self.assertEqual(list(self.root.glob("versus-x11.*")), [])
+
+    def test_marked_close_preserves_server_failure(self):
+        result = self._run(
+            "--compat-x11", DISPLAY=":42", VERSUS_WAIT="1", XEPHYR_EXIT_AFTER="1",
+            XEPHYR_MARK_CLOSE="1", XEPHYR_CLOSE_DELAY="1", XEPHYR_EXIT_STATUS="7",
+            VERSUS_DISCONNECT_ON_CLOSE="1", TMPDIR=str(self.root),
+        )
+        self.assertEqual(result.returncode, 7)
+        self.assertEqual(list(self.root.glob("versus-x11.*")), [])
+
+    def test_marked_close_timeout_is_bounded_and_cleans_up(self):
+        result = self._run(
+            "--compat-x11", DISPLAY=":42", VERSUS_WAIT="1", XEPHYR_EXIT_AFTER="1",
+            XEPHYR_MARK_CLOSE="1", XEPHYR_STALL_CLOSE="1", VERSUS_X11_SHUTDOWN_TIMEOUT="1",
+            TMPDIR=str(self.root),
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("did not finish closing", result.stderr)
+        self.assertIn("xephyr-term", self.log.read_text().splitlines())
+        self.assertEqual(list(self.root.glob("versus-x11.*")), [])
+
+    def test_unrequested_display_exit_is_an_error(self):
+        result = self._run(
+            "--compat-x11", DISPLAY=":42", VERSUS_WAIT="1", XEPHYR_EXIT_AFTER="1",
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("without a window-close request", result.stderr)
+
+    def test_signal_during_marked_close_retains_signal_status(self):
+        process = subprocess.Popen(
+            [str(self.appdir / "AppRun"), "--compat-x11"],
+            env=self._environment(DISPLAY=":42", VERSUS_WAIT="1", XEPHYR_EXIT_AFTER="1",
+                                  XEPHYR_MARK_CLOSE="1", XEPHYR_CLOSE_DELAY="3",
+                                  TMPDIR=str(self.root)),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True,
+        )
+        try:
+            for _ in range(100):
+                if self.log.exists() and "xephyr-close-intent" in self.log.read_text():
+                    break
+                time.sleep(0.05)
+            else:
+                self.fail("display did not begin its marked close")
+            process.terminate()
+            stdout, stderr = process.communicate(timeout=5)
+            self.assertEqual(process.returncode, 143, stderr)
+            self.assertEqual(list(self.root.glob("versus-x11.*")), [])
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate(timeout=5)
 
 
 if __name__ == "__main__":
