@@ -46,6 +46,10 @@ jobs:
           path: |
             dist/Versus.AppImage
             dist/versus-linux-x86_64.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-runtime-sources
+          path: dist/linux-runtime-sources.tar.gz
 
   source:
     runs-on: ubuntu-latest

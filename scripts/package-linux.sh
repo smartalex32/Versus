@@ -23,22 +23,88 @@ require_directory() {
   fi
 }
 
-bundle_rpm_licenses() {
-  local package="$1"
-  local source
-  local count=0
-  local destination="$appdir/usr/share/licenses/versus/$package"
+declare -A recorded_source_families=()
+declare -A recorded_runtime_packages=()
+runtime_source_rpms=()
 
-  rpm -q "$package" >/dev/null
-  while IFS= read -r source; do
-    test -f "$source" || continue
-    install -D -m 644 "$source" "$destination/${source##*/}"
-    count=$((count + 1))
-  done < <(rpm -ql --licensefiles "$package")
-  if test "$count" -eq 0; then
-    echo "No RPM license files found for compatibility runtime package: $package" >&2
-    exit 1
+bundle_rpm_license_family() {
+  local package="$1"
+  if test -n "${recorded_runtime_packages[$package]:-}"; then
+    return
   fi
+  recorded_runtime_packages[$package]=1
+  local source_rpm version license family_package path basename destination
+  source_rpm="$(rpm -q --qf '%{SOURCERPM}' "$package")"
+  version="$(rpm -q --qf '%{VERSION}-%{RELEASE}' "$package")"
+  license="$(rpm -q --qf '%{LICENSE}' "$package")"
+  test -n "$source_rpm" && test "$source_rpm" != '(none)'
+  printf '%s\t%s\t%s\t%s\n' "$package" "$version" "$source_rpm" "$license" \
+    >> "$runtime_license_inventory"
+
+  if test -n "${recorded_source_families[$source_rpm]:-}"; then
+    return
+  fi
+  recorded_source_families[$source_rpm]=1
+  runtime_source_rpms+=("$source_rpm")
+  destination="$appdir/usr/share/licenses/versus/runtime/$source_rpm"
+
+  # License text is commonly placed in a related subpackage (for example,
+  # xorg-x11-server-common).  Inspect every installed RPM sharing the source
+  # RPM, retaining both declared %license files and ordinary COPYING/LICENSE
+  # documents without inventing replacement text.
+  while IFS= read -r family_package; do
+    while IFS= read -r path; do
+      test -f "$path" || continue
+      install -D -m 644 "$path" "$destination/$family_package/${path##*/}"
+    done < <(rpm -ql --licensefiles "$family_package")
+    while IFS= read -r path; do
+      test -f "$path" || continue
+      basename="${path##*/}"
+      case "$basename" in
+        [Ll][Ii][Cc][Ee][Nn][Ss][Ee]*|[Cc][Oo][Pp][Yy][Ii][Nn][Gg]*|[Nn][Oo][Tt][Ii][Cc][Ee]*|[Cc][Oo][Pp][Yy][Rr][Ii][Gg][Hh][Tt]*)
+          install -D -m 644 "$path" "$destination/$family_package/$basename"
+          ;;
+      esac
+    done < <(rpm -ql "$family_package")
+  done < <(rpm -qa --qf '%{NAME}\t%{SOURCERPM}\n' | awk -F '\t' -v source="$source_rpm" '$2 == source {print $1}')
+}
+
+bundle_runtime_sources() {
+  local source_archive source_rpm mesa_version mesa_archive
+  local source_nevras=()
+  runtime_source_directory="$(mktemp -d)"
+  trap 'rm -rf -- "$runtime_source_directory"' EXIT
+  source_archive="$PWD/dist/linux-runtime-sources.tar.gz"
+
+  # --source enables the corresponding source repositories. Request all exact
+  # installed versions in one transaction, rather than accepting latest sources.
+  for source_rpm in "${runtime_source_rpms[@]}"; do
+    source_nevras+=("${source_rpm%.src.rpm}")
+  done
+  dnf download --source --destdir "$runtime_source_directory" "${source_nevras[@]}"
+  for source_rpm in "${runtime_source_rpms[@]}"; do
+    require_file "$runtime_source_directory/$source_rpm"
+  done
+
+  # Rocky's Mesa runtime RPMs do not carry the upstream license document.
+  # Fetch the archive matching the installed version exactly, preserve it in
+  # the source offer, and extract its original license text into the AppImage.
+  mesa_version="$(rpm -q --qf '%{VERSION}' mesa-libGL)"
+  mesa_archive="$runtime_source_directory/mesa-$mesa_version.tar.xz"
+  curl --fail --location --retry 3 "https://archive.mesa3d.org/mesa-$mesa_version.tar.xz" \
+    --output "$mesa_archive"
+  mkdir -p "$appdir/usr/share/licenses/versus/runtime/mesa"
+  tar -xOf "$mesa_archive" --wildcards '*/docs/license.rst' \
+    > "$appdir/usr/share/licenses/versus/runtime/mesa/LICENSE.rst"
+  test -s "$appdir/usr/share/licenses/versus/runtime/mesa/LICENSE.rst"
+
+  # Include the rebuild recipe for the modified, PATH-resolved Xephyr.
+  install -m 755 scripts/build-xephyr-portable.sh "$runtime_source_directory/"
+  cp "$runtime_license_inventory" "$runtime_source_directory/RUNTIME-SOURCES.tsv"
+  tar -C "$runtime_source_directory" -czf "$source_archive" .
+  test -s "$source_archive"
+  rm -rf "$runtime_source_directory"
+  trap - EXIT
 }
 
 python3 scripts/check-linux-compatibility.py target/release/versus
@@ -91,14 +157,6 @@ mkdir -p "$appdir/usr/share/glvnd/egl_vendor.d"
 printf '{"file_format_version":"1.0.0","ICD":{"library_path":"libEGL_mesa.so.0"}}\n' \
   > "$appdir/usr/share/glvnd/egl_vendor.d/50_mesa.json"
 
-# Preserve the licenses shipped by the primary Rocky runtime packages.  RPM's
-# license-file manifest avoids guessing the installed license paths.
-for package in xorg-x11-server-Xephyr xorg-x11-utils xorg-x11-xauth \
-  xorg-x11-xkb-utils xkeyboard-config mesa-dri-drivers mesa-libGL mesa-libEGL \
-  mesa-libgbm libdrm libglvnd libglvnd-egl libglvnd-glx libX11 libXau libxcb \
-  openbox zenity glib2 gtk3; do
-  bundle_rpm_licenses "$package"
-done
 
 curl --fail --location --retry 3 https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-x86_64.AppImage --output linuxdeploy.AppImage
 chmod +x linuxdeploy.AppImage
@@ -156,6 +214,32 @@ python3 scripts/linux-runtime-libraries.py --destination "$appdir/usr/lib" \
   --native-library "$libdir/libxkbcommon-x11.so.0" \
   --native-library "$libdir/libxcb-xkb.so.1" \
   --native-library "$libdir/libXau.so.6"
+
+# Record each bundled runtime package and gather license documents from its
+# complete installed source-RPM family.  Some subpackages intentionally carry
+# no individual license payload; the family inventory and source offer retain
+# the applicable original text.
+runtime_license_inventory="$appdir/usr/share/licenses/versus/RUNTIME-SOURCES.tsv"
+printf 'Package\tVersion-Release\tSource RPM\tDeclared license\n' > "$runtime_license_inventory"
+for package in xorg-x11-server-Xephyr xorg-x11-utils xorg-x11-xauth \
+  xorg-x11-xkb-utils xkeyboard-config mesa-dri-drivers mesa-libGL mesa-libEGL \
+  mesa-libgbm libdrm libglvnd libglvnd-egl libglvnd-glx libX11 libXau libxcb \
+  openbox zenity glib2 gtk3; do
+  bundle_rpm_license_family "$package"
+done
+
+# Include license/source inventory for every library in the resolved closure,
+# not just the helper entry points and dynamically loaded providers.
+while IFS= read -r runtime_path; do
+  runtime_package="$(rpm -qf --qf '%{NAME}' "$runtime_path")"
+  bundle_rpm_license_family "$runtime_package"
+done < <({
+  awk '$2 == "<-" {print $3}' "$appdir/usr/share/versus/linux-runtime-libraries.txt"
+  for runtime_path in "${executables[@]}" "${drivers[@]}"; do
+    readlink -f "$runtime_path"
+  done
+} | sort -u)
+bundle_runtime_sources
 
 # This deploy-only pass must complete before AppRun and non-ELF runtime files
 # are installed.  The output pass below snapshots the completed AppDir.

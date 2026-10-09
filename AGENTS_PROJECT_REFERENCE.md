@@ -98,7 +98,8 @@ APIs and must fail cleanly when unavailable.
   servers (including X2Go/nxagent). `build-xephyr-portable.sh` rebuilds the installed
   Rocky server version with a PATH-resolved keyboard compiler, retaining its source
   patches; `package-linux.sh` bundles helpers, XKB data, Mesa drivers, schemas,
-  configuration and licenses. `smoke-linux-x11.py` exercises the finished package
+  configuration and licenses. The separate `linux-runtime-sources` artifact retains
+  matching source RPMs and the modified Xephyr rebuild recipe. `smoke-linux-x11.py` exercises the finished package
   through real nxagent, with host xkbcomp hidden, resizing, input, native pickers,
   authentication and cleanup. Compatibility mode only maximizes/undecorates the
   main viewport; ordinary native launches are unchanged. Host clipboard/file drops

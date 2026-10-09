@@ -336,7 +336,9 @@ specific organization's X2Go session configuration still needs local confirmatio
 Versus is licensed under [MIT](LICENSE). Each release includes
 `DEPENDENCY-LICENSES.md`, generated from Cargo metadata; review third-party
 licenses before redistributing. The AppImage also carries license files for its
-additional Linux runtime packages under `usr/share/licenses/versus`.
+additional Linux runtime packages under `usr/share/licenses/versus`. The separate
+`linux-runtime-sources` artifact contains their matching source RPMs and the Xephyr
+rebuild recipe; it is not needed to run the application.
 
 ## Build from source
 

@@ -51,5 +51,5 @@ fi
 test "$(rpm -qp --qf "$identity_format" "$xephyr_rpm")" = "$installed_identity"
 # Reinstall the rebuilt RPM over the build image package without changing its
 # package identity or pulling newer host libraries.
-rpm -Uvh --replacepkgs "$xephyr_rpm"
+rpm -Uvh --replacepkgs --replacefiles "$xephyr_rpm"
 test -x /usr/bin/Xephyr
