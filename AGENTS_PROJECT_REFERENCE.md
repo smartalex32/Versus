@@ -96,7 +96,7 @@ APIs and must fail cleanly when unavailable.
   The AppImage's `--compat-x11` launcher supplies an authenticated private Xephyr
   display, Openbox, Mesa software rendering and Zenity fallback for legacy X11
   servers (including X2Go/nxagent). `build-xephyr-portable.sh` rebuilds the installed
-  Rocky server version with a PATH-resolved keyboard compiler and standard WM-close
+  Rocky server version with a PATH-resolved keyboard compiler and current monitor geometry and standard WM-close
   handling, retaining its source patches; `package-linux.sh` bundles helpers, XKB data, Mesa drivers, schemas,
   configuration and licenses. The separate `linux-runtime-sources` artifact retains
   matching source RPMs and the modified Xephyr rebuild recipe. `smoke-linux-x11.py` exercises the finished package

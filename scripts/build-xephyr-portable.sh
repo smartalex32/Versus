@@ -5,8 +5,8 @@
 set -euo pipefail
 
 script_directory="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-xephyr_close_patch="$script_directory/xephyr-window-close.patch"
-test -f "$xephyr_close_patch"
+xephyr_patch="$script_directory/xephyr-portable.patch"
+test -f "$xephyr_patch"
 
 source_rpm="$(rpm -q --qf '%{SOURCERPM}' xorg-x11-server-Xephyr)"
 installed_release="$(rpm -q --qf '%{RELEASE}' xorg-x11-server-Xephyr)"
@@ -24,10 +24,10 @@ curl --fail --location --retry 3 "$source_rpm_url" --output "$build_root/xorg-x1
 rpm --define "_topdir $rpm_root" -i "$build_root/xorg-x11-server.src.rpm"
 spec="$rpm_root/SPECS/xorg-x11-server.spec"
 test -f "$spec"
-install -m 0644 "$xephyr_close_patch" "$rpm_root/SOURCES/xephyr-window-close.patch"
+install -m 0644 "$xephyr_patch" "$rpm_root/SOURCES/xephyr-portable.patch"
 
-# Apply our closing behavior after Rocky's security patches.  It only advertises
-# WM_DELETE_WINDOW for Xephyr-owned top-level windows, never -parent windows.
+# Apply resize notifications and closing behavior after Rocky's security patches.
+# Advertise WM_DELETE_WINDOW only for owned top-level windows, never -parent windows.
 if test "$(grep -Ec '^[[:space:]]*Patch99999:' "$spec")" -ne 0; then
   echo "Patch99999 is already reserved in $spec" >&2
   exit 1
@@ -38,8 +38,8 @@ if test "$(grep -Ec '^[[:space:]]*%autopatch([[:space:]]|$)' "$spec")" -ne 1; th
   echo "Expected one %autopatch invocation in $spec" >&2
   exit 1
 fi
-sed -i "${description_line}iPatch99999: xephyr-window-close.patch" "$spec"
-test "$(grep -Ec '^[[:space:]]*Patch99999:[[:space:]]+xephyr-window-close\.patch$' "$spec")" -eq 1
+sed -i "${description_line}iPatch99999: xephyr-portable.patch" "$spec"
+test "$(grep -Ec '^[[:space:]]*Patch99999:[[:space:]]+xephyr-portable\.patch$' "$spec")" -eq 1
 
 # Fail before the lengthy RPM build if the patch cannot apply to the matching
 # source shipped by the SRPM.
@@ -50,7 +50,7 @@ mkdir "$patch_check_root"
 tar -xf "$source_archive" -C "$patch_check_root"
 source_tree="$(find "$patch_check_root" -mindepth 1 -maxdepth 1 -type d -name 'xorg-server-*' -print -quit)"
 test -n "$source_tree"
-(cd "$source_tree" && patch --dry-run -p1 < "$xephyr_close_patch")
+(cd "$source_tree" && patch --dry-run -p1 < "$xephyr_patch")
 
 # Preserve every Rocky source patch and build setting. The matching SRPM has one
 # multiline %configure invocation.  An empty directory makes the server invoke

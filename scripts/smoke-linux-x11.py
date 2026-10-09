@@ -141,6 +141,10 @@ def main():
                                 r"dimensions:\s+{}x{}\s".format(width, height),
                                 command(["xdpyinfo"], nested).stdout),
                                 "private display did not follow host window resizing", launcher)
+                            eventually(lambda: re.search(
+                                r"head #0:\s+{}x{}\s+@\s+0,0".format(width, height),
+                                command(["xdpyinfo", "-ext", "XINERAMA"], nested).stdout),
+                                "private monitor geometry did not follow resizing", launcher)
                             eventually(lambda: geometry(nested, window).get("WIDTH") == str(width)
                                        and geometry(nested, window).get("HEIGHT") == str(height),
                                        "Versus did not follow outer window resizing", launcher)
@@ -150,6 +154,10 @@ def main():
                                 file=sys.stderr)
                             root_info = command(["xdpyinfo"], nested).stdout
                             print(re.search(r"dimensions:.*", root_info).group(), file=sys.stderr)
+                            print(command(["xdpyinfo", "-ext", "XINERAMA"], nested).stdout,
+                                  file=sys.stderr)
+                            print(command(["xprop", "-root", "_NET_WORKAREA",
+                                           "_NET_DESKTOP_GEOMETRY"], nested).stdout, file=sys.stderr)
                             print(command(["xprop", "-id", window, "_NET_WM_STATE",
                                            "_NET_FRAME_EXTENTS", "WM_NORMAL_HINTS", "WM_CLASS"], nested).stdout,
                                   file=sys.stderr)

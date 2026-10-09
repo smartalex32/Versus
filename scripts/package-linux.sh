@@ -100,7 +100,7 @@ bundle_runtime_sources() {
 
   # Include the rebuild recipe for the modified, PATH-resolved Xephyr.
   install -m 755 scripts/build-xephyr-portable.sh "$runtime_source_directory/"
-  install -m 644 scripts/xephyr-window-close.patch "$runtime_source_directory/"
+  install -m 644 scripts/xephyr-portable.patch "$runtime_source_directory/"
   cp "$runtime_license_inventory" "$runtime_source_directory/RUNTIME-SOURCES.tsv"
   tar -C "$runtime_source_directory" -czf "$source_archive" .
   test -s "$source_archive"

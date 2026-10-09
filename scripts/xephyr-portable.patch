@@ -153,6 +153,18 @@
  
 --- a/hw/kdrive/ephyr/ephyr.c
 +++ b/hw/kdrive/ephyr/ephyr.c
+@@ -635,6 +635,11 @@
+         if (!output)
+             return FALSE;
+         RROutputSetModes(output, NULL, 0, 0);
++        /* Root geometry alone does not update the legacy driver's CRTC mode.
++         * Refresh it before clients query Xinerama/work-area geometry so
++         * maximized windows follow host ConfigureNotify resizing. */
++        if (!RRGetInfo(pScreen, TRUE))
++            return FALSE;
+     }
+ 
+     return ret;
 @@ -1169,6 +1169,18 @@
              free(configure);
              configure = xev;
