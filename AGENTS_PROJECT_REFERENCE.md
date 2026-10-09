@@ -84,6 +84,13 @@ APIs and must fail cleanly when unavailable.
   `scripts/package-source-offline.sh` packages the offline source release.
 - `.github/workflows/ci.yml` checks Windows and Linux builds; `release.yml` builds
   tagged portable artifacts and the offline source archive.
+- Linux compilation, tests and packaging run in `rockylinux/rockylinux:8.10`
+  through `scripts/build-linux-rocky8.sh`, targeting x86-64/glibc 2.28.
+  `scripts/check-linux-compatibility.py` rejects newer/private glibc requirements
+  in the binary and packaged ELF libraries/runtime. Both workflows exercise the
+  packaged CLI and GUI startup on Rocky 8 with Xvfb/software rendering. Keep the
+  build and its bundled dependencies on this baseline; AppImage extraction alone
+  cannot make newer glibc requirements compatible with older hosts.
 
 ## Architectural constraints
 

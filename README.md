@@ -281,8 +281,25 @@ Tagged releases build these artifacts in GitHub Actions:
 
 The release workflow builds these artifacts; this repository does not claim that a
 particular artifact has been executed on every supported operating system. Linux
-still requires a compatible kernel, display stack, and graphics driver supplied by
-the host.
+x86-64 packages are built on Rocky Linux 8.10, targeting glibc 2.28 or newer.
+Packaging rejects newer glibc requirements in the executable, bundled libraries,
+and AppImage runtime. CI also checks the packaged command-line entry point and
+window initialization in that environment. Linux still requires a compatible
+kernel, display stack, and graphics driver supplied by the host.
+
+Download `linux-pr-artifacts` from a successful GitHub Actions CI run to get the
+latest branch build without installing compilers or build dependencies locally.
+Copy `Versus.AppImage` to your Linux machine and run:
+
+```bash
+chmod +x Versus.AppImage
+./Versus.AppImage --appimage-extract-and-run
+```
+
+Extract-and-run does not require FUSE or administrator access. It does not change
+the minimum glibc requirement. The tar.gz convenience archive contains the plain
+executable, which requires its native libraries to be installed on the host;
+use the AppImage when you cannot install dependencies.
 
 Versus is licensed under [MIT](LICENSE). Each release includes
 `DEPENDENCY-LICENSES.md`, generated from Cargo metadata; review third-party
@@ -318,7 +335,20 @@ Reapply it and update its checksums after refreshing dependencies.
 
 On Linux, install the host development libraries required by the native windowing
 backend, then use the same Cargo command. The release workflow lists the Ubuntu
-packages it uses as a reproducible reference.
+runner that hosts the build, but compilation and packaging run inside Rocky Linux
+8.10 so they do not inherit Ubuntu's newer glibc. On a development machine with
+Docker available, reproduce the portable Linux build from the repository root:
+
+```bash
+docker run --rm --platform linux/amd64 \
+  --volume "$PWD:/workspace" --workdir /workspace \
+  rockylinux/rockylinux:8.10 bash scripts/build-linux-rocky8.sh
+```
+
+The script installs build prerequisites and Rust inside the disposable container,
+runs checks, and writes the portable packages to `dist/`. Container setup and the
+packaging-tool download require internet access; Cargo still uses offline vendored
+dependencies. The Linux end-user machine needs no build tools.
 
 ## Development checks
 
