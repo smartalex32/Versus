@@ -280,8 +280,19 @@ install -m 755 scripts/launch-linux-picker.sh "$appdir/usr/bin/zenity"
 rm -f "$appdir/AppRun"
 install -m 755 scripts/launch-linux.sh "$appdir/AppRun"
 python3 scripts/check-linux-compatibility.py "$appdir"
-APPIMAGE_EXTRACT_AND_RUN=1 ARCH=x86_64 ./linuxdeploy.AppImage --appdir "$appdir" \
-  --custom-apprun scripts/launch-linux.sh --output appimage
+# linuxdeploy rewrites executable RUNPATHs to the full usr/lib directory.
+# Restrict the main app to its native keyboard runtime, then call only the
+# bundled output plugin so another deployment pass cannot undo that isolation.
+patchelf --set-rpath '$ORIGIN/../lib/native' "$appdir/usr/bin/versus"
+linuxdeploy_tools="$(mktemp -d)"
+trap 'rm -rf -- "$linuxdeploy_tools"' EXIT
+linuxdeploy_absolute="$PWD/linuxdeploy.AppImage"
+(cd "$linuxdeploy_tools" && "$linuxdeploy_absolute" --appimage-extract >/dev/null)
+output_plugin="$(find "$linuxdeploy_tools/squashfs-root" -type f -name linuxdeploy-plugin-appimage -print -quit)"
+test -n "$output_plugin"
+APPIMAGE_EXTRACT_AND_RUN=1 ARCH=x86_64 "$output_plugin" --appdir "$PWD/$appdir"
+rm -rf -- "$linuxdeploy_tools"
+trap - EXIT
 
 appimage_path="$(find . -maxdepth 1 -type f -name '*.AppImage' ! -name 'linuxdeploy.AppImage' -print -quit)"
 test -n "$appimage_path"
@@ -293,11 +304,13 @@ trap 'rm -rf "$verification_dir"' EXIT
 appimage_absolute="$PWD/dist/Versus.AppImage"
 (cd "$verification_dir" && "$appimage_absolute" --appimage-extract >/dev/null)
 python3 scripts/check-linux-compatibility.py dist/Versus.AppImage "$verification_dir/squashfs-root"
+test "$(patchelf --print-rpath "$verification_dir/squashfs-root/usr/bin/versus")" = '$ORIGIN/../lib/native'
+echo 'Verified main executable cannot resolve the private graphics runtime through RUNPATH.'
 
 # Keep the existing command-line tarball deliberately small: it remains the
 # native Versus executable for users who provide their own graphics stack.
 mkdir -p portable-linux/versus-linux-x86_64
-cp "$appdir/usr/bin/versus" portable-linux/versus-linux-x86_64/versus
+cp target/release/versus portable-linux/versus-linux-x86_64/versus
 cp README.md portable-linux/versus-linux-x86_64/README.md
 cp LICENSE portable-linux/versus-linux-x86_64/LICENSE
 tar -C portable-linux -czf dist/versus-linux-x86_64.tar.gz versus-linux-x86_64
