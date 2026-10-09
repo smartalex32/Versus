@@ -254,6 +254,22 @@ exit "${VERSUS_EXIT:-0}"
                               else "openbox-disconnect", self.log.read_text().splitlines())
                 self.assertEqual(list(self.root.glob("versus-x11.*")), [])
 
+    def test_marked_close_during_startup_finishes_normally(self):
+        for phase in ["XDPYINFO_FAIL", "XPROP_FAIL"]:
+            with self.subTest(phase=phase):
+                if self.log.exists():
+                    self.log.unlink()
+                result = self._run(
+                    "--compat-x11", DISPLAY=":42", VERSUS_WAIT="1",
+                    XEPHYR_EXIT_AFTER="1", XEPHYR_MARK_CLOSE="1", XEPHYR_CLOSE_DELAY="1",
+                    VERSUS_X11_READINESS_TIMEOUT="3", TMPDIR=str(self.root),
+                    **{phase: "1"},
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertFalse(any(line.startswith("versus:")
+                                     for line in self.log.read_text().splitlines()))
+                self.assertEqual(list(self.root.glob("versus-x11.*")), [])
+
     def test_marked_close_preserves_server_failure(self):
         result = self._run(
             "--compat-x11", DISPLAY=":42", VERSUS_WAIT="1", XEPHYR_EXIT_AFTER="1",

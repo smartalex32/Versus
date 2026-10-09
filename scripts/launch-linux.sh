@@ -127,6 +127,37 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+shutdown_timeout="${VERSUS_X11_SHUTDOWN_TIMEOUT:-5}"
+case "$shutdown_timeout" in
+  ''|*[!0-9]*) die "VERSUS_X11_SHUTDOWN_TIMEOUT must be a positive whole number" ;;
+esac
+test "$shutdown_timeout" -gt 0 || die "VERSUS_X11_SHUTDOWN_TIMEOUT must be positive"
+
+finish_requested_close() {
+  test -f "$close_marker" || return 0
+  local closing_deadline=$((SECONDS + shutdown_timeout))
+  local display_status
+  # Close intent precedes app/WM disconnects, including during startup. Wait
+  # only for a requested close, with a bound, and keep the server's outcome.
+  while process_running "$xephyr_pid"; do
+    test "$SECONDS" -lt "$closing_deadline" \
+      || die "private display did not finish closing within ${shutdown_timeout}s"
+    sleep 0.05
+  done
+  set +e
+  wait "$xephyr_pid"
+  display_status=$?
+  set -e
+  xephyr_pid=''
+  exit "$display_status"
+}
+
+startup_failure() {
+  # Check again at failure sites: the marker may arrive after the loop check.
+  finish_requested_close
+  die "$@"
+}
+
 cookie="$(od -An -N16 -tx1 /dev/urandom | tr -d '[:space:]')"
 test "${#cookie}" -eq 32 || die "could not generate an X11 authorization cookie"
 # The server reads the authority file while it starts, before -displayfd tells
@@ -160,35 +191,37 @@ eval "exec ${display_fd}>&-"
 
 readiness_timeout="${VERSUS_X11_READINESS_TIMEOUT:-10}"
 case "$readiness_timeout" in
-  ''|*[!0-9]*) die "VERSUS_X11_READINESS_TIMEOUT must be a whole number" ;;
+  ''|*[!0-9]*) startup_failure "VERSUS_X11_READINESS_TIMEOUT must be a whole number" ;;
 esac
 deadline=$((SECONDS + readiness_timeout))
 display_number=''
 while test "$SECONDS" -le "$deadline"; do
+  finish_requested_close
   if test -s "$display_file"; then
     display_number="$(tr -d '\r\n' < "$display_file")"
     case "$display_number" in
-      ''|*[!0-9]*) die "Xephyr returned an invalid display number" ;;
+      ''|*[!0-9]*) startup_failure "Xephyr returned an invalid display number" ;;
       *) break ;;
     esac
   fi
-  process_running "$xephyr_pid" || die "Xephyr exited before allocating a display"
+  process_running "$xephyr_pid" || startup_failure "Xephyr exited before allocating a display"
   sleep 0.05
 done
-test -n "$display_number" || die "Xephyr did not allocate a display within ${readiness_timeout}s"
+test -n "$display_number" || startup_failure "Xephyr did not allocate a display within ${readiness_timeout}s"
 nested_display=":$display_number"
 
 "$xauth" -f "$authority_file" add "$nested_display" MIT-MAGIC-COOKIE-1 "$cookie"
 
 while test "$SECONDS" -le "$deadline"; do
+  finish_requested_close
   if XAUTHORITY="$authority_file" "$xdpyinfo" -display "$nested_display" >/dev/null 2>&1; then
     break
   fi
-  process_running "$xephyr_pid" || die "Xephyr exited before becoming ready"
+  process_running "$xephyr_pid" || startup_failure "Xephyr exited before becoming ready"
   sleep 0.05
 done
 XAUTHORITY="$authority_file" "$xdpyinfo" -display "$nested_display" >/dev/null 2>&1 \
-  || die "Xephyr did not become ready within ${readiness_timeout}s"
+  || startup_failure "Xephyr did not become ready within ${readiness_timeout}s"
 
 DISPLAY="$nested_display" XAUTHORITY="$authority_file" \
   XDG_DATA_DIRS="$appdir/usr/share" \
@@ -196,18 +229,21 @@ DISPLAY="$nested_display" XAUTHORITY="$authority_file" \
 openbox_pid=$!
 
 while test "$SECONDS" -le "$deadline"; do
+  finish_requested_close
   wm_check="$(XAUTHORITY="$authority_file" "$xprop" -display "$nested_display" -root _NET_SUPPORTING_WM_CHECK 2>/dev/null || true)"
   case "$wm_check" in
     *"window id # 0x"*) break ;;
     *) ;;
   esac
-  process_running "$openbox_pid" || die "Openbox exited before becoming ready"
+  process_running "$openbox_pid" || startup_failure "Openbox exited before becoming ready"
   sleep 0.05
 done
 case "${wm_check:-}" in
   *"window id # 0x"*) ;;
-  *) die "Openbox did not become ready within ${readiness_timeout}s" ;;
+  *) startup_failure "Openbox did not become ready within ${readiness_timeout}s" ;;
 esac
+
+finish_requested_close
 
 DISPLAY="$nested_display" XAUTHORITY="$authority_file" VERSUS_X11_COMPAT=1 \
   LIBGL_ALWAYS_SOFTWARE=1 LIBGL_DRIVERS_PATH="$mesa_dri" \
@@ -215,20 +251,8 @@ DISPLAY="$nested_display" XAUTHORITY="$authority_file" VERSUS_X11_COMPAT=1 \
   "$versus" "${arguments[@]}" &
 app_pid=$!
 
-shutdown_timeout="${VERSUS_X11_SHUTDOWN_TIMEOUT:-5}"
-case "$shutdown_timeout" in
-  ''|*[!0-9]*) die "VERSUS_X11_SHUTDOWN_TIMEOUT must be a positive whole number" ;;
-esac
-test "$shutdown_timeout" -gt 0 || die "VERSUS_X11_SHUTDOWN_TIMEOUT must be positive"
-closing_deadline=''
-
 while :; do
-  # Close intent precedes client disconnects during server cleanup. Neither an
-  # app XIO error nor a window-manager exit should turn a normal close into an
-  # error for Git/IDE callers. Only successful server shutdown completes it.
-  if test -f "$close_marker" && test -z "$closing_deadline"; then
-    closing_deadline=$((SECONDS + shutdown_timeout))
-  fi
+  finish_requested_close
   # The private server distinguishes a normal WM close request from display
   # connection failure. Observe it before a client XIO/TERM cleanup outcome.
   if ! process_running "$xephyr_pid"; then
@@ -245,12 +269,6 @@ while :; do
       die "private display exited without a window-close request"
     fi
     exit "$display_status"
-  fi
-  if test -n "$closing_deadline"; then
-    test "$SECONDS" -lt "$closing_deadline" \
-      || die "private display did not finish closing within ${shutdown_timeout}s"
-    sleep 0.05
-    continue
   fi
   if ! process_running "$app_pid"; then
     test ! -f "$close_marker" || continue
