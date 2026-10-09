@@ -123,9 +123,29 @@ def main():
                                        "Xephyr host window did not open", launcher)
                     for width, height in [(1152, 720), (800, 600), (1400, 900), (1280, 800)]:
                         command(["xdotool", "windowsize", outer, str(width), str(height)], host)
-                        eventually(lambda: geometry(nested, window).get("WIDTH") == str(width)
-                                   and geometry(nested, window).get("HEIGHT") == str(height),
-                                   "Versus did not follow outer window resizing", launcher)
+                        try:
+                            eventually(lambda: geometry(host, outer).get("WIDTH") == str(width)
+                                       and geometry(host, outer).get("HEIGHT") == str(height),
+                                       "host Xephyr window did not resize", launcher)
+                            eventually(lambda: re.search(
+                                r"dimensions:\s+{}x{}\s".format(width, height),
+                                command(["xdpyinfo"], nested).stdout),
+                                "private display did not follow host window resizing", launcher)
+                            eventually(lambda: geometry(nested, window).get("WIDTH") == str(width)
+                                       and geometry(nested, window).get("HEIGHT") == str(height),
+                                       "Versus did not follow outer window resizing", launcher)
+                        except Exception:
+                            print("Requested resize: {}x{}; host: {}; client: {}".format(
+                                width, height, geometry(host, outer), geometry(nested, window)),
+                                file=sys.stderr)
+                            root_info = command(["xdpyinfo"], nested).stdout
+                            print(re.search(r"dimensions:.*", root_info).group(), file=sys.stderr)
+                            print(command(["xprop", "-id", window, "_NET_WM_STATE",
+                                           "_NET_FRAME_EXTENTS", "WM_NORMAL_HINTS"], nested).stdout,
+                                  file=sys.stderr)
+                            raise
+                        print("NX resize passed: {}x{}".format(width, height), flush=True)
+
 
                     # Input enters through the legacy host, rather than being
                     # injected into the modern nested display directly.

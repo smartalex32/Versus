@@ -3,7 +3,7 @@
   <theme>
     <name>Onyx-Citrus</name>
     <titleLayout>NLIMC</titleLayout>
-    <keepBorder>yes</keepBorder>
+    <keepBorder>no</keepBorder>
     <animateIconify>no</animateIconify>
   </theme>
   <desktops>
