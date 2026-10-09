@@ -30,7 +30,9 @@ sed -i '/^[[:space:]]*%configure[[:space:]].*\\[[:space:]]*$/a\
 
 # Build requirements come from the same installed Rocky version's spec. dnf-plugins-core
 # and PowerTools must already be enabled by build-linux-rocky8.sh.
-dnf builddep --assumeyes "$spec"
+# Rocky keeps some server build headers (notably libdmx-devel) in its
+# build-only Devel repository. Enable it for this dependency transaction only.
+dnf builddep --assumeyes --enablerepo=devel "$spec"
 rpmbuild --define "_topdir $rpm_root" -bb "$spec"
 
 xephyr_rpm="$(find "$rpm_root/RPMS/x86_64" -maxdepth 1 -type f -name 'xorg-x11-server-Xephyr-*.rpm' -print -quit)"
