@@ -44,6 +44,8 @@ fn run(launch: Option<cli::LaunchRequest>) -> eframe::Result {
             .with_inner_size([1200.0, 800.0])
             .with_min_inner_size([900.0, 650.0]),
         event_loop_builder: drop_capable_event_loop(),
+        // Retain app zoom without introducing window-position persistence.
+        persist_window: false,
         ..Default::default()
     };
     eframe::run_native(

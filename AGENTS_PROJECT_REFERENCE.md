@@ -36,9 +36,18 @@ APIs and must fail cleanly when unavailable.
   Changed blocks use bounded similarity alignment to pair edited lines across
   insertions/deletions without discarding exact line anchors or original numbers.
   Identical entries are neutral gray; both views share difference status icons.
+- Native accessibility is enabled through eframe AccessKit. Tree rows expose side,
+  path, type, status, and size; visible file lines expose side, original number,
+  status, and text. Up/Down tree navigation preserves focus side and Tab escapes.
+  Focusable file panes support keyboard scrolling. Empty panes show persistent
+  drop outlines; toolbar press feedback precedes release activation.
+  UI zoom alone is saved through eframe storage; compared content and paths are
+  session-local. Row/control geometry follows font metrics.
 - Shared UI options filter identical entries and independently ignore inline
   whitespace or line endings. Differences-only filtering and both ignore rules are
-  enabled by default. Changes to ignore rules restart background workers
+  enabled by default. Filtering keeps a top-visible or nearest-surviving anchor;
+  diff navigation reports the current change position in the fixed status area.
+  Changes to ignore rules restart background workers
   while retaining the displayed result until its replacement is ready. Refreshes
   preserve expansion, selection and source-line scroll anchors; progress uses a
   fixed status area, and folder jumps clamp before painting to avoid transient shifts.
