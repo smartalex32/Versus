@@ -28,6 +28,7 @@ class LinuxLauncherTests(unittest.TestCase):
         self.log = self.root / "log"
         self._write_helper("xauth", """#!/bin/sh
 printf 'xauth:%s\\n' "$*" >> "$TEST_LOG"
+test "${XAUTH_FAIL:-0}" != 1 || exit 9
 case " $* " in
   *" nlist :0 "*) printf '01000000000000124d49542d4d414749432d434f4f4b49452d31001000112233445566778899aabbccddeeff\\n' ;;
 esac
@@ -88,8 +89,8 @@ exit "${VERSUS_EXIT:-0}"
         return subprocess.run(
             [str(self.appdir / "AppRun"), *arguments],
             env=self._environment(**environment),
-            text=True,
-            capture_output=True,
+            universal_newlines=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             timeout=8,
         )
 
@@ -115,6 +116,14 @@ exit "${VERSUS_EXIT:-0}"
         self.assertEqual(result.returncode, 1)
         self.assertIn("requires an existing X11 DISPLAY", result.stderr)
         self.assertFalse(self.log.exists())
+
+    def test_authority_setup_failure_removes_private_state(self):
+        result = self._run("--compat-x11", DISPLAY=":42", XAUTH_FAIL="1",
+                           TMPDIR=str(self.root))
+        self.assertEqual(result.returncode, 9)
+        self.assertEqual(list(self.root.glob("versus-x11.*")), [])
+        self.assertFalse(any(line.startswith("xephyr:")
+                             for line in self.log.read_text().splitlines()))
 
     def test_compatibility_mode_uses_private_nested_environment_and_app_status(self):
         result = self._run(
@@ -168,7 +177,7 @@ exit "${VERSUS_EXIT:-0}"
         process = subprocess.Popen(
             [str(self.appdir / "AppRun"), "--compat-x11"],
             env=self._environment(DISPLAY=":42", VERSUS_WAIT="1"),
-            text=True,
+            universal_newlines=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )

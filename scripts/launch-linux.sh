@@ -78,16 +78,6 @@ authority_file="$state_dir/Xauthority"
 : > "$authority_file"
 chmod 600 "$authority_file"
 
-cookie="$(od -An -N16 -tx1 /dev/urandom | tr -d '[:space:]')"
-test "${#cookie}" -eq 32 || die "could not generate an X11 authorization cookie"
-# The server reads the authority file while it starts, before -displayfd tells
-# us its chosen number.  FamilyWild (ffff) deliberately matches every display,
-# allowing a private MIT cookie to be present from startup without guessing a
-# free :N.  Add the concrete mapping after allocation for ordinary clients.
-"$xauth" -f "$authority_file" add :0 MIT-MAGIC-COOKIE-1 "$cookie"
-"$xauth" -f "$authority_file" nlist :0 | sed 's/^..../ffff/' | "$xauth" -f "$authority_file" nmerge -
-"$xauth" -f "$authority_file" remove :0
-
 app_pid=''
 xephyr_pid=''
 openbox_pid=''
@@ -132,6 +122,16 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+cookie="$(od -An -N16 -tx1 /dev/urandom | tr -d '[:space:]')"
+test "${#cookie}" -eq 32 || die "could not generate an X11 authorization cookie"
+# The server reads the authority file while it starts, before -displayfd tells
+# us its chosen number.  FamilyWild (ffff) deliberately matches every display,
+# allowing a private MIT cookie to be present from startup without guessing a
+# free :N.  Add the concrete mapping after allocation for ordinary clients.
+"$xauth" -f "$authority_file" add :0 MIT-MAGIC-COOKIE-1 "$cookie"
+"$xauth" -f "$authority_file" nlist :0 | sed 's/^..../ffff/' | "$xauth" -f "$authority_file" nmerge -
+
+
 # Xephyr's -displayfd asks the server to allocate its own display number.  It
 # eliminates the racy "find a free :N" probe while the FamilyWild record above
 # keeps authentication enabled before the number is known.
@@ -141,12 +141,12 @@ if test -v XAUTHORITY; then
     PATH="$appdir/usr/bin:$PATH" XKB_CONFIG_ROOT="$xkb_dir" \
     LIBGL_ALWAYS_SOFTWARE=1 LIBGL_DRIVERS_PATH="$mesa_dri" \
     "$xephyr" -displayfd "$display_fd" -auth "$authority_file" -nolisten tcp \
-      -terminate -noreset -resizeable -screen 1280x800 -xkbdir "$xkb_dir" &
+      -noreset -resizeable -screen 1280x800 -xkbdir "$xkb_dir" &
 else
   DISPLAY="$host_display" PATH="$appdir/usr/bin:$PATH" XKB_CONFIG_ROOT="$xkb_dir" \
     LIBGL_ALWAYS_SOFTWARE=1 LIBGL_DRIVERS_PATH="$mesa_dri" \
     "$xephyr" -displayfd "$display_fd" -auth "$authority_file" -nolisten tcp \
-      -terminate -noreset -resizeable -screen 1280x800 -xkbdir "$xkb_dir" &
+      -noreset -resizeable -screen 1280x800 -xkbdir "$xkb_dir" &
 fi
 xephyr_pid=$!
 eval "exec ${display_fd}>&-"
@@ -191,14 +191,15 @@ openbox_pid=$!
 while test "$SECONDS" -le "$deadline"; do
   wm_check="$(XAUTHORITY="$authority_file" "$xprop" -display "$nested_display" -root _NET_SUPPORTING_WM_CHECK 2>/dev/null || true)"
   case "$wm_check" in
-    *"not found"*|'') ;;
-    *) break ;;
+    *"window id # 0x"*) break ;;
+    *) ;;
   esac
   process_running "$openbox_pid" || die "Openbox exited before becoming ready"
   sleep 0.05
 done
 case "${wm_check:-}" in
-  *"not found"*|'') die "Openbox did not become ready within ${readiness_timeout}s" ;;
+  *"window id # 0x"*) ;;
+  *) die "Openbox did not become ready within ${readiness_timeout}s" ;;
 esac
 
 DISPLAY="$nested_display" XAUTHORITY="$authority_file" VERSUS_X11_COMPAT=1 \

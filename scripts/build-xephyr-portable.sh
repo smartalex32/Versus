@@ -19,12 +19,12 @@ test -f "$spec"
 # Preserve every Rocky source patch and build setting. The matching SRPM has one
 # multiline %configure invocation.  An empty directory makes the server invoke
 # xkbcomp through PATH, which AppRun puts in front of the host PATH.
-configure_count="$(grep -Ec '^[[:space:]]*%configure[[:space:]]*\\[[:space:]]*$' "$spec")"
+configure_count="$(grep -Ec '^[[:space:]]*%configure[[:space:]].*\\[[:space:]]*$' "$spec")"
 if test "$configure_count" -ne 1; then
   echo "Expected one multiline %configure invocation in $spec, found $configure_count" >&2
   exit 1
 fi
-sed -i '/^[[:space:]]*%configure[[:space:]]*\\[[:space:]]*$/a\
+sed -i '/^[[:space:]]*%configure[[:space:]].*\\[[:space:]]*$/a\
     --with-xkb-bin-directory= \\
 ' "$spec"
 
