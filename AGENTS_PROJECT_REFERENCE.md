@@ -41,7 +41,9 @@ APIs and must fail cleanly when unavailable.
   status, and text. Up/Down tree navigation preserves focus side and Tab escapes.
   Focusable file panes support keyboard scrolling. Empty panes show persistent
   drop outlines; toolbar press feedback precedes release activation.
-  Magnifier −/+ buttons flank the zoom percentage; Ctrl/Command + wheel changes
+  Legend-row status text is clipped to one line with full messages on hover.
+  The zoom percentage precedes adjacent magnifier −/+ buttons immediately left
+  of the differences filter; Ctrl/Command + wheel changes
   UI scale using egui’s smooth zoom delta, without scrolling the comparison.
   Zoom is applied once per frame and bounded to egui’s 20–500% range.
   UI zoom alone is saved through eframe storage; compared content and paths are
@@ -49,11 +51,13 @@ APIs and must fail cleanly when unavailable.
 - Shared UI options filter identical entries and independently ignore inline
   whitespace or line endings. Differences-only filtering and both ignore rules are
   enabled by default. Filtering keeps a top-visible or nearest-surviving anchor;
-  diff navigation reports the current change position in the fixed status area.
+  diff navigation reports the current change position in the reserved legend-row
+  status area.
   Changes to ignore rules restart background workers
   while retaining the displayed result until its replacement is ready. Refreshes
   preserve expansion, selection and source-line scroll anchors; progress uses a
-  fixed status area, and folder jumps clamp before painting to avoid transient shifts.
+  reserved legend-row status area, and folder jumps clamp before painting to avoid
+  transient shifts.
   Folder ignores use bounded UTF-8 normalization and fall back to byte comparison
   for binary, invalid UTF-8, or larger files. Native single-path drops select a
   pane and infer file/folder mode through the existing source classifier.

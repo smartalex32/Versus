@@ -57,9 +57,15 @@ error details. The cursor becomes a pointer over files and folders.
 
 Comparison runs in the background with refresh and cancel icons in the header.
 Files are compared by content, not timestamps. Symlinks are compared by their
-targets and are never recursively followed. Empty folders are included. Changing
-a path clears the prior result so it cannot be mistaken for the new selection.
-While loading, a status indicator shows the current stage and elapsed time.
+target paths rather than target contents and are never recursively followed.
+This keeps traversal within the selected roots and avoids loops or repeated
+comparisons when links point to ancestors or outside folders. Empty folders are
+included. Changing a path clears the prior result so it cannot be mistaken for
+the new selection.
+The status area immediately to the right of the legend shows change position,
+loading progress, or errors without adding another row above the panes.
+Long status messages are shortened on screen; hover for the complete text.
+While loading, it shows the current stage and elapsed time.
 Measured stages also show progress and an approximate time remaining for that
 stage. Folder discovery and line alignment have no reliable total, so they show
 activity without a time estimate. File loading can also be cancelled.
@@ -133,8 +139,9 @@ The sun/moon icon at the upper right switches between light and dark themes in
 either view. The logo and window icon preserve the blue half and use a white half
 in dark mode or the original dark half in light mode.
 
-The status area shows the current **Zoom** percentage between magnifying-glass
-**−** and **+** buttons. Click them to reduce or enlarge the interface. Hold
+The legend row places **Zoom** and its percentage immediately before adjacent
+magnifying-glass **−** and **+** buttons, just left of **Show only differences**.
+Click them to reduce or enlarge the interface. Hold
 **Ctrl** and scroll the mouse wheel up/down to zoom in/out; the wheel alone
 scrolls the comparison. Command + wheel also works on macOS. Use
 Ctrl + / Ctrl - / Ctrl 0 (Command on macOS) for the keyboard shortcuts,
