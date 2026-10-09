@@ -13,7 +13,7 @@ chmod +x linuxdeploy.AppImage
 # winit dlopens these keyboard libraries, so ELF dependency discovery misses them.
 keyboard_libraries=()
 for library in libxkbcommon.so.0 libxkbcommon-x11.so.0; do
-  library_path="$(ldconfig -p | awk -v name="$library" '$1 == name {print $NF; exit}')"
+  library_path="$(ldconfig -p | awk -v name="$library" '$1 == name && !found {print $NF; found=1}')"
   if test -z "$library_path"; then
     echo "Missing build-host keyboard library: $library" >&2
     exit 1
