@@ -10,7 +10,17 @@ printf '[Desktop Entry]\nType=Application\nName=Versus\nExec=versus\nIcon=versus
 cp assets/logo-icon.png AppDir/usr/share/pixmaps/versus.png
 curl --fail --location --retry 3 https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-x86_64.AppImage --output linuxdeploy.AppImage
 chmod +x linuxdeploy.AppImage
-APPIMAGE_EXTRACT_AND_RUN=1 ARCH=x86_64 ./linuxdeploy.AppImage --appdir AppDir --desktop-file AppDir/usr/share/applications/versus.desktop --icon-file AppDir/usr/share/pixmaps/versus.png --output appimage
+# winit dlopens these keyboard libraries, so ELF dependency discovery misses them.
+keyboard_libraries=()
+for library in libxkbcommon.so.0 libxkbcommon-x11.so.0; do
+  library_path="$(ldconfig -p | awk -v name="$library" '$1 == name {print $NF; exit}')"
+  if test -z "$library_path"; then
+    echo "Missing build-host keyboard library: $library" >&2
+    exit 1
+  fi
+  keyboard_libraries+=(--library "$library_path")
+done
+APPIMAGE_EXTRACT_AND_RUN=1 ARCH=x86_64 ./linuxdeploy.AppImage --appdir AppDir --desktop-file AppDir/usr/share/applications/versus.desktop --icon-file AppDir/usr/share/pixmaps/versus.png "${keyboard_libraries[@]}" --output appimage
 python3 scripts/check-linux-compatibility.py AppDir
 appimage_path="$(find . -maxdepth 1 -type f -name '*.AppImage' ! -name 'linuxdeploy.AppImage' -print -quit)"
 test -n "$appimage_path"

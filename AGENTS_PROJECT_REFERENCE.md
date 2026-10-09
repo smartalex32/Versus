@@ -89,6 +89,8 @@ APIs and must fail cleanly when unavailable.
   `scripts/check-linux-compatibility.py` rejects newer/private glibc requirements
   in the binary and packaged ELF libraries/runtime. Both workflows exercise the
   packaged CLI and GUI startup on Rocky 8 with Xvfb/software rendering. Keep the
+  dynamically loaded xkbcommon keyboard libraries explicitly bundled; ordinary
+  ELF dependency discovery does not find them. Keep the
   build and its bundled dependencies on this baseline; AppImage extraction alone
   cannot make newer glibc requirements compatible with older hosts.
 

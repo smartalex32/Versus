@@ -8,7 +8,7 @@ dnf install --assumeyes dnf-plugins-core
 dnf config-manager --set-enabled powertools
 dnf install --assumeyes gcc gcc-c++ make pkgconf-pkg-config curl ca-certificates \
   binutils file findutils tar gzip python3 fontconfig-devel mesa-libGL-devel gtk3-devel \
-  libX11-devel libXrandr-devel libXi-devel libXcursor-devel libxkbcommon-devel \
+  libX11-devel libXrandr-devel libXi-devel libXcursor-devel libxkbcommon-devel libxkbcommon-x11 \
   wayland-devel xorg-x11-server-Xvfb xorg-x11-utils mesa-dri-drivers
 
 curl --fail --location --retry 3 https://sh.rustup.rs --output /tmp/versus-rustup-init.sh
