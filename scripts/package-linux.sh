@@ -119,7 +119,6 @@ require_file /usr/bin/xkbcomp
 require_file /usr/bin/openbox
 require_file /usr/bin/zenity
 require_directory /usr/share/X11/xkb
-require_directory /usr/share/openbox
 require_directory /usr/share/themes/Onyx-Citrus/openbox-3
 require_directory /usr/share/glib-2.0/schemas
 require_file "$libdir/dri/swrast_dri.so"
@@ -145,7 +144,6 @@ install -D -m 644 scripts/compat-openbox.xml "$appdir/usr/share/versus/compat-op
 # XKB definitions and Openbox configuration/theme files are data rather than
 # ELF dependencies.  AppRun gives Xephyr the XKB directory with -xkbdir.
 cp -a /usr/share/X11/xkb "$appdir/usr/share/X11/"
-cp -a /usr/share/openbox "$appdir/usr/share/"
 mkdir -p "$appdir/usr/share/themes/Onyx-Citrus"
 cp -a /usr/share/themes/Onyx-Citrus/openbox-3 "$appdir/usr/share/themes/Onyx-Citrus/"
 # Zenity's GTK settings (including its compiled schema cache) must travel with
