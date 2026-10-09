@@ -29,7 +29,7 @@
   <applications>
     <!-- eframe maps the window after first paint. Apply maximize at manage
          time so its earlier request on the hidden window cannot be lost. -->
-    <application class="versus" type="normal">
+    <application class="Versus" type="normal">
       <maximized>yes</maximized>
     </application>
   </applications>

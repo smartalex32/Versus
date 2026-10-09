@@ -110,6 +110,16 @@ def main():
                                         "nested Versus did not start", launcher)
                     window = eventually(lambda: find_window(nested, "^Versus"),
                                         "nested Versus window did not open", launcher)
+                    window_class = command(["xprop", "-id", window, "WM_CLASS"], nested).stdout
+                    if not re.search(r'"Versus"\s*$', window_class):
+                        raise RuntimeError("unexpected comparison window class: " + window_class)
+
+                    def maximized():
+                        state = command(["xprop", "-id", window, "_NET_WM_STATE"], nested).stdout
+                        return all(value in state for value in
+                                   ["_NET_WM_STATE_MAXIMIZED_HORZ", "_NET_WM_STATE_MAXIMIZED_VERT"])
+
+                    eventually(maximized, "comparison window was not maximized when mapped", launcher)
                     info = command(["xdpyinfo", "-ext", "XInputExtension"], nested).stdout
                     if "XInputExtension" not in info:
                         raise RuntimeError("nested XInput extension unavailable")
@@ -141,7 +151,7 @@ def main():
                             root_info = command(["xdpyinfo"], nested).stdout
                             print(re.search(r"dimensions:.*", root_info).group(), file=sys.stderr)
                             print(command(["xprop", "-id", window, "_NET_WM_STATE",
-                                           "_NET_FRAME_EXTENTS", "WM_NORMAL_HINTS"], nested).stdout,
+                                           "_NET_FRAME_EXTENTS", "WM_NORMAL_HINTS", "WM_CLASS"], nested).stdout,
                                   file=sys.stderr)
                             raise
                         print("NX resize passed: {}x{}".format(width, height), flush=True)
