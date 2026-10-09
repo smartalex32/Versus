@@ -71,6 +71,8 @@ impl Palette {
 }
 
 const ROW_HEIGHT: f32 = 22.0;
+const MIN_ZOOM: f32 = 0.2;
+const MAX_ZOOM: f32 = 5.0;
 
 struct ComparisonJob {
     receiver: Receiver<Result<FolderTree, CompareError>>,
@@ -100,6 +102,7 @@ impl Drop for SourceJob {
 }
 
 struct FileView {
+    row_height: f32,
     from_folders: bool,
     paths: [PathBuf; 2],
     sources: [Option<PathBuf>; 2],
@@ -150,6 +153,11 @@ pub struct VersusApp {
     ignore_whitespace: bool,
     ignore_line_endings: bool,
     tree_scroll_y: f32,
+    row_height: f32,
+    tree_keyboard_focus: Option<PathBuf>,
+    tree_focus_id: Option<egui::Id>,
+    file_keyboard_focus_side: Option<usize>,
+    preferences_context: Option<egui::Context>,
     folder_differences: Vec<PathBuf>,
     pane_rects: [Rect; 2],
     native_drag_position: Option<Pos2>,
@@ -182,6 +190,11 @@ impl Default for VersusApp {
             ignore_whitespace: true,
             ignore_line_endings: true,
             tree_scroll_y: 0.0,
+            row_height: ROW_HEIGHT,
+            tree_keyboard_focus: None,
+            tree_focus_id: None,
+            file_keyboard_focus_side: None,
+            preferences_context: None,
             folder_differences: Vec::new(),
             pane_rects: [Rect::NOTHING; 2],
             native_drag_position: None,
@@ -197,7 +210,11 @@ impl VersusApp {
         launch: Option<crate::cli::LaunchRequest>,
     ) -> Self {
         apply_theme(&cc.egui_ctx);
+        if let Some(storage) = cc.storage {
+            restore_zoom(&cc.egui_ctx, storage);
+        }
         let mut app = Self::default();
+        app.preferences_context = Some(cc.egui_ctx.clone());
         if let Some(launch) = launch {
             app.open_launch_request(launch);
             cc.egui_ctx.request_repaint();
@@ -239,6 +256,9 @@ impl VersusApp {
         self.tree = None;
         self.roots = None;
         self.selected = None;
+        self.tree_keyboard_focus = None;
+        self.tree_focus_id = None;
+        self.file_keyboard_focus_side = None;
         self.error = None;
         self.elapsed = None;
         self.counts = [0; 6];
@@ -493,7 +513,7 @@ impl VersusApp {
                                     !self.show_only_differences
                                         || row.node.state != DirectoryEntryState::Same
                                 })
-                                .nth((self.tree_scroll_y / ROW_HEIGHT).floor() as usize)
+                                .nth((self.tree_scroll_y / self.row_height).floor() as usize)
                                 .map(|row| row.node.relative_path.clone())
                         });
                         if let Some(previous) = &self.tree {
@@ -525,7 +545,7 @@ impl VersusApp {
                                 .position(|row| row.node.relative_path == path)
                         }) {
                             self.tree_scroll_y =
-                                top as f32 * ROW_HEIGHT + self.tree_scroll_y % ROW_HEIGHT;
+                                top as f32 * self.row_height + self.tree_scroll_y % self.row_height;
                         }
                     } else {
                         self.selected = None;
@@ -595,6 +615,7 @@ impl VersusApp {
             });
         }
         FileView {
+            row_height: ROW_HEIGHT,
             from_folders,
             paths,
             sources,
@@ -644,20 +665,21 @@ impl VersusApp {
                     let anchor = file_line_anchor(
                         view,
                         view.visible_rows
-                            .get((view.scroll_y / ROW_HEIGHT).floor() as usize)
+                            .get((view.scroll_y / view.row_height).floor() as usize)
                             .copied(),
                     );
                     let navigation = file_line_anchor(view, view.navigation_row);
-                    let fraction = view.scroll_y % ROW_HEIGHT;
+                    let fraction = view.scroll_y % view.row_height;
                     view.counts = [0; 6];
                     view.content_widths = [0.0; 2];
+                    let font_width = comparison_font(ctx).size;
                     for row in &comparison.rows {
                         view.counts[state_index(&row.state)] += 1;
                         for (side, line) in [&row.left, &row.right].into_iter().enumerate() {
                             if let Some((_, text)) = line {
                                 view.content_widths[side] = view.content_widths[side].max(
                                     96.0 + (text.len() + text.matches('\t').count() * 3) as f32
-                                        * 8.0,
+                                        * font_width,
                                 );
                             }
                         }
@@ -676,7 +698,7 @@ impl VersusApp {
                         view.scroll_y = if view.visible_rows.is_empty() {
                             0.0
                         } else {
-                            top as f32 * ROW_HEIGHT + fraction
+                            top as f32 * view.row_height + fraction
                         };
                     }
                     view.navigation_row = find_file_line(comparison, navigation)
@@ -737,7 +759,7 @@ impl VersusApp {
 
     fn jump_difference(&mut self, forward: bool) {
         if let Some(view) = &mut self.file_view {
-            let top = (view.scroll_y / ROW_HEIGHT).floor() as usize;
+            let top = (view.scroll_y / view.row_height).floor() as usize;
             let anchor = view
                 .navigation_row
                 .or_else(|| view.visible_rows.get(top).copied());
@@ -760,7 +782,7 @@ impl VersusApp {
             };
             if let Some(target) = target {
                 if let Some(index) = view.visible_rows.iter().position(|row| *row == target) {
-                    view.scroll_y = index as f32 * ROW_HEIGHT;
+                    view.scroll_y = index as f32 * view.row_height;
                     view.navigation_row = Some(target);
                     view.navigation_scroll_pending = true;
                 }
@@ -781,7 +803,7 @@ impl VersusApp {
                         !self.show_only_differences || row.node.state != DirectoryEntryState::Same
                     })
                     .collect();
-                let top = (self.tree_scroll_y / ROW_HEIGHT).floor() as usize;
+                let top = (self.tree_scroll_y / self.row_height).floor() as usize;
                 visible.get(top).and_then(|row| {
                     all.iter()
                         .position(|item| item.node.relative_path == row.node.relative_path)
@@ -818,19 +840,16 @@ impl VersusApp {
                 .iter()
                 .position(|row| row.node.relative_path == path)
             {
-                self.tree_scroll_y = index as f32 * ROW_HEIGHT;
+                self.tree_scroll_y = index as f32 * self.row_height;
             }
             self.selected = Some(path);
         }
     }
 
     fn progress_indicator(&self, ui: &mut egui::Ui) {
+        let palette = Palette::for_context(ui.ctx());
         if let Some(message) = &self.drop_message {
-            ui.label(
-                RichText::new(message)
-                    .size(11.0)
-                    .color(Palette::for_context(ui.ctx()).error),
-            );
+            status_label(ui, message, palette.error);
             return;
         }
         let file_job = self.file_view.as_ref().and_then(|view| view.job.as_ref());
@@ -841,12 +860,32 @@ impl VersusApp {
             let snapshot = progress.snapshot();
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label(
-                    RichText::new(progress_text(snapshot, started, Instant::now())).size(11.0),
+                let total = snapshot.total.filter(|total| *total > 0);
+                let show_bar = total.is_some() && ui.available_width() >= 300.0;
+                let reserve = if show_bar {
+                    90.0 + ui.spacing().item_spacing.x
+                } else {
+                    0.0
+                } + if file_job.is_some() {
+                    control_extent(ui) + ui.spacing().item_spacing.x
+                } else {
+                    0.0
+                };
+                let width = (ui.available_width() - reserve).max(0.0);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(width, control_extent(ui)),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        status_label(
+                            ui,
+                            &progress_text(snapshot, started, Instant::now()),
+                            palette.text,
+                        );
+                    },
                 );
-                if let Some(total) = snapshot.total.filter(|total| *total > 0) {
+                if show_bar {
                     ui.add(
-                        egui::ProgressBar::new(snapshot.completed as f32 / total as f32)
+                        egui::ProgressBar::new(snapshot.completed as f32 / total.unwrap() as f32)
                             .desired_width(90.0),
                     );
                 }
@@ -867,15 +906,23 @@ impl VersusApp {
         } else if self.source_jobs.iter().any(Option::is_some) {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label("Opening selected sources…");
+                status_label(ui, "Opening selected sources…", palette.text);
             });
             ui.ctx().request_repaint_after(Duration::from_millis(60));
-        } else if let Some(view) = &self.file_view {
-            if view.comparison.is_some() {
-                if let Some(error) = &view.error {
-                    ui.colored_label(Palette::for_context(ui.ctx()).error, error);
-                }
-            }
+        } else if let Some(error) = self
+            .file_view
+            .as_ref()
+            .and_then(|view| view.error.as_ref())
+            .or(self.error.as_ref())
+        {
+            status_label(ui, error, palette.error);
+        } else if self.tree.is_some()
+            || self
+                .file_view
+                .as_ref()
+                .is_some_and(|view| view.comparison.is_some())
+        {
+            status_label(ui, &self.navigation_status(), palette.muted);
         }
     }
 
@@ -985,6 +1032,43 @@ impl VersusApp {
     }
 
     fn render(&mut self, ui: &mut egui::Ui) {
+        self.preferences_context = Some(ui.ctx().clone());
+        // egui separates modified wheel input from scrolling and smooths it.
+        // Apply each delta once, including its tail across repaint frames.
+        if ui.ctx().current_pass_index() == 0 {
+            let delta = ui.input(|input| input.zoom_delta());
+            if delta.is_finite() && delta > 0.0 && delta != 1.0 {
+                ui.ctx()
+                    .set_zoom_factor((ui.ctx().zoom_factor() * delta).clamp(MIN_ZOOM, MAX_ZOOM));
+            }
+        }
+        if self.file_view.is_none()
+            && self.tree_focus_id.is_some()
+            && ui.memory(|memory| memory.focused()) == self.tree_focus_id
+            && ui.input(|input| input.key_pressed(egui::Key::Tab))
+        {
+            let destination = if ui.input(|input| input.events.iter().any(|event| matches!(event,
+                egui::Event::Key { key: egui::Key::Tab, pressed: true, modifiers, .. } if modifiers.shift))) {
+                "Browse right folder"
+            } else {
+                "Folder Compare"
+            };
+            ui.memory_mut(|memory| {
+                memory.move_focus(egui::FocusDirection::None);
+                memory.request_focus(egui::Id::new(destination));
+            });
+            self.tree_keyboard_focus = None;
+            self.tree_focus_id = None;
+        }
+        let row_height = comparison_row_height(ui);
+        if (row_height - self.row_height).abs() > 0.1 {
+            self.tree_scroll_y *= row_height / self.row_height;
+            self.row_height = row_height;
+        }
+        if let Some(view) = &mut self.file_view {
+            view.scroll_y *= row_height / view.row_height;
+            view.row_height = row_height;
+        }
         let palette = Palette::for_context(ui.ctx());
         let dark = ui.visuals().dark_mode;
         if self
@@ -1015,26 +1099,10 @@ impl VersusApp {
                 ui.add_space(5.0);
                 self.legend(ui);
                 ui.add_space(5.0);
-                // Keep the pane geometry and widget identities stable while
-                // background work starts and finishes.
-                let (status_rect, _) =
-                    ui.allocate_exact_size(egui::vec2(ui.available_width(), 24.0), Sense::hover());
-                let mut status_ui = ui.new_child(egui::UiBuilder::new().max_rect(status_rect));
-                status_ui.set_clip_rect(ui.clip_rect().intersect(status_rect));
-                self.progress_indicator(&mut status_ui);
                 if self.file_view.is_some() {
                     self.pane_rects = split_rect(ui.available_rect_before_wrap());
                     self.file_area(ui);
                     return;
-                }
-                if let Some(error) = &self.error {
-                    egui::Frame::default()
-                        .fill(palette.error.gamma_multiply(0.12))
-                        .inner_margin(egui::Margin::same(6))
-                        .show(ui, |ui| {
-                            ui.colored_label(palette.error, error);
-                        });
-                    ui.add_space(4.0);
                 }
                 let available = ui.available_rect_before_wrap();
                 let footer_height = ui.spacing().interact_size.y
@@ -1083,8 +1151,10 @@ impl VersusApp {
             .map(|label| label.size().x + 22.0 + padding.x * 2.0);
         let gap = ui.spacing().item_spacing.x;
         let group_width = widths.iter().sum::<f32>() + gap;
-        let (header, _) =
-            ui.allocate_exact_size(egui::vec2(ui.available_width(), 32.0), Sense::hover());
+        let (header, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), 32.0_f32.max(control_extent(ui))),
+            Sense::hover(),
+        );
         let group = Rect::from_center_size(header.center(), egui::vec2(group_width, 28.0));
 
         let mut brand_ui = ui.new_child(
@@ -1182,14 +1252,15 @@ impl VersusApp {
             }
         });
         let width = ui.available_width();
-        let path_width = (width / 2.0 - 84.0).max(40.0);
+        let extent = control_extent(ui);
+        let path_width = (width / 2.0 - 60.0 - extent).max(40.0);
         let galleys = std::array::from_fn::<_, 2, _>(|side| {
             if self.source_kinds[side] == Some(SourceKind::File) {
                 left_elided_path(ui.painter(), &full_paths[side], path_width, palette.text)
             } else {
                 ui.painter().layout(
                     full_paths[side].clone(),
-                    FontId::monospace(11.0),
+                    comparison_font(ui.ctx()),
                     palette.text,
                     path_width,
                 )
@@ -1198,7 +1269,7 @@ impl VersusApp {
         let height = galleys
             .iter()
             .map(|galley| galley.size().y)
-            .fold(24.0, f32::max)
+            .fold(extent, f32::max)
             + 14.0;
         let (header, _) = ui.allocate_exact_size(egui::vec2(width, height), Sense::hover());
         for (side, half) in split_rect(header).into_iter().enumerate() {
@@ -1237,8 +1308,8 @@ impl VersusApp {
                 )
             });
             let browse_rect = Rect::from_center_size(
-                rect.right_center() - egui::vec2(12.0, 0.0),
-                egui::vec2(24.0, 24.0),
+                rect.right_center() - egui::vec2(extent / 2.0, 0.0),
+                egui::vec2(extent, extent),
             );
             let mut browse_ui = ui.new_child(
                 egui::UiBuilder::new()
@@ -1310,6 +1381,75 @@ impl VersusApp {
         }
     }
 
+    fn set_differences_only(&mut self, enabled: bool) {
+        let previous: Vec<PathBuf> = self
+            .tree
+            .as_ref()
+            .map(|tree| {
+                tree.visible_rows()
+                    .into_iter()
+                    .filter(|row| {
+                        !self.show_only_differences || row.node.state != DirectoryEntryState::Same
+                    })
+                    .map(|row| row.node.relative_path.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let top = (self.tree_scroll_y / self.row_height).floor() as usize;
+        let fraction = self.tree_scroll_y % self.row_height;
+        self.show_only_differences = enabled;
+        if let Some(view) = &mut self.file_view {
+            update_visible_file_rows(view, enabled);
+        }
+        if let Some(tree) = &self.tree {
+            let next: Vec<_> = tree
+                .visible_rows()
+                .into_iter()
+                .filter(|row| !enabled || row.node.state != DirectoryEntryState::Same)
+                .map(|row| &row.node.relative_path)
+                .collect();
+            let positions: std::collections::HashMap<_, _> = next
+                .iter()
+                .enumerate()
+                .map(|(index, path)| (*path, index))
+                .collect();
+            // Keep the top entry, or its closest following/preceding survivor.
+            let anchor = previous
+                .iter()
+                .skip(top)
+                .chain(previous.iter().take(top).rev())
+                .find_map(|path| positions.get(path).copied());
+            self.tree_scroll_y =
+                anchor.map_or(0.0, |index| index as f32 * self.row_height + fraction);
+        }
+    }
+
+    fn navigation_status(&self) -> String {
+        let (current, total) = if let Some(view) = &self.file_view {
+            (
+                view.navigation_row.and_then(|row| {
+                    view.difference_rows
+                        .iter()
+                        .position(|candidate| *candidate == row)
+                }),
+                view.difference_rows.len(),
+            )
+        } else {
+            (
+                self.selected.as_ref().and_then(|path| {
+                    self.folder_differences
+                        .iter()
+                        .position(|candidate| candidate == path)
+                }),
+                self.folder_differences.len(),
+            )
+        };
+        current.map_or_else(
+            || format!("{total} changes"),
+            |index| format!("Change {} of {total}", index + 1),
+        )
+    }
+
     fn legend(&mut self, ui: &mut egui::Ui) {
         let palette = Palette::for_context(ui.ctx());
         let back = self
@@ -1322,10 +1462,50 @@ impl VersusApp {
             self.tree.as_ref().map(|_| self.counts)
         };
         ui.horizontal(|ui| {
-            let control_width = 5.0 * (24.0 + ui.spacing().item_spacing.x);
-            let legend_width = (ui.available_width() - control_width).max(0.0);
+            let extent = control_extent(ui);
+            let gap = ui.spacing().item_spacing.x;
+            let zoom = format!("Zoom {:.0}%", ui.ctx().zoom_factor() * 100.0);
+            let zoom_width = ui
+                .painter()
+                .layout_no_wrap(
+                    zoom,
+                    egui::TextStyle::Button.resolve(ui.style()),
+                    palette.muted,
+                )
+                .size()
+                .x
+                + 2.0 * ui.spacing().button_padding.x
+                + 2.0 * (extent + gap);
+            let options_width = 5.0 * extent + 4.0 * gap;
+            let legend_width = [
+                StatusIcon::Different,
+                StatusIcon::LeftOnly,
+                StatusIcon::RightOnly,
+                StatusIcon::TypeMismatch,
+                StatusIcon::Error,
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(index, icon)| {
+                let label = counts.map_or_else(
+                    || icon.label().into(),
+                    |counts| format!("{}  {}", icon.label(), counts[index + 1]),
+                );
+                14.0 + 2.0 * gap
+                    + 5.0
+                    + ui.painter()
+                        .layout_no_wrap(label, FontId::proportional(10.0), palette.text)
+                        .size()
+                        .x
+            })
+            .sum::<f32>()
+                + extent
+                + if back { extent + gap } else { 0.0 };
+            let status_width =
+                (ui.available_width() - legend_width - zoom_width - options_width - 3.0 * gap)
+                    .max(0.0);
             ui.allocate_ui_with_layout(
-                egui::vec2(legend_width, 24.0),
+                egui::vec2(legend_width, extent),
                 egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
                     ui.set_min_width(legend_width);
@@ -1362,6 +1542,16 @@ impl VersusApp {
                     });
                 },
             );
+            ui.allocate_ui_with_layout(
+                egui::vec2(status_width, extent),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.set_min_width(status_width);
+                    ui.set_clip_rect(ui.clip_rect().intersect(ui.max_rect()));
+                    self.progress_indicator(ui);
+                },
+            );
+            zoom_controls(ui);
             if icon_button_state(
                 ui,
                 ToolbarIcon::Differences,
@@ -1371,11 +1561,7 @@ impl VersusApp {
             )
             .clicked()
             {
-                self.show_only_differences = !self.show_only_differences;
-                if let Some(view) = &mut self.file_view {
-                    update_visible_file_rows(view, self.show_only_differences);
-                }
-                self.tree_scroll_y = 0.0;
+                self.set_differences_only(!self.show_only_differences);
                 ui.ctx().request_repaint();
             }
             let mut changed = false;
@@ -1425,6 +1611,8 @@ impl VersusApp {
 
     fn file_area(&mut self, ui: &mut egui::Ui) {
         let palette = Palette::for_context(ui.ctx());
+        let row_height = self.row_height;
+        let mut focused_file_side = self.file_keyboard_focus_side;
         let from_folders = self.file_view.as_ref().unwrap().from_folders;
         egui::Frame::default()
             .fill(palette.panel)
@@ -1441,7 +1629,7 @@ impl VersusApp {
                 };
                 if from_folders {
                     let (header, _) = ui.allocate_exact_size(
-                        egui::vec2(ui.available_width(), 38.0),
+                        egui::vec2(ui.available_width(), 38.0_f32.max(row_height + 14.0)),
                         Sense::hover(),
                     );
                     for (side, half) in split_rect(header).into_iter().enumerate() {
@@ -1493,14 +1681,11 @@ impl VersusApp {
                     return;
                 }
                 let Some(comparison) = &view.comparison else {
-                    ui.horizontal(|ui| {
-                        if view.job.is_some() {
-                            ui.spinner();
-                            ui.label("Loading file comparison…");
-                        } else {
-                            ui.label("Choose a file on the other side to compare.");
-                        }
-                    });
+                    if view.job.is_some() {
+                        ui.horizontal(|ui| { ui.spinner(); ui.label("Loading file comparison…"); });
+                    } else {
+                        empty_display(ui, (ui.available_height() - 2.0).max(0.0), "Choose files", "Use Browse above to select each file.");
+                    }
                     return;
                 };
                 if let Some(message) = &comparison.message {
@@ -1508,15 +1693,12 @@ impl VersusApp {
                 }
                 if comparison.rows.is_empty() {
                     if comparison.message.is_none() {
-                        ui.label(RichText::new("Both files are empty.").color(palette.muted));
+                        empty_display(ui, (ui.available_height() - 2.0).max(0.0), "Both files are empty", "There are no lines to compare.");
                     }
                     return;
                 }
                 if view.visible_rows.is_empty() {
-                    ui.label(
-                        RichText::new("No differences with the current options.")
-                            .color(palette.muted),
-                    );
+                    empty_display(ui, (ui.available_height() - 2.0).max(0.0), "No differences", "No differences with the current options.");
                     return;
                 }
                 let height = (ui.available_height() - 2.0).max(0.0);
@@ -1545,7 +1727,7 @@ impl VersusApp {
                             .show_viewport(column, |ui, _| {
                                 ui.set_min_size(egui::vec2(
                                     ui.available_width().max(view.content_widths[side]),
-                                    ROW_HEIGHT * view.visible_rows.len() as f32,
+                                    row_height * view.visible_rows.len() as f32,
                                 ));
                             });
                         next_y = output.state.offset.y;
@@ -1556,8 +1738,8 @@ impl VersusApp {
                 for side in 0..2 {
                     let viewport = viewports[side];
                     let painter = ui.painter().with_clip_rect(viewport);
-                    let first = (next_y / ROW_HEIGHT).floor() as usize;
-                    let last = ((next_y + viewport.height()) / ROW_HEIGHT).ceil() as usize;
+                    let first = (next_y / row_height).floor() as usize;
+                    let last = ((next_y + viewport.height()) / row_height).ceil() as usize;
                     for index in first..last.min(view.visible_rows.len()) {
                         let original_index = view.visible_rows[index];
                         let row = &comparison.rows[original_index];
@@ -1565,9 +1747,12 @@ impl VersusApp {
                         let rect = Rect::from_min_size(
                             egui::pos2(
                                 viewport.left() - horizontal_offsets[side],
-                                viewport.top() + index as f32 * ROW_HEIGHT - next_y,
+                                viewport.top() + index as f32 * row_height - next_y,
                             ),
-                            egui::vec2(viewport.width().max(view.content_widths[side]), ROW_HEIGHT),
+                            egui::vec2(
+                                viewport.width().max(view.content_widths[side]),
+                                row_height,
+                            ),
                         );
                         let changed = if side == 0 {
                             &row.left_changed
@@ -1591,7 +1776,80 @@ impl VersusApp {
                             ending_diff.then_some(ending).flatten(),
                             view.navigation_row == Some(original_index),
                         );
+                        let line_response = ui.interact(
+                            rect.intersect(viewport),
+                            ui.id().with(("file-line", &view.paths, side, original_index)),
+                            Sense::hover(),
+                        );
+                        line_response.widget_info(|| {
+                            egui::WidgetInfo::labeled(
+                                egui::WidgetType::Label,
+                                true,
+                                file_line_accessible_label(side, line.as_ref(), &row.state),
+                            )
+                        });
                     }
+                }
+                let mut keyboard_scroll = 0.0;
+                for side in 0..2 {
+                    let pane_response = ui.interact(
+                        viewports[side],
+                        ui.id().with(("file-pane", &view.paths, side)),
+                        Sense::click(),
+                    );
+                    pane_response.widget_info(|| {
+                        egui::WidgetInfo::labeled(
+                            egui::WidgetType::Panel,
+                            true,
+                            format!(
+                                "{} file comparison pane: {}. Use Up and Down Arrow to scroll lines, Page Up or Page Down for pages, Home or End for the first or last line.",
+                                side_name(side), view.paths[side].display()
+                            ),
+                        )
+                    });
+                    if pane_response.clicked() {
+                        pane_response.request_focus();
+                        focused_file_side = Some(side);
+                    }
+                    if pane_response.has_focus() {
+                        ui.memory_mut(|memory| memory.set_focus_lock_filter(pane_response.id, egui::EventFilter {
+                            horizontal_arrows: true, vertical_arrows: true, ..Default::default()
+                        }));
+                        focused_file_side = Some(side);
+                        keyboard_scroll = ui.input(|input| {
+                            if input.key_pressed(egui::Key::ArrowDown) {
+                                row_height
+                            } else if input.key_pressed(egui::Key::ArrowUp) {
+                                -row_height
+                            } else if input.key_pressed(egui::Key::PageDown) {
+                                viewports[side].height()
+                            } else if input.key_pressed(egui::Key::PageUp) {
+                                -viewports[side].height()
+                            } else if input.key_pressed(egui::Key::Home) {
+                                -next_y
+                            } else if input.key_pressed(egui::Key::End) {
+                                (view.visible_rows.len() as f32 * row_height) - next_y
+                            } else {
+                                0.0
+                            }
+                        });
+                        ui.painter().rect_stroke(
+                            viewports[side].shrink(1.0),
+                            4.0,
+                            Stroke::new(2.0, palette.accent),
+                            egui::StrokeKind::Inside,
+                        );
+                    }
+                }
+                if keyboard_scroll != 0.0 {
+                    next_y = (next_y + keyboard_scroll).clamp(
+                        0.0,
+                        (view.visible_rows.len() as f32 * row_height
+                            - viewports[0].height())
+                            .max(0.0),
+                    );
+                    view.navigation_row = None;
+                    ui.ctx().request_repaint();
                 }
                 if (next_y - previous_y).abs() > 0.1 {
                     view.scroll_y = next_y;
@@ -1602,11 +1860,13 @@ impl VersusApp {
                     ui.ctx().request_repaint();
                 }
                 view.navigation_scroll_pending = false;
+                self.file_keyboard_focus_side = focused_file_side;
             });
     }
 
     fn tree_area(&mut self, ui: &mut egui::Ui, height: f32) {
         let palette = Palette::for_context(ui.ctx());
+        let row_height = self.row_height;
         let mut open = None;
         egui::Frame::default()
             .fill(palette.panel)
@@ -1654,22 +1914,31 @@ impl VersusApp {
                     }
                     let mut toggle = None;
                     let mut selected = None;
+                    let mut tree_keyboard_focus = self.tree_keyboard_focus.clone();
+                    // A target is only retained between the Arrow-key frame and
+                    // the frame where virtual scrolling renders that row. Keep
+                    // its side beside the path so focus does not jump panes.
+                    let pending_side_id = ui.id().with("tree-keyboard-focus-side");
+                    let mut pending_side =
+                        ui.memory(|memory| memory.data.get_temp::<usize>(pending_side_id));
+                    let mut rendered_tree_focus = None;
+                    self.tree_focus_id = None;
                     // show_rows paints before ScrollArea clamps its offset. Clamp
                     // first so a jump near the end is correct on its first frame.
                     self.tree_scroll_y = self
                         .tree_scroll_y
-                        .clamp(0.0, (rows.len() as f32 * ROW_HEIGHT - body_height).max(0.0));
+                        .clamp(0.0, (rows.len() as f32 * row_height - body_height).max(0.0));
                     let output = egui::ScrollArea::vertical()
                         .id_salt(("linked-trees", self.scroll_generation))
                         .auto_shrink([false, false])
                         .max_height(body_height)
                         .vertical_scroll_offset(self.tree_scroll_y)
-                        .show_rows(ui, ROW_HEIGHT, rows.len(), |ui, range| {
+                        .show_rows(ui, row_height, rows.len(), |ui, range| {
                             for index in range {
                                 let row = &rows[index];
                                 let node = row.node;
                                 let (rect, _) = ui.allocate_exact_size(
-                                    egui::vec2(ui.available_width(), ROW_HEIGHT),
+                                    egui::vec2(ui.available_width(), row_height),
                                     Sense::hover(),
                                 );
                                 let is_selected =
@@ -1687,17 +1956,34 @@ impl VersusApp {
                                     } else {
                                         response
                                     };
+                                    if tree_keyboard_focus.as_ref() == Some(&node.relative_path)
+                                        && pending_side == Some(side)
+                                    {
+                                        response.request_focus();
+                                        tree_keyboard_focus = None;
+                                        pending_side = None;
+                                        ui.memory_mut(|memory| {
+                                            memory.data.remove::<usize>(pending_side_id);
+                                        });
+                                    }
                                     response.widget_info(|| {
                                         egui::WidgetInfo::selected(
                                             egui::WidgetType::SelectableLabel,
                                             true,
                                             is_selected,
-                                            format!(
-                                                "{}: {} ({})",
-                                                if side == 0 { "Left" } else { "Right" },
-                                                node.relative_path.display(),
-                                                state_label(&node.state)
-                                            ),
+                                            if node.is_expandable() {
+                                                format!(
+                                                    "{}, {}",
+                                                    tree_row_accessible_label(node, side),
+                                                    if tree.is_expanded(&node.relative_path) {
+                                                        "expanded"
+                                                    } else {
+                                                        "collapsed"
+                                                    }
+                                                )
+                                            } else {
+                                                tree_row_accessible_label(node, side)
+                                            },
                                         )
                                     });
                                     paint_row(
@@ -1713,6 +1999,27 @@ impl VersusApp {
                                             hovered: response.hovered() || response.has_focus(),
                                         },
                                     );
+                                    if response.has_focus() {
+                                        self.tree_focus_id = Some(response.id);
+                                        ui.memory_mut(|memory| {
+                                            memory.set_focus_lock_filter(
+                                                response.id,
+                                                egui::EventFilter {
+                                                    horizontal_arrows: true,
+                                                    vertical_arrows: true,
+                                                    ..Default::default()
+                                                },
+                                            )
+                                        });
+                                        rendered_tree_focus =
+                                            Some((node.relative_path.clone(), side));
+                                        ui.painter().rect_stroke(
+                                            half.shrink(1.0),
+                                            3.0,
+                                            Stroke::new(2.0, palette.accent),
+                                            egui::StrokeKind::Inside,
+                                        );
+                                    }
                                     let expandable = node.is_expandable()
                                         && entry.kind == Some(DirectoryEntryKind::Directory);
                                     let keyboard_toggle = response.has_focus()
@@ -1734,6 +2041,7 @@ impl VersusApp {
                                     }
                                     if response.clicked() || keyboard_toggle {
                                         response.request_focus();
+                                        self.tree_focus_id = Some(response.id);
                                         selected = Some(node.relative_path.clone());
                                         if expandable {
                                             toggle = Some(node.relative_path.clone());
@@ -1776,12 +2084,51 @@ impl VersusApp {
                             }
                         });
                     self.tree_scroll_y = output.state.offset.y;
+                    if let Some((current_path, side)) = rendered_tree_focus {
+                        let step = ui.input(|input| {
+                            if input.key_pressed(egui::Key::ArrowDown) {
+                                1_i32
+                            } else if input.key_pressed(egui::Key::ArrowUp) {
+                                -1
+                            } else {
+                                0
+                            }
+                        });
+                        if step != 0 {
+                            let current = rows
+                                .iter()
+                                .position(|row| row.node.relative_path == current_path)
+                                .unwrap_or(0);
+                            let next = (current as i32 + step)
+                                .clamp(0, rows.len().saturating_sub(1) as i32)
+                                as usize;
+                            let path = rows[next].node.relative_path.clone();
+                            tree_keyboard_focus = Some(path.clone());
+                            ui.memory_mut(|memory| {
+                                memory.data.insert_temp(pending_side_id, side);
+                            });
+                            selected = Some(path);
+                            let target_top = next as f32 * row_height;
+                            let target_bottom = target_top + row_height;
+                            let viewport_height = output.inner_rect.height();
+                            self.tree_scroll_y = if target_top < self.tree_scroll_y {
+                                target_top
+                            } else if target_bottom > self.tree_scroll_y + viewport_height {
+                                target_bottom - viewport_height
+                            } else {
+                                self.tree_scroll_y
+                            }
+                            .clamp(0.0, (rows.len() as f32 * row_height - body_height).max(0.0));
+                            ui.ctx().request_repaint();
+                        }
+                    }
                     if let Some(path) = toggle {
                         tree.toggle_expanded(path);
                     }
                     if let Some(path) = selected {
                         self.selected = Some(path);
                     }
+                    self.tree_keyboard_focus = tree_keyboard_focus;
                 } else {
                     let title = if self.job.is_some() {
                         "Comparing folders…"
@@ -1847,6 +2194,16 @@ impl Drop for VersusApp {
 }
 
 impl eframe::App for VersusApp {
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        if let Some(ctx) = &self.preferences_context {
+            storage.set_string("versus.zoom", ctx.zoom_factor().to_string());
+        }
+    }
+
+    fn persist_egui_memory(&self) -> bool {
+        // Only the UI scale is retained; compared paths/content remain session-local.
+        false
+    }
     fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
         Palette::new(visuals.dark_mode)
             .background
@@ -1876,6 +2233,53 @@ impl eframe::App for VersusApp {
         }
         self.render(ui);
     }
+}
+
+fn restore_zoom(ctx: &egui::Context, storage: &dyn eframe::Storage) {
+    if let Some(zoom) = storage
+        .get_string("versus.zoom")
+        .and_then(|value| value.parse::<f32>().ok())
+        .filter(|zoom| zoom.is_finite() && (MIN_ZOOM..=MAX_ZOOM).contains(zoom))
+    {
+        ctx.set_zoom_factor(zoom);
+    }
+}
+
+fn status_label(ui: &mut egui::Ui, text: &str, color: Color32) {
+    ui.add(egui::Label::new(RichText::new(text).size(11.0).color(color)).truncate())
+        .on_hover_text(text);
+}
+
+fn zoom_controls(ui: &mut egui::Ui) {
+    let zoom_factor = ui.ctx().zoom_factor();
+    let zoom = format!("Zoom {:.0}%", zoom_factor * 100.0);
+    let shortcuts = [
+        egui::gui_zoom::kb_shortcuts::ZOOM_IN,
+        egui::gui_zoom::kb_shortcuts::ZOOM_OUT,
+        egui::gui_zoom::kb_shortcuts::ZOOM_RESET,
+    ]
+    .map(|shortcut| ui.ctx().format_shortcut(&shortcut));
+    if ui.add(egui::Button::new(RichText::new(zoom).color(Palette::for_context(ui.ctx()).muted)).frame(false))
+        .on_hover_text(format!("{} to enlarge · {} to reduce · {} to reset\nCtrl + mouse wheel to zoom. Click to reset. Your zoom is saved for next time.", shortcuts[0], shortcuts[1], shortcuts[2]))
+        .clicked() { ui.ctx().set_zoom_factor(1.0); }
+    if icon_button(ui, ToolbarIcon::ZoomOut, zoom_factor > MIN_ZOOM, "Zoom out").clicked() {
+        egui::gui_zoom::zoom_out(ui.ctx());
+    }
+    if icon_button(ui, ToolbarIcon::ZoomIn, zoom_factor < MAX_ZOOM, "Zoom in").clicked() {
+        egui::gui_zoom::zoom_in(ui.ctx());
+    }
+}
+
+fn comparison_row_height(ui: &egui::Ui) -> f32 {
+    ROW_HEIGHT.max(ui.text_style_height(&egui::TextStyle::Monospace).ceil() + 8.0)
+}
+
+fn control_extent(ui: &egui::Ui) -> f32 {
+    24.0_f32.max(ui.text_style_height(&egui::TextStyle::Button).ceil() + 10.0)
+}
+
+fn comparison_font(ctx: &egui::Context) -> FontId {
+    egui::TextStyle::Monospace.resolve(&ctx.style_of(ctx.theme()))
 }
 
 fn absolute_path(path: &str) -> PathBuf {
@@ -1992,7 +2396,7 @@ fn left_elided_path(
     width: f32,
     color: Color32,
 ) -> Arc<egui::Galley> {
-    let layout = |text: String| painter.layout_no_wrap(text, FontId::monospace(11.0), color);
+    let layout = |text: String| painter.layout_no_wrap(text, comparison_font(painter.ctx()), color);
     let full = layout(path.into());
     if full.size().x <= width {
         return full;
@@ -2066,7 +2470,7 @@ fn paint_file_line(
             rect.left_center() + egui::vec2(66.0, 0.0),
             Align2::LEFT_CENTER,
             "—",
-            FontId::monospace(11.0),
+            comparison_font(painter.ctx()),
             palette.muted,
         );
         return;
@@ -2096,16 +2500,24 @@ fn paint_file_line(
             &text[start..range.start],
             color,
             Color32::TRANSPARENT,
+            comparison_font(painter.ctx()),
         );
         append_file_text(
             &mut job,
             &text[range.clone()],
             palette.text,
             color.gamma_multiply(0.3),
+            comparison_font(painter.ctx()),
         );
         start = range.end;
     }
-    append_file_text(&mut job, &text[start..], color, Color32::TRANSPARENT);
+    append_file_text(
+        &mut job,
+        &text[start..],
+        color,
+        Color32::TRANSPARENT,
+        comparison_font(painter.ctx()),
+    );
     let galley = painter.layout_job(job);
     let position = egui::pos2(rect.left() + 68.0, rect.center().y - galley.size().y / 2.0);
     let end_x = position.x + galley.size().x;
@@ -2131,12 +2543,13 @@ fn append_file_text(
     text: &str,
     color: Color32,
     background: Color32,
+    font: FontId,
 ) {
     job.append(
         &text.replace('\t', "    "),
         0.0,
         egui::TextFormat {
-            font_id: FontId::monospace(11.0),
+            font_id: font,
             color,
             background,
             ..Default::default()
@@ -2166,9 +2579,10 @@ fn find_file_line(comparison: &FileComparison, anchor: [Option<usize>; 2]) -> Op
 }
 
 fn update_visible_file_rows(view: &mut FileView, differences_only: bool) {
+    let fraction = view.scroll_y % view.row_height;
     let anchor = view
         .visible_rows
-        .get((view.scroll_y / ROW_HEIGHT).floor() as usize)
+        .get((view.scroll_y / view.row_height).floor() as usize)
         .copied();
     let Some(comparison) = &view.comparison else {
         return;
@@ -2186,8 +2600,12 @@ fn update_visible_file_rows(view: &mut FileView, differences_only: bool) {
     };
     let top = anchor
         .and_then(|anchor| view.visible_rows.iter().position(|index| *index >= anchor))
-        .unwrap_or(0);
-    view.scroll_y = top as f32 * ROW_HEIGHT;
+        .unwrap_or_else(|| view.visible_rows.len().saturating_sub(1));
+    view.scroll_y = if view.visible_rows.is_empty() {
+        0.0
+    } else {
+        top as f32 * view.row_height + fraction
+    };
 }
 
 fn progress_text(snapshot: versus::ProgressSnapshot, started: Instant, now: Instant) -> String {
@@ -2290,6 +2708,74 @@ fn status_icon(state: &DirectoryEntryState) -> Option<StatusIcon> {
 fn state_label(state: &DirectoryEntryState) -> &'static str {
     status_icon(state).map_or("Identical", StatusIcon::label)
 }
+
+fn side_name(side: usize) -> &'static str {
+    if side == 0 { "Left" } else { "Right" }
+}
+
+fn tree_row_accessible_label(node: &TreeNode, side: usize) -> String {
+    let entry = if side == 0 { &node.left } else { &node.right };
+    if !entry.exists {
+        return format!(
+            "{} side, {}: not present on this side; {}",
+            side_name(side),
+            node.relative_path.display(),
+            state_label(&node.state)
+        );
+    }
+    let kind = match entry.kind {
+        Some(DirectoryEntryKind::Directory) => "folder",
+        Some(DirectoryEntryKind::File) => "file",
+        Some(DirectoryEntryKind::Symlink) => "symbolic link",
+        Some(DirectoryEntryKind::Other) => "other item",
+        None => "item",
+    };
+    format!(
+        "{} {}: {}, {}, {}",
+        side_name(side),
+        kind,
+        node.relative_path.display(),
+        format_size(entry.size),
+        state_label(&node.state),
+    )
+}
+
+fn file_line_accessible_label(
+    side: usize,
+    line: Option<&(usize, String)>,
+    state: &DirectoryEntryState,
+) -> String {
+    match line {
+        Some((number, text)) => {
+            const MAX_BYTES: usize = 4096;
+            let mut end = text.len().min(MAX_BYTES);
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            let excerpt = if text.is_empty() {
+                "blank"
+            } else {
+                &text[..end]
+            };
+            let omitted = if end < text.len() {
+                format!(" … ({} bytes omitted)", text.len() - end)
+            } else {
+                String::new()
+            };
+            format!(
+                "{} line {number}: {}, {excerpt}{omitted}",
+                side_name(side),
+                state_label(state)
+            )
+        }
+        None => format!(
+            "{}: no corresponding line, {}",
+            side_name(side),
+            state_label(state)
+        ),
+    }
+}
+
 fn state_color(state: &DirectoryEntryState, palette: Palette) -> Color32 {
     status_icon(state).map_or(palette.muted, |icon| icon.color(palette))
 }
@@ -2344,6 +2830,8 @@ fn paint_status_icon(painter: &egui::Painter, center: Pos2, icon: StatusIcon) {
 
 #[derive(Clone, Copy)]
 enum ToolbarIcon {
+    ZoomIn,
+    ZoomOut,
     New,
     Back,
     Refresh,
@@ -2373,7 +2861,8 @@ fn icon_button_state(
 ) -> egui::Response {
     let palette = Palette::for_context(ui.ctx());
     ui.add_enabled_ui(enabled, |ui| {
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), Sense::hover());
+        let extent = control_extent(ui);
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(extent, extent), Sense::hover());
         let response = ui.interact(rect, egui::Id::new(label), Sense::click());
         response.widget_info(|| {
             egui::WidgetInfo::selected(egui::WidgetType::Button, enabled, selected, label)
@@ -2385,8 +2874,19 @@ fn icon_button_state(
         } else {
             palette.text
         };
-        if response.hovered() || response.has_focus() {
+        if response.is_pointer_button_down_on() {
+            ui.painter()
+                .rect_filled(rect, 3, palette.accent.gamma_multiply(0.35));
+        } else if response.hovered() || response.has_focus() {
             ui.painter().rect_filled(rect, 3, palette.border);
+        }
+        if response.has_focus() {
+            ui.painter().rect_stroke(
+                rect,
+                3,
+                Stroke::new(2.0, palette.accent),
+                egui::StrokeKind::Inside,
+            );
         }
         if selected {
             ui.painter()
@@ -2402,6 +2902,18 @@ fn icon_button_state(
         let point = |x, y| center + egui::vec2(x, y);
         let stroke = Stroke::new(1.4, color);
         match icon {
+            ToolbarIcon::ZoomIn | ToolbarIcon::ZoomOut => {
+                let lens = point(-2.0, -2.0);
+                ui.painter().circle_stroke(lens, 5.5, stroke);
+                ui.painter()
+                    .line_segment([point(2.0, 2.0), point(7.0, 7.0)], stroke);
+                ui.painter()
+                    .line_segment([point(-5.0, -2.0), point(1.0, -2.0)], stroke);
+                if matches!(icon, ToolbarIcon::ZoomIn) {
+                    ui.painter()
+                        .line_segment([point(-2.0, -5.0), point(-2.0, 1.0)], stroke);
+                }
+            }
             ToolbarIcon::Differences => {
                 for y in [-4.0, 4.0] {
                     ui.painter()
@@ -2621,7 +3133,7 @@ fn paint_row(ui: &egui::Ui, rect: Rect, node: &TreeNode, side: usize, appearance
             egui::pos2(x + 36.0, y),
             Align2::LEFT_CENTER,
             "—",
-            FontId::monospace(11.0),
+            comparison_font(ui.ctx()),
             palette.muted.gamma_multiply(0.55),
         );
         return;
@@ -2644,7 +3156,7 @@ fn paint_row(ui: &egui::Ui, rect: Rect, node: &TreeNode, side: usize, appearance
         egui::pos2(x + 40.0, y),
         Align2::LEFT_CENTER,
         node.name.to_string_lossy(),
-        FontId::monospace(11.0),
+        comparison_font(ui.ctx()),
         color,
     );
     painter.text(
@@ -2703,6 +3215,57 @@ fn empty_display(ui: &mut egui::Ui, height: f32, title: &str, subtitle: &str) {
         Stroke::new(1.0, palette.border.gamma_multiply(0.5)),
     );
     let painter = ui.painter().with_clip_rect(rect);
+    {
+        let chooser = title.starts_with("Choose ");
+        for (side, half) in split_rect(rect).into_iter().enumerate() {
+            let target = half.shrink(8.0);
+            let corners = [
+                target.left_top(),
+                target.right_top(),
+                target.right_bottom(),
+                target.left_bottom(),
+                target.left_top(),
+            ];
+            painter.extend(egui::Shape::dashed_line(
+                &corners,
+                Stroke::new(1.0, palette.border),
+                6.0,
+                4.0,
+            ));
+            ui.interact(
+                target,
+                ui.id().with(("empty-drop-target", side)),
+                Sense::hover(),
+            )
+            .widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::Label,
+                    true,
+                    format!(
+                        "{}: Drop a file or folder here, or use Browse above.",
+                        side_name(side)
+                    ),
+                )
+            });
+            painter.text(
+                target.center() - egui::vec2(0.0, if chooser { 12.0 } else { -24.0 }),
+                Align2::CENTER_CENTER,
+                "Drop a file or folder here",
+                FontId::proportional(14.0),
+                palette.muted,
+            );
+            painter.text(
+                target.center() + egui::vec2(0.0, if chooser { 12.0 } else { 48.0 }),
+                Align2::CENTER_CENTER,
+                "or use Browse above",
+                FontId::proportional(11.0),
+                palette.muted,
+            );
+        }
+        if chooser {
+            return;
+        }
+    }
     let center = rect.center();
     painter.text(
         center - egui::vec2(0.0, 24.0),
@@ -2721,6 +3284,10 @@ fn empty_display(ui: &mut egui::Ui, height: f32, title: &str, subtitle: &str) {
 }
 
 fn apply_theme(ctx: &egui::Context) {
+    // Support literal Ctrl on every platform as well as the platform command key.
+    ctx.options_mut(|options| {
+        options.input_options.zoom_modifier = egui::Modifiers::CTRL | egui::Modifiers::COMMAND
+    });
     set_theme(ctx, egui::Theme::Dark);
 }
 
@@ -2757,6 +3324,7 @@ fn set_theme(ctx: &egui::Context, theme: egui::Theme) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use eframe::Storage;
     use versus::{DirectoryDiff, DirectoryEntry};
 
     fn engineering_path(relative: &str) -> String {
@@ -2816,9 +3384,13 @@ mod tests {
         ctx: &egui::Context,
         events: Vec<egui::Event>,
     ) -> egui::FullOutput {
+        // Keep the simulated physical window size fixed when the UI scale changes.
         let mut output = ctx.run_ui(
             egui::RawInput {
-                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0))),
+                screen_rect: Some(Rect::from_min_size(
+                    Pos2::ZERO,
+                    egui::vec2(1200.0, 800.0) / ctx.zoom_factor(),
+                )),
                 events,
                 ..Default::default()
             },
@@ -3341,6 +3913,7 @@ mod tests {
 
     fn loaded_file_view() -> FileView {
         FileView {
+            row_height: ROW_HEIGHT,
             from_folders: true,
             paths: ["/left/model.step".into(), "/right/model.step".into()],
             sources: [
@@ -4190,7 +4763,10 @@ mod tests {
         assert!(app.tree.is_none() && app.job.is_none() && app.file_view.is_none());
         let output = render(&mut app, &ctx, vec![]);
         assert_eq!(text_positions(&output, "Folder Compare").len(), 1);
-        assert_eq!(text_positions(&output, "Choose another folder").len(), 1);
+        assert_eq!(
+            text_positions(&output, "Drop a file or folder here").len(),
+            2
+        );
         output.drop_without_applying_deltas();
     }
 
@@ -4463,7 +5039,10 @@ mod tests {
         assert!(sender.send(Ok(fixture())).is_err());
         let output = render(&mut app, &ctx, vec![]);
         assert_eq!(text_positions(&output, "Choose a file").len(), 2);
-        assert_eq!(text_positions(&output, "Choose files to compare").len(), 1);
+        assert_eq!(
+            text_positions(&output, "Drop a file or folder here").len(),
+            2
+        );
         output.drop_without_applying_deltas();
 
         // Exercise both the path section and browse icon for both workflows.
@@ -5051,6 +5630,163 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn status_and_zoom_share_the_legend_row_without_moving_the_panes() {
+        for theme in [egui::Theme::Light, egui::Theme::Dark] {
+            for size in [egui::vec2(900.0, 650.0), egui::vec2(1200.0, 800.0)] {
+                for file in [false, true] {
+                    let ctx = egui::Context::default();
+                    set_theme(&ctx, theme);
+                    let mut app = loaded_app();
+                    if file {
+                        app.file_view = Some(loaded_file_view());
+                    }
+                    let draw = |app: &mut VersusApp| {
+                        ctx.run_ui(
+                            egui::RawInput {
+                                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)),
+                                ..Default::default()
+                            },
+                            |ui| app.render(ui),
+                        )
+                    };
+                    let output = draw(&mut app);
+                    let panes = app.pane_rects;
+                    let new = ctx
+                        .read_response(egui::Id::new("New comparison"))
+                        .unwrap()
+                        .rect;
+                    let zoom = text_centers(&output, "Zoom 100%")[0];
+                    let minus = ctx.read_response(egui::Id::new("Zoom out")).unwrap().rect;
+                    let plus = ctx.read_response(egui::Id::new("Zoom in")).unwrap().rect;
+                    let filter = ctx
+                        .read_response(egui::Id::new("Show only differences"))
+                        .unwrap()
+                        .rect;
+                    let status = text_centers(&output, &app.navigation_status())[0];
+                    assert!(new.right() < status.x && status.x < zoom.x);
+                    assert!(
+                        zoom.x < minus.left()
+                            && minus.right() < plus.left()
+                            && plus.right() < filter.left()
+                    );
+                    assert!((minus.center().y - plus.center().y).abs() < 0.1);
+                    assert!((zoom.y - filter.center().y).abs() < 1.0);
+                    assert!((status.y - filter.center().y).abs() < 1.0);
+                    assert!(filter.bottom() < panes[0].top());
+                    output.drop_without_applying_deltas();
+                    let (_folder_sender, _file_sender) = if file {
+                        let (sender, receiver) = mpsc::channel();
+                        let progress = Arc::new(ComparisonProgress::default());
+                        progress.begin(ProgressStage::ComparingFiles, Some(100));
+                        app.file_view.as_mut().unwrap().job = Some(FileJob {
+                            receiver,
+                            cancellation: Arc::new(AtomicBool::new(false)),
+                            started: Instant::now(),
+                            progress,
+                            ignore_line_endings: true,
+                        });
+                        (None, Some(sender))
+                    } else {
+                        let sender = attach_job(&mut app);
+                        app.job
+                            .as_ref()
+                            .unwrap()
+                            .progress
+                            .begin(ProgressStage::ComparingFiles, Some(100));
+                        (Some(sender), None)
+                    };
+                    let output = draw(&mut app);
+                    assert_eq!(app.pane_rects, panes);
+                    let progress = output
+                        .shapes
+                        .iter()
+                        .find_map(|shape| match &shape.shape {
+                            egui::Shape::Text(text)
+                                if text.galley.text().starts_with("Comparing files…") =>
+                            {
+                                Some(Rect::from_min_size(text.pos, text.galley.size()))
+                            }
+                            _ => None,
+                        })
+                        .unwrap();
+                    assert!(progress.left() > new.right() && progress.right() < minus.left());
+                    assert!((progress.center().y - filter.center().y).abs() < 1.0);
+                    assert_eq!(
+                        ctx.read_response(egui::Id::new("Show only differences"))
+                            .unwrap()
+                            .rect,
+                        filter
+                    );
+                    if file {
+                        let cancel = ctx
+                            .read_response(egui::Id::new("Cancel file comparison"))
+                            .unwrap()
+                            .rect;
+                        assert!(cancel.left() >= new.right() && cancel.right() < minus.left());
+                        assert!((cancel.center().y - filter.center().y).abs() < 1.0);
+                    }
+                    output.drop_without_applying_deltas();
+                    app.job = None;
+                    if let Some(view) = &mut app.file_view {
+                        view.job = None;
+                    }
+                    app.drop_message =
+                        Some(format!("Drop status: {}", "Long explanation ".repeat(20)));
+                    let output = draw(&mut app);
+                    assert_eq!(app.pane_rects, panes);
+                    let message = output
+                        .shapes
+                        .iter()
+                        .find_map(|shape| match &shape.shape {
+                            egui::Shape::Text(text)
+                                if text.galley.text().starts_with("Drop status:") =>
+                            {
+                                Some(Rect::from_min_size(text.pos, text.galley.size()))
+                            }
+                            _ => None,
+                        })
+                        .unwrap();
+                    assert!(message.left() > new.right() && message.right() < minus.left());
+                    assert!((message.center().y - filter.center().y).abs() < 1.0);
+                    output.drop_without_applying_deltas();
+                    app.drop_message = None;
+                    if let Some(view) = &mut app.file_view {
+                        view.error = Some("Comparison could not be refreshed".into());
+                    } else {
+                        app.error = Some("Comparison could not be refreshed".into());
+                    }
+                    let output = draw(&mut app);
+                    assert_eq!(app.pane_rects, panes);
+                    let error = text_centers(&output, "Comparison could not be refreshed")[0];
+                    assert!(error.x > new.right() && error.x < zoom.x);
+                    assert!((error.y - filter.center().y).abs() < 1.0);
+                    output.drop_without_applying_deltas();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn legend_status_cancel_button_still_cancels_file_comparison() {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut app = loaded_app();
+        let mut view = loaded_file_view();
+        let (_sender, receiver) = mpsc::channel();
+        let cancellation = Arc::new(AtomicBool::new(false));
+        view.job = Some(FileJob {
+            receiver,
+            cancellation: cancellation.clone(),
+            started: Instant::now(),
+            progress: Arc::new(ComparisonProgress::default()),
+            ignore_line_endings: true,
+        });
+        app.file_view = Some(view);
+        click_action(&mut app, &ctx, "Cancel file comparison");
+        assert!(cancellation.load(Ordering::Relaxed));
     }
 
     #[test]
@@ -5673,6 +6409,725 @@ mod tests {
         assert!(app.drop_message.is_none());
         assert!(app.native_drag_position.is_none());
         settle_sources(&mut app, &ctx);
+    }
+
+    #[test]
+    fn arrow_keys_move_tree_selection_through_visible_rows() {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut app = loaded_app();
+        let output = render(&mut app, &ctx, vec![]);
+        let assembly = text_positions(&output, "assembly")[0];
+        output.drop_without_applying_deltas();
+        click(&mut app, &ctx, assembly + egui::vec2(3.0, 4.0));
+        assert_eq!(
+            app.selected.as_deref(),
+            Some(std::path::Path::new("assembly"))
+        );
+        render(
+            &mut app,
+            &ctx,
+            vec![egui::Event::Key {
+                key: egui::Key::ArrowDown,
+                physical_key: Some(egui::Key::ArrowDown),
+                pressed: true,
+                repeat: false,
+                modifiers: Default::default(),
+            }],
+        )
+        .drop_without_applying_deltas();
+        assert_eq!(
+            app.selected.as_deref(),
+            Some(std::path::Path::new("assembly/model.step"))
+        );
+        assert_eq!(
+            app.tree_keyboard_focus.as_deref(),
+            Some(std::path::Path::new("assembly/model.step"))
+        );
+    }
+
+    #[test]
+    fn tree_tab_navigation_escapes_both_panes_in_either_direction() {
+        for side in 0..2 {
+            for backwards in [false, true] {
+                let ctx = egui::Context::default();
+                apply_theme(&ctx);
+                let mut app = loaded_app();
+                let output = render(&mut app, &ctx, vec![]);
+                let assembly = text_positions(&output, "assembly")[side];
+                output.drop_without_applying_deltas();
+                click(&mut app, &ctx, assembly + egui::vec2(3.0, 4.0));
+                let focused_before_tab = ctx.memory(|memory| memory.focused()).unwrap();
+                render(
+                    &mut app,
+                    &ctx,
+                    vec![egui::Event::Key {
+                        key: egui::Key::Tab,
+                        physical_key: Some(egui::Key::Tab),
+                        pressed: true,
+                        repeat: false,
+                        modifiers: egui::Modifiers {
+                            shift: backwards,
+                            ..Default::default()
+                        },
+                    }],
+                )
+                .drop_without_applying_deltas();
+                render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+                assert_ne!(
+                    ctx.memory(|memory| memory.focused()),
+                    Some(focused_before_tab)
+                );
+                assert_eq!(
+                    ctx.memory(|memory| memory.focused()),
+                    Some(egui::Id::new(if backwards {
+                        "Browse right folder"
+                    } else {
+                        "Folder Compare"
+                    }))
+                );
+                assert!(app.tree_keyboard_focus.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn keyboard_tree_navigation_keeps_a_long_list_visible_without_resetting_scroll() {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut app = unfiltered_app();
+        app.tree = Some(FolderTree::from_diff(&DirectoryDiff {
+            cancelled: false,
+            entries: (0..80)
+                .map(|index| DirectoryEntry {
+                    relative_path: format!("item-{index:03}.txt").into(),
+                    left_size: Some(1),
+                    right_size: Some(1),
+                    left_exists: true,
+                    right_exists: true,
+                    left_kind: Some(DirectoryEntryKind::File),
+                    right_kind: Some(DirectoryEntryKind::File),
+                    kind: DirectoryEntryKind::File,
+                    state: DirectoryEntryState::Same,
+                })
+                .collect(),
+        }));
+        let output = render(&mut app, &ctx, vec![]);
+        let first = text_positions(&output, "item-000.txt")[0];
+        output.drop_without_applying_deltas();
+        click(&mut app, &ctx, first + egui::vec2(3.0, 4.0));
+        for _ in 0..50 {
+            render(
+                &mut app,
+                &ctx,
+                vec![egui::Event::Key {
+                    key: egui::Key::ArrowDown,
+                    physical_key: Some(egui::Key::ArrowDown),
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Default::default(),
+                }],
+            )
+            .drop_without_applying_deltas();
+            render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+        }
+        assert_eq!(
+            app.selected.as_deref(),
+            Some(std::path::Path::new("item-050.txt"))
+        );
+        assert!(app.tree_scroll_y > 0.0);
+    }
+
+    #[test]
+    fn focused_file_pane_scrolls_with_arrow_keys() {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut app = unfiltered_app();
+        let mut view = loaded_file_view();
+        let rows: Vec<_> = (1..=80)
+            .map(|number| {
+                test_file_row(
+                    Some((number, format!("left line {number}"))),
+                    Some((number, format!("right line {number}"))),
+                    DirectoryEntryState::Same,
+                )
+            })
+            .collect();
+        view.comparison.as_mut().unwrap().rows = rows;
+        view.visible_rows = (0..80).collect();
+        app.file_view = Some(view);
+        let output = render(&mut app, &ctx, vec![]);
+        let line = text_positions(&output, "left line 1")[0];
+        output.drop_without_applying_deltas();
+        click(&mut app, &ctx, line + egui::vec2(8.0, 3.0));
+        assert_eq!(app.file_keyboard_focus_side, Some(0));
+        render(
+            &mut app,
+            &ctx,
+            vec![egui::Event::Key {
+                key: egui::Key::ArrowDown,
+                physical_key: Some(egui::Key::ArrowDown),
+                pressed: true,
+                repeat: false,
+                modifiers: Default::default(),
+            }],
+        )
+        .drop_without_applying_deltas();
+        assert_eq!(app.file_view.as_ref().unwrap().scroll_y, app.row_height);
+        let focused = ctx.memory(|memory| memory.focused());
+        assert!(focused.is_some());
+        render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+        assert_eq!(ctx.memory(|memory| memory.focused()), focused);
+        render(
+            &mut app,
+            &ctx,
+            vec![egui::Event::Key {
+                key: egui::Key::ArrowDown,
+                physical_key: Some(egui::Key::ArrowDown),
+                pressed: true,
+                repeat: false,
+                modifiers: Default::default(),
+            }],
+        )
+        .drop_without_applying_deltas();
+        assert_eq!(
+            app.file_view.as_ref().unwrap().scroll_y,
+            2.0 * app.row_height
+        );
+    }
+
+    #[test]
+    fn filter_preserves_folder_anchor_and_nearest_survivor() {
+        let mut app = unfiltered_app();
+        app.row_height = 34.0;
+        app.tree = Some(FolderTree::from_diff(&DirectoryDiff {
+            cancelled: false,
+            entries: (0..100)
+                .map(|index| DirectoryEntry {
+                    relative_path: format!("entry-{index:03}.txt").into(),
+                    left_size: Some(1),
+                    right_size: Some(1),
+                    left_exists: true,
+                    right_exists: true,
+                    left_kind: Some(DirectoryEntryKind::File),
+                    right_kind: Some(DirectoryEntryKind::File),
+                    kind: DirectoryEntryKind::File,
+                    state: if index % 2 == 0 {
+                        DirectoryEntryState::Different
+                    } else {
+                        DirectoryEntryState::Same
+                    },
+                })
+                .collect(),
+        }));
+        app.selected = Some("entry-040.txt".into());
+        app.tree_scroll_y = 40.0 * app.row_height + 7.0;
+        app.set_differences_only(true);
+        assert_eq!(app.tree_scroll_y, 20.0 * app.row_height + 7.0);
+        assert_eq!(
+            app.selected.as_deref(),
+            Some(std::path::Path::new("entry-040.txt"))
+        );
+        app.set_differences_only(false);
+        assert_eq!(app.tree_scroll_y, 40.0 * app.row_height + 7.0);
+        app.tree_scroll_y = 41.0 * app.row_height + 7.0;
+        app.set_differences_only(true);
+        assert_eq!(app.tree_scroll_y, 21.0 * app.row_height + 7.0);
+        app.set_differences_only(false);
+        app.tree_scroll_y = 99.0 * app.row_height;
+        app.set_differences_only(true);
+        assert_eq!(app.tree_scroll_y, 49.0 * app.row_height);
+    }
+
+    #[test]
+    fn enlarged_fonts_expand_row_and_control_geometry() {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        ctx.all_styles_mut(|style| {
+            style
+                .text_styles
+                .insert(egui::TextStyle::Monospace, FontId::monospace(24.0));
+            style
+                .text_styles
+                .insert(egui::TextStyle::Button, FontId::proportional(24.0));
+        });
+        let mut app = loaded_app();
+        let output = render(&mut app, &ctx, vec![]);
+        assert!(app.row_height > ROW_HEIGHT);
+        let response = ctx
+            .read_response(egui::Id::new("Show only differences"))
+            .unwrap();
+        assert!(response.rect.height() > 24.0);
+        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == "assembly" && text.galley.size().y > 22.0)));
+        output.drop_without_applying_deltas();
+    }
+
+    #[derive(Default)]
+    struct ZoomStorage(std::collections::HashMap<String, String>);
+    impl eframe::Storage for ZoomStorage {
+        fn get_string(&self, key: &str) -> Option<String> {
+            self.0.get(key).cloned()
+        }
+        fn set_string(&mut self, key: &str, value: String) {
+            self.0.insert(key.into(), value);
+        }
+        fn remove_string(&mut self, key: &str) {
+            self.0.remove(key);
+        }
+        fn flush(&mut self) {}
+    }
+
+    #[test]
+    fn magnifier_buttons_zoom_and_percentage_resets_in_both_views() {
+        for file_view in [false, true] {
+            for theme in [egui::Theme::Light, egui::Theme::Dark] {
+                let ctx = egui::Context::default();
+                apply_theme(&ctx);
+                set_theme(&ctx, theme);
+                let mut app = loaded_app();
+                app.selected = Some("assembly".into());
+                if file_view {
+                    app.file_view = Some(loaded_file_view());
+                }
+                let paths = app.paths.clone();
+                let output = render(&mut app, &ctx, vec![]);
+                let out = ctx.read_response(egui::Id::new("Zoom out")).unwrap().rect;
+                let zoom = text_centers(&output, "Zoom 100%")[0];
+                let inside = ctx.read_response(egui::Id::new("Zoom in")).unwrap().rect;
+                assert!(zoom.x < out.left() && out.right() < inside.left());
+                for rect in [out, inside] {
+                    assert!(output.shapes.iter().any(|shape| matches!(&shape.shape,
+                        egui::Shape::Circle(circle) if circle.radius == 5.5 && rect.contains(circle.center))));
+                }
+                output.drop_without_applying_deltas();
+                click_action(&mut app, &ctx, "Zoom in");
+                render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+                assert!((ctx.zoom_factor() - 1.1).abs() < 0.001);
+                click_action(&mut app, &ctx, "Zoom out");
+                render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+                assert_eq!(ctx.zoom_factor(), 1.0);
+                click_action(&mut app, &ctx, "Zoom in");
+                let output = render(&mut app, &ctx, vec![]);
+                let reset = text_centers(&output, "Zoom 110%")[0];
+                output.drop_without_applying_deltas();
+                click(&mut app, &ctx, reset);
+                render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+                assert_eq!(ctx.zoom_factor(), 1.0);
+                assert_eq!(app.paths, paths);
+                assert_eq!(
+                    app.selected.as_deref(),
+                    Some(std::path::Path::new("assembly"))
+                );
+                assert_eq!(app.file_view.is_some(), file_view);
+                assert_eq!(ctx.theme(), theme);
+                for (limit, label) in [(MIN_ZOOM, "Zoom out"), (MAX_ZOOM, "Zoom in")] {
+                    ctx.set_zoom_factor(limit);
+                    render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+                    // egui derives interaction/disabled state from the preceding pass.
+                    render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+                    assert!(
+                        !ctx.read_response(egui::Id::new(label)).unwrap().enabled(),
+                        "limit {limit}, actual {}: {label}",
+                        ctx.zoom_factor()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ctrl_wheel_zooms_without_scrolling_and_plain_wheel_still_scrolls() {
+        for file_view in [false, true] {
+            let ctx = egui::Context::default();
+            apply_theme(&ctx);
+            let mut app = unfiltered_app();
+            if file_view {
+                let mut view = loaded_file_view();
+                view.comparison.as_mut().unwrap().rows = (1..=200)
+                    .map(|number| {
+                        test_file_row(
+                            Some((number, format!("line {number}"))),
+                            Some((number, format!("line {number}"))),
+                            DirectoryEntryState::Same,
+                        )
+                    })
+                    .collect();
+                update_visible_file_rows(&mut view, false);
+                view.scroll_y = 200.0;
+                app.file_view = Some(view);
+            } else {
+                app.tree = Some(FolderTree::from_diff(&DirectoryDiff {
+                    cancelled: false,
+                    entries: (0..200)
+                        .map(|index| DirectoryEntry {
+                            relative_path: format!("entry-{index:03}.txt").into(),
+                            left_size: Some(1),
+                            right_size: Some(1),
+                            left_exists: true,
+                            right_exists: true,
+                            left_kind: Some(DirectoryEntryKind::File),
+                            right_kind: Some(DirectoryEntryKind::File),
+                            kind: DirectoryEntryKind::File,
+                            state: DirectoryEntryState::Same,
+                        })
+                        .collect(),
+                }));
+                app.tree_scroll_y = 200.0;
+            }
+            render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+            let scroll = |app: &VersusApp| {
+                app.file_view
+                    .as_ref()
+                    .map_or(app.tree_scroll_y, |view| view.scroll_y)
+            };
+            let pointer = app.pane_rects[0].center();
+            let wheel = |delta, ctrl, unit| {
+                vec![
+                    egui::Event::PointerMoved(pointer),
+                    egui::Event::MouseWheel {
+                        unit,
+                        phase: egui::TouchPhase::Move,
+                        delta: egui::vec2(0.0, delta),
+                        modifiers: egui::Modifiers {
+                            ctrl,
+                            ..Default::default()
+                        },
+                    },
+                ]
+            };
+            // Line-based wheel ticks keep zooming during egui's smoothing tail.
+            render(&mut app, &ctx, wheel(1.0, true, egui::MouseWheelUnit::Line))
+                .drop_without_applying_deltas();
+            render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+            let first_zoom = ctx.zoom_factor();
+            assert!(first_zoom > 1.0);
+            for _ in 0..30 {
+                render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+            }
+            assert!(ctx.zoom_factor() > first_zoom);
+            assert_eq!(scroll(&app), 200.0);
+            render(
+                &mut app,
+                &ctx,
+                wheel(-1.0, true, egui::MouseWheelUnit::Line),
+            )
+            .drop_without_applying_deltas();
+            for _ in 0..30 {
+                render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+            }
+            assert!((ctx.zoom_factor() - 1.0).abs() < 0.01);
+            assert_eq!(scroll(&app), 200.0);
+            let zoom = ctx.zoom_factor();
+            render(
+                &mut app,
+                &ctx,
+                wheel(-100.0, false, egui::MouseWheelUnit::Point),
+            )
+            .drop_without_applying_deltas();
+            for _ in 0..30 {
+                render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+            }
+            assert!(scroll(&app) > 200.0);
+            assert_eq!(ctx.zoom_factor(), zoom);
+            for (start, delta, expected) in [(4.99, 100.0, MAX_ZOOM), (0.21, -100.0, MIN_ZOOM)] {
+                ctx.set_zoom_factor(start);
+                render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+                render(
+                    &mut app,
+                    &ctx,
+                    wheel(delta, true, egui::MouseWheelUnit::Point),
+                )
+                .drop_without_applying_deltas();
+                for _ in 0..30 {
+                    render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+                }
+                assert_eq!(ctx.zoom_factor(), expected);
+            }
+            let mut storage = ZoomStorage::default();
+            eframe::App::save(&mut app, &mut storage);
+            assert_eq!(storage.get_string("versus.zoom").as_deref(), Some("0.2"));
+        }
+    }
+
+    #[test]
+    fn wheel_zoom_is_not_applied_twice_during_a_layout_retry() {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut app = loaded_app();
+        render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0))),
+                events: vec![egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, 4.0),
+                    phase: egui::TouchPhase::Move,
+                    modifiers: egui::Modifiers::CTRL,
+                }],
+                ..Default::default()
+            },
+            |ui| {
+                app.render(ui);
+                if ui.ctx().current_pass_index() == 0 {
+                    ui.ctx().request_discard("test layout retry");
+                }
+            },
+        );
+        assert_eq!(output.platform_output.num_completed_passes, 2);
+        assert!((ctx.zoom_factor() - (4.0_f32 / 200.0).exp()).abs() < 0.001);
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn zoom_is_restored_and_only_scale_is_saved() {
+        let ctx = egui::Context::default();
+        let mut storage = ZoomStorage::default();
+        storage.set_string("versus.zoom", "1.4".into());
+        restore_zoom(&ctx, &storage);
+        let mut app = loaded_app();
+        render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+        assert_eq!(ctx.zoom_factor(), 1.4);
+        storage.0.clear();
+        eframe::App::save(&mut app, &mut storage);
+        assert_eq!(storage.0.len(), 1);
+        assert_eq!(storage.get_string("versus.zoom").as_deref(), Some("1.4"));
+        assert!(!eframe::App::persist_egui_memory(&app));
+        for value in ["NaN", "inf", "-1", "0", "6", "broken"] {
+            let ctx = egui::Context::default();
+            storage.set_string("versus.zoom", value.into());
+            restore_zoom(&ctx, &storage);
+            render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+            assert_eq!(ctx.zoom_factor(), 1.0, "invalid saved zoom {value}");
+        }
+    }
+
+    #[test]
+    fn toolbar_press_feedback_precedes_activation_and_release_outside_cancels() {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut app = loaded_app();
+        render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+        let position = ctx
+            .read_response(egui::Id::new("Show only differences"))
+            .unwrap()
+            .rect
+            .center();
+        let event = |position, pressed| egui::Event::PointerButton {
+            pos: position,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        let output = render(
+            &mut app,
+            &ctx,
+            vec![egui::Event::PointerMoved(position), event(position, true)],
+        );
+        assert!(!app.show_only_differences);
+        let fill = Palette::for_context(&ctx).accent.gamma_multiply(0.35);
+        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Rect(rect) if rect.fill == fill && rect.rect.contains(position))));
+        output.drop_without_applying_deltas();
+        let outside = egui::pos2(5.0, 700.0);
+        render(
+            &mut app,
+            &ctx,
+            vec![egui::Event::PointerMoved(outside), event(outside, false)],
+        )
+        .drop_without_applying_deltas();
+        assert!(!app.show_only_differences);
+        click_action(&mut app, &ctx, "Show only differences");
+        assert!(app.show_only_differences);
+    }
+
+    #[test]
+    fn accesskit_exposes_empty_targets_and_file_lines_with_side_number_and_status() {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        ctx.enable_accesskit();
+        let mut app = VersusApp::default();
+        let output = render(&mut app, &ctx, vec![]);
+        let labels: Vec<_> = output
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .unwrap()
+            .nodes
+            .iter()
+            .filter_map(|(_, node)| node.label().or_else(|| node.value()))
+            .collect();
+        for side in ["Left", "Right"] {
+            assert!(labels.iter().any(|label| label.starts_with(side) && label.contains("Drop a file or folder")));
+        }
+        output.drop_without_applying_deltas();
+        app.file_view = Some(loaded_file_view());
+        let output = render(&mut app, &ctx, vec![]);
+        let labels: Vec<_> = output
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .unwrap()
+            .nodes
+            .iter()
+            .filter_map(|(_, node)| node.label().or_else(|| node.value()))
+            .collect();
+        assert!(
+            labels
+                .iter()
+                .any(|label| label.contains("Left line 2") && label.contains("Different")),
+            "{labels:?}"
+        );
+        assert!(
+            labels.iter().any(
+                |label| label.contains("Right file comparison pane") && label.contains("right")
+            )
+        );
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn long_unicode_file_lines_have_bounded_accessibility_updates() {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        ctx.enable_accesskit();
+        let mut app = unfiltered_app();
+        let mut view = loaded_file_view();
+        let text = "工程🦀".repeat(20_000);
+        view.comparison.as_mut().unwrap().rows = vec![test_file_row(
+            Some((1, text.clone())),
+            Some((1, text)),
+            DirectoryEntryState::Different,
+        )];
+        view.visible_rows = vec![0];
+        app.file_view = Some(view);
+        let output = render(&mut app, &ctx, vec![]);
+        let labels: Vec<_> = output
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .unwrap()
+            .nodes
+            .iter()
+            .filter_map(|(_, node)| node.value())
+            .filter(|label| label.contains("line 1:"))
+            .collect();
+        assert_eq!(labels.len(), 2);
+        for label in labels {
+            assert!(label.len() < 4200);
+            assert!(label.contains("bytes omitted"));
+            assert!(label.contains("工程🦀"));
+        }
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn empty_comparisons_keep_drop_hints_and_result_explanations() {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        for filtered in [false, true] {
+            let mut app = loaded_app();
+            app.tree = Some(FolderTree::from_diff(&DirectoryDiff {
+                cancelled: false,
+                entries: vec![],
+            }));
+            app.show_only_differences = filtered;
+            let output = render(&mut app, &ctx, vec![]);
+            assert_eq!(
+                text_positions(&output, "Drop a file or folder here").len(),
+                2
+            );
+            assert_eq!(
+                text_positions(
+                    &output,
+                    if filtered {
+                        "No differences"
+                    } else {
+                        "Both folders are empty"
+                    }
+                )
+                .len(),
+                1
+            );
+            output.drop_without_applying_deltas();
+        }
+    }
+
+    #[test]
+    fn invalid_sources_keep_drop_targets_available() {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        for incompatible in [false, true] {
+            let mut app = VersusApp::default();
+            app.paths = ["left".into(), "right".into()];
+            if incompatible {
+                app.source_kinds = [Some(SourceKind::File), Some(SourceKind::Folder)];
+            } else {
+                app.error = Some("Unavailable source".into());
+            }
+            let output = render(&mut app, &ctx, vec![]);
+            assert_eq!(
+                text_positions(&output, "Drop a file or folder here").len(),
+                2
+            );
+            assert_eq!(
+                text_positions(
+                    &output,
+                    if incompatible {
+                        "Incompatible source types"
+                    } else {
+                        "Cannot open selected source"
+                    }
+                )
+                .len(),
+                1
+            );
+            output.drop_without_applying_deltas();
+        }
+    }
+
+    #[test]
+    fn empty_file_comparisons_keep_drop_hints() {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        for empty_files in [false, true] {
+            let mut app = loaded_app();
+            let mut view = loaded_file_view();
+            view.visible_rows.clear();
+            if empty_files {
+                view.comparison.as_mut().unwrap().rows.clear();
+            }
+            app.file_view = Some(view);
+            let output = render(&mut app, &ctx, vec![]);
+            assert_eq!(
+                text_positions(&output, "Drop a file or folder here").len(),
+                2
+            );
+            assert_eq!(
+                text_positions(
+                    &output,
+                    if empty_files {
+                        "Both files are empty"
+                    } else {
+                        "No differences"
+                    }
+                )
+                .len(),
+                1
+            );
+            output.drop_without_applying_deltas();
+        }
+    }
+
+    #[test]
+    fn navigation_status_reports_current_change_in_both_views() {
+        let mut app = loaded_app();
+        app.folder_differences = vec!["a.txt".into(), "b.txt".into(), "c.txt".into()];
+        app.selected = Some("b.txt".into());
+        assert_eq!(app.navigation_status(), "Change 2 of 3");
+        app.file_view = Some(loaded_file_view());
+        let view = app.file_view.as_mut().unwrap();
+        view.navigation_row = Some(view.difference_rows[0]);
+        let count = view.difference_rows.len();
+        assert_eq!(app.navigation_status(), format!("Change 1 of {count}"));
     }
 
     #[test]

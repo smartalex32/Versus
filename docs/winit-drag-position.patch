@@ -45,9 +45,18 @@ index 79f5c114..604cc20a 100644
              // By our own state flow, `version` should never be `None` at this point.
              let version = self.dnd.version.unwrap_or(5);
 diff --git a/vendor/winit/src/platform_impl/macos/window_delegate.rs b/vendor/winit/src/platform_impl/macos/window_delegate.rs
-index e293505e..76b2f148 100644
+index e293505e..9e4a908c 100644
 --- a/vendor/winit/src/platform_impl/macos/window_delegate.rs
 +++ b/vendor/winit/src/platform_impl/macos/window_delegate.rs
+@@ -9,7 +9,7 @@ use core_graphics::display::{CGDisplay, CGPoint};
+ use monitor::VideoModeHandle;
+ use objc2::rc::{autoreleasepool, Retained};
+ use objc2::runtime::{AnyObject, ProtocolObject};
+-use objc2::{declare_class, msg_send_id, mutability, sel, ClassType, DeclaredClass};
++use objc2::{declare_class, msg_send, msg_send_id, mutability, sel, ClassType, DeclaredClass};
+ use objc2_app_kit::{
+     NSAppKitVersionNumber, NSAppKitVersionNumber10_12, NSAppearance, NSAppearanceCustomization,
+     NSAppearanceNameAqua, NSApplication, NSApplicationPresentationOptions, NSBackingStoreType,
 @@ -370,6 +370,8 @@ declare_class!(
          fn dragging_entered(&self, sender: &NSObject) -> bool {
              trace_scope!("draggingEntered:");

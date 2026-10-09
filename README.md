@@ -33,7 +33,12 @@ path in both. Scrolling is linked, and a dash marks the empty position opposite
 a one-sided item so matching paths stay aligned. **Expand all** and **Collapse
 all** are the stacked plus/minus icons at the upper right and control both trees. Hover
 over an action icon for its label. Tab focuses tree rows; Enter or Space toggles a
-folder, and the left/right arrow keys collapse/expand a focused folder.
+folder, and the left/right arrow keys collapse/expand a focused folder. Up/Down
+moves through visible rows while keeping the active pane and selected entry in
+view. Keyboard focus has a distinct blue outline. Native screen readers receive
+side, path, kind, status, and size labels for tree entries and numbered text for
+visible file lines; focused file panes also support arrow keys, Page Up/Down,
+and Home/End.
 
 - Amber unequal sign: changed files or shared folders containing differences.
 - Cyan left arrow: files and folders present only on the left.
@@ -52,9 +57,15 @@ error details. The cursor becomes a pointer over files and folders.
 
 Comparison runs in the background with refresh and cancel icons in the header.
 Files are compared by content, not timestamps. Symlinks are compared by their
-targets and are never recursively followed. Empty folders are included. Changing
-a path clears the prior result so it cannot be mistaken for the new selection.
-While loading, a status indicator shows the current stage and elapsed time.
+target paths rather than target contents and are never recursively followed.
+This keeps traversal within the selected roots and avoids loops or repeated
+comparisons when links point to ancestors or outside folders. Empty folders are
+included. Changing a path clears the prior result so it cannot be mistaken for
+the new selection.
+The status area immediately to the right of the legend shows change position,
+loading progress, or errors without adding another row above the panes.
+Long status messages are shortened on screen; hover for the complete text.
+While loading, it shows the current stage and elapsed time.
 Measured stages also show progress and an approximate time remaining for that
 stage. Folder discovery and line alignment have no reliable total, so they show
 activity without a time estimate. File loading can also be cancelled.
@@ -64,6 +75,7 @@ apply to both comparison views:
 
 - **Show only differences** hides identical lines and tree entries. File line
   numbers still refer to the original files; changed folder ancestors stay visible.
+  Filtering preserves the top visible entry, or the nearest remaining entry.
   It starts on.
 - **Ignore whitespace** ignores inline Unicode whitespace, including spaces and
   tabs, while preserving line boundaries. It starts on.
@@ -73,7 +85,8 @@ apply to both comparison views:
 - **Previous difference** and **Next difference**, the up/down arrows, scroll
   both panes to the previous or next changed line or file. Folder navigation skips
   folders and expands the target file's parents, including when they were
-  collapsed. Navigation stops at the first or last difference.
+  collapsed. Navigation stops at the first or last difference; the status area
+  shows **Change N of M** for the current target.
 
 Selected option icons have a blue outline. Changing an ignore option recomputes
 the comparison in the background; filtering does not reread the sources. Options
@@ -82,7 +95,8 @@ options apply to valid UTF-8 text up to 32 MiB; binary, invalid UTF-8, and large
 files retain byte-for-byte comparison.
 
 Drag one file or folder from your file explorer into the large view on the left
-or right, below the path bars, to replace that side. A blue border and drop label
+or right, below the path bars, to replace that side. Empty panes have persistent
+dashed outlines and drop hints. A blue border and drop label
 identify LEFT or RIGHT above the pane contents, including the empty chooser view.
 Windows follows the live cursor during native drags even when ordinary pointer
 events are unavailable. The source type
@@ -124,6 +138,17 @@ deferred. Compared files and folders are never modified.
 The sun/moon icon at the upper right switches between light and dark themes in
 either view. The logo and window icon preserve the blue half and use a white half
 in dark mode or the original dark half in light mode.
+
+The legend row places **Zoom** and its percentage immediately before adjacent
+magnifying-glass **−** and **+** buttons, just left of **Show only differences**.
+Click them to reduce or enlarge the interface. Hold
+**Ctrl** and scroll the mouse wheel up/down to zoom in/out; the wheel alone
+scrolls the comparison. Command + wheel also works on macOS. Use
+Ctrl + / Ctrl - / Ctrl 0 (Command on macOS) for the keyboard shortcuts,
+or click the percentage to reset to 100%. Zoom is restored across launches;
+source paths and compared content are not saved. Row and control heights follow font metrics while staying compact at
+the default size. Toolbar buttons highlight when pressed and activate on release;
+releasing outside cancels the action.
 
 ## Git and IDE integration
 
