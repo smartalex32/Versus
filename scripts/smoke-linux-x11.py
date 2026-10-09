@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import struct
 import sys
 import tempfile
 import time
@@ -78,20 +79,28 @@ def main():
         subprocess.run([str(image), "--appimage-extract"], cwd=str(root),
                        stdout=subprocess.DEVNULL, check=True, timeout=60)
         appdir = root / "squashfs-root"
-        left = root / "left.txt"
-        right = root / "right.txt"
+        left = root / "left input.txt"
+        right = root / "right input.txt"
         left.write_text("same line\nleft change\n")
         right.write_text("same line\nright change\n")
         # A stock /usr/bin/xkbcomp would hide broken relocation. The disposable
         # container owns this file; restore it even when the smoke test fails.
-        compiler = Path("/usr/bin/xkbcomp")
-        hidden_compiler = root / "host-xkbcomp"
-        compiler.rename(hidden_compiler)
-        drivers = Path("/usr/lib64/dri")
-        hidden_drivers = root / "host-dri"
-        drivers.rename(hidden_drivers)
+        masks = [Path("/usr/bin/xkbcomp"), Path("/usr/lib64/dri"),
+                 Path("/usr/share/glib-2.0/schemas"), Path("/usr/share/glvnd/egl_vendor.d")]
+        for name in ["libGL.so.1", "libEGL.so.1", "libGLX.so.0", "libGLdispatch.so.0",
+                     "libGLX_mesa.so.0", "libEGL_mesa.so.0", "libgbm.so.1", "libglapi.so.0",
+                     "libgtk-3.so.0", "libgdk-3.so.0"]:
+            library = Path("/usr/lib64") / name
+            target = library.resolve(strict=True)
+            if target not in masks:
+                masks.append(target)
+        hidden = []
         launcher = None
         try:
+            for index, path in enumerate(masks):
+                backup = root / "host-runtime-{}".format(index)
+                path.rename(backup)
+                hidden.append((path, backup))
             with (root / "launcher.log").open("w+") as log:
                 launcher = subprocess.Popen(
                     [str(appdir / "AppRun"), "--compat-x11", "--diff", str(left), str(right)],
@@ -112,7 +121,7 @@ def main():
 
                     outer = eventually(lambda: find_window(host, "Xephyr"),
                                        "Xephyr host window did not open", launcher)
-                    for width, height in [(1152, 720), (1400, 900), (1280, 800)]:
+                    for width, height in [(1152, 720), (800, 600), (1400, 900), (1280, 800)]:
                         command(["xdotool", "windowsize", outer, str(width), str(height)], host)
                         eventually(lambda: geometry(nested, window).get("WIDTH") == str(width)
                                    and geometry(nested, window).get("HEIGHT") == str(height),
@@ -122,15 +131,28 @@ def main():
                     # injected into the modern nested display directly.
                     command(["xdotool", "windowfocus", outer], host)
                     command(["xdotool", "mousemove", "--window", outer, "400", "400"], host)
-                    time.sleep(0.3)
                     before = root / "before.xwd"
                     after = root / "after.xwd"
-                    command(["xwd", "-silent", "-id", window, "-out", str(before)], nested)
+
+                    def capture(destination):
+                        command(["xwd", "-silent", "-id", window, "-out", str(destination)], nested)
+                        return destination.read_bytes()
+
+                    previous = [None]
+
+                    def stable_frame():
+                        frame = capture(before)
+                        header = struct.unpack(">25I", frame[:100])
+                        pixels = frame[header[0] + header[19] * 12:]
+                        painted = len(set(pixels[::max(1, header[11] // 8)])) > 16
+                        stable = painted and previous[0] == frame
+                        previous[0] = frame
+                        return frame if stable else None
+
+                    baseline = eventually(stable_frame, "comparison did not finish painting", launcher)
                     command(["xdotool", "keydown", "Control_L", "click", "4", "keyup", "Control_L"], host)
-                    time.sleep(0.4)
-                    command(["xwd", "-silent", "-id", window, "-out", str(after)], nested)
-                    if before.read_bytes() == after.read_bytes():
-                        raise RuntimeError("Ctrl+wheel through nxagent did not change the GUI")
+                    eventually(lambda: capture(after) != baseline,
+                               "Ctrl+wheel through nxagent did not change the GUI", launcher)
                     command(["xdotool", "key", "ctrl+0"], host)
 
                     # Exercise both bundled picker modes without a desktop
@@ -149,11 +171,31 @@ def main():
                             choice = root if directory else left
                             command(["xdotool", "type", "--clearmodifiers", str(choice)], host)
                             command(["xdotool", "key", "Return"], host)
+                            time.sleep(0.2)
+                            if find_window(nested, "File Selection"):
+                                command(["xdotool", "key", "Return"], host)
                             stdout, stderr = picker.communicate(timeout=10)
                             if picker.returncode != 0 or stdout.strip() != str(choice):
                                 raise RuntimeError("native picker did not return selected path: " + stderr)
                         finally:
                             stop(picker)
+
+                    # Open and cancel both pickers through the real Browse path
+                    # controls, delivering clicks and keys through nxagent.
+                    for folder_mode in [False, True]:
+                        command(["xdotool", "windowfocus", outer], host)
+                        if folder_mode:
+                            command(["xdotool", "mousemove", "--window", outer,
+                                     "550", "26", "click", "1"], host)
+                            time.sleep(0.2)
+                        command(["xdotool", "mousemove", "--window", outer,
+                                 "200", "100", "click", "1"], host)
+                        dialog = eventually(lambda: find_window(nested, "File Selection"),
+                                            "Browse did not open its native picker", launcher)
+                        command(["xdotool", "windowactivate", "--sync", dialog], nested)
+                        command(["xdotool", "key", "Escape"], host)
+                        eventually(lambda: not find_window(nested, "File Selection"),
+                                   "native Browse picker did not cancel", launcher)
 
                     authority = Path(nested["XAUTHORITY"])
                     command(["xdotool", "windowclose", outer], host)
@@ -169,8 +211,8 @@ def main():
         finally:
             if launcher is not None:
                 stop(launcher)
-            hidden_compiler.rename(compiler)
-            hidden_drivers.rename(drivers)
+            for path, backup in reversed(hidden):
+                backup.rename(path)
 
 
 if __name__ == "__main__":

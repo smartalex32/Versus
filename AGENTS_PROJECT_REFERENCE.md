@@ -104,6 +104,11 @@ APIs and must fail cleanly when unavailable.
   main viewport; ordinary native launches are unchanged. Host clipboard/file drops
   are not bridged across the private display. Keep launcher lifecycle and argument
   tests in `scripts/test_linux_launcher.py` independent of a live display.
+  `linux-runtime-libraries.py` explicitly bundles the helpers' complete non-glibc
+  dependency closure; default linuxdeploy graphics exclusions are insufficient.
+  Ordinary Versus only receives `usr/lib/native` keyboard libraries. The private
+  display and `launch-linux-picker.sh` receive the full runtime in `usr/lib`,
+  keeping it out of ordinary host graphics selection.
 
 ## Architectural constraints
 

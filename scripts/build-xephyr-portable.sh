@@ -40,11 +40,15 @@ sed -i '/^[[:space:]]*%configure[[:space:]].*\\[[:space:]]*$/a\
 dnf builddep --assumeyes --enablerepo=devel "$spec"
 rpmbuild --define "_topdir $rpm_root" --define "dist $dist_tag" -bb "$spec"
 
-xephyr_rpm="$(find "$rpm_root/RPMS/x86_64" -maxdepth 1 -type f -name 'xorg-x11-server-Xephyr-*.rpm' -print -quit)"
-test -n "$xephyr_rpm"
 identity_format='%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}'
-test "$(rpm -qp --qf "$identity_format" "$xephyr_rpm")" = \
-  "$(rpm -q --qf "$identity_format" xorg-x11-server-Xephyr)"
+installed_identity="$(rpm -q --qf "$identity_format" xorg-x11-server-Xephyr)"
+# A wildcard also matches Xephyr-debuginfo, whose traversal order is undefined.
+xephyr_rpm="$rpm_root/RPMS/x86_64/$installed_identity.rpm"
+if ! test -f "$xephyr_rpm"; then
+  echo "Rebuild did not produce the installed Xephyr identity: $installed_identity" >&2
+  exit 1
+fi
+test "$(rpm -qp --qf "$identity_format" "$xephyr_rpm")" = "$installed_identity"
 # Reinstall the rebuilt RPM over the build image package without changing its
 # package identity or pulling newer host libraries.
 rpm -Uvh --replacepkgs "$xephyr_rpm"

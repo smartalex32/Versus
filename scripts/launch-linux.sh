@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # AppRun for the Linux AppImage.  --compat-x11 starts Versus inside a private
-# nested Xephyr server for hosts whose nxagent only implements XInput 1.
+# nested Xephyr server for older X11 hosts, including X2Go/nxagent.
 set -euo pipefail
 
 die() {
@@ -14,9 +14,9 @@ versus="$appdir/usr/bin/versus"
 
 test -x "$versus" || die "missing bundled executable: $versus"
 # linuxdeploy's generated AppRun normally supplies this path.  This custom
-# launcher replaces it, so retain bundled libraries for every launched helper
-# and for Versus while allowing a host-provided path to remain available.
-export LD_LIBRARY_PATH="$appdir/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+# launcher keeps the ordinary keyboard runtime separate from the private
+# graphics/helper runtime, while allowing a host-provided path to remain.
+export LD_LIBRARY_PATH="$appdir/usr/lib/native${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export PATH="$appdir/usr/bin:$PATH"
 export XDG_DATA_DIRS="$appdir/usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
 export GSETTINGS_SCHEMA_DIR="$appdir/usr/share/glib-2.0/schemas"
@@ -51,6 +51,9 @@ done
 if ! "$compat_x11"; then
   exec "$versus" "${arguments[@]}"
 fi
+
+# Keep the private graphics/toolkit runtime out of ordinary native launches.
+export LD_LIBRARY_PATH="$appdir/usr/lib:$LD_LIBRARY_PATH"
 
 host_display="${DISPLAY:-}"
 test -n "$host_display" || die "--compat-x11 requires an existing X11 DISPLAY"

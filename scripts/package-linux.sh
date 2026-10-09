@@ -44,6 +44,7 @@ bundle_rpm_licenses() {
 python3 scripts/check-linux-compatibility.py target/release/versus
 
 require_file scripts/launch-linux.sh
+require_file scripts/launch-linux-picker.sh
 require_file /usr/bin/Xephyr
 require_file /usr/bin/xdpyinfo
 require_file /usr/bin/xprop
@@ -58,6 +59,14 @@ require_directory /usr/share/glib-2.0/schemas
 require_file "$libdir/dri/swrast_dri.so"
 require_file "$libdir/libGLX_mesa.so.0"
 require_file "$libdir/libEGL_mesa.so.0"
+require_file "$libdir/libGL.so.1"
+require_file "$libdir/libEGL.so.1"
+require_file "$libdir/libGLdispatch.so.0"
+require_file "$libdir/libGLX.so.0"
+require_file "$libdir/libgbm.so.1"
+require_file "$libdir/libglapi.so.0"
+require_file "$libdir/libxcb-xkb.so.1"
+require_file "$libdir/libXau.so.6"
 
 mkdir -p "$appdir/usr/bin" "$appdir/usr/lib/dri" "$appdir/usr/share/applications" \
   "$appdir/usr/share/pixmaps" "$appdir/usr/share/licenses/versus" "$appdir/usr/share/X11" dist
@@ -86,6 +95,7 @@ printf '{"file_format_version":"1.0.0","ICD":{"library_path":"libEGL_mesa.so.0"}
 # license-file manifest avoids guessing the installed license paths.
 for package in xorg-x11-server-Xephyr xorg-x11-utils xorg-x11-xauth \
   xorg-x11-xkb-utils xkeyboard-config mesa-dri-drivers mesa-libGL mesa-libEGL \
+  mesa-libgbm libdrm libglvnd libglvnd-egl libglvnd-glx libX11 libXau libxcb \
   openbox zenity glib2 gtk3; do
   bundle_rpm_licenses "$package"
 done
@@ -93,15 +103,22 @@ done
 curl --fail --location --retry 3 https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-x86_64.AppImage --output linuxdeploy.AppImage
 chmod +x linuxdeploy.AppImage
 
-# libxkbcommon is dlopened by winit.  Mesa's vendor libraries and DRI drivers
-# are also dlopened, so list them explicitly instead of relying on ELF NEEDED
-# entries from Versus or libGL.
+# linuxdeploy deliberately omits desktop graphics libraries.  Versus and the
+# helpers need them through dlopen/GLVND, so stage their complete non-glibc ELF
+# closure ourselves and still pass each root with --library to linuxdeploy.
 libraries=(
   "$libdir/libxkbcommon.so.0"
   "$libdir/libxkbcommon-x11.so.0"
+  "$libdir/libxcb-xkb.so.1"
+  "$libdir/libXau.so.6"
+  "$libdir/libGL.so.1"
+  "$libdir/libEGL.so.1"
+  "$libdir/libGLdispatch.so.0"
+  "$libdir/libGLX.so.0"
   "$libdir/libGLX_mesa.so.0"
   "$libdir/libEGL_mesa.so.0"
-  "$libdir/dri/swrast_dri.so"
+  "$libdir/libgbm.so.1"
+  "$libdir/libglapi.so.0"
 )
 for library in "${libraries[@]}"; do
   require_file "$library"
@@ -109,8 +126,9 @@ done
 
 # kms_swrast is a software fallback on Mesa builds that ship it.  Bundle it
 # when present without making the Rocky 8 package depend on an optional file.
+drivers=("$libdir/dri/swrast_dri.so")
 if test -f "$libdir/dri/kms_swrast_dri.so"; then
-  libraries+=("$libdir/dri/kms_swrast_dri.so")
+  drivers+=("$libdir/dri/kms_swrast_dri.so")
 fi
 
 executables=(/usr/bin/Xephyr /usr/bin/xdpyinfo /usr/bin/xprop /usr/bin/xauth /usr/bin/xkbcomp /usr/bin/openbox /usr/bin/zenity)
@@ -123,6 +141,22 @@ for executable in "${executables[@]}"; do
   executable_arguments+=(--executable "$executable")
 done
 
+runtime_arguments=()
+for library in "${libraries[@]}"; do
+  runtime_arguments+=(--library "$library")
+done
+for executable in "${executables[@]}" "${drivers[@]}"; do
+  runtime_arguments+=(--executable "$executable")
+done
+python3 scripts/linux-runtime-libraries.py --destination "$appdir/usr/lib" \
+  --native-destination "$appdir/usr/lib/native" \
+  --manifest "$appdir/usr/share/versus/linux-runtime-libraries.txt" \
+  "${runtime_arguments[@]}" \
+  --native-library "$libdir/libxkbcommon.so.0" \
+  --native-library "$libdir/libxkbcommon-x11.so.0" \
+  --native-library "$libdir/libxcb-xkb.so.1" \
+  --native-library "$libdir/libXau.so.6"
+
 # This deploy-only pass must complete before AppRun and non-ELF runtime files
 # are installed.  The output pass below snapshots the completed AppDir.
 APPIMAGE_EXTRACT_AND_RUN=1 ARCH=x86_64 ./linuxdeploy.AppImage --appdir "$appdir" \
@@ -130,24 +164,34 @@ APPIMAGE_EXTRACT_AND_RUN=1 ARCH=x86_64 ./linuxdeploy.AppImage --appdir "$appdir"
   --icon-file "$appdir/usr/share/pixmaps/versus.png" \
   "${executable_arguments[@]}" "${library_arguments[@]}"
 
-# linuxdeploy puts --library inputs in usr/lib.  Mesa locates DRI drivers below
-# usr/lib/dri, which AppRun exposes through LIBGL_DRIVERS_PATH.
-for driver in "${libraries[@]}"; do
-  case "$driver" in
-    "$libdir"/dri/*)
-      driver_name="${driver##*/}"
-      deployed_driver="$appdir/usr/lib/$driver_name"
-      if ! test -e "$deployed_driver"; then
-        echo "linuxdeploy did not bundle Mesa DRI driver: $driver_name" >&2
-        exit 1
-      fi
-      # Several Mesa driver names can symlink to one shared implementation.
-      # Copy the resolved module so relocating a relative symlink cannot leave
-      # it pointing at a nonexistent library inside the dri subdirectory.
-      install -m 755 "$driver" "$appdir/usr/lib/dri/$driver_name"
-      ;;
-  esac
+# Reapply resolved files after linuxdeploy so its excluded-library handling or
+# symlink preservation cannot leave an AppDir library pointing back to the host.
+python3 scripts/linux-runtime-libraries.py --destination "$appdir/usr/lib" \
+  --native-destination "$appdir/usr/lib/native" \
+  --manifest "$appdir/usr/share/versus/linux-runtime-libraries.txt" \
+  "${runtime_arguments[@]}" \
+  --native-library "$libdir/libxkbcommon.so.0" \
+  --native-library "$libdir/libxkbcommon-x11.so.0" \
+  --native-library "$libdir/libxcb-xkb.so.1" \
+  --native-library "$libdir/libXau.so.6"
+
+# Mesa locates DRI drivers below usr/lib/dri.  Copy the resolved modules so
+# aliases from the build host never become broken links in the AppImage.
+for driver in "${drivers[@]}"; do
+  install -m 755 "$driver" "$appdir/usr/lib/dri/${driver##*/}"
 done
+
+runtime_manifest="$appdir/usr/share/versus/linux-runtime-libraries.txt"
+test -s "$runtime_manifest"
+awk '/^usr\/lib\// {print $1}' "$runtime_manifest" | while IFS= read -r path; do
+  test -f "$appdir/$path"
+done
+
+# rfd invokes `zenity` by name.  Preserve the real executable behind a wrapper
+# that gives only the picker the complete bundled GTK/Mesa runtime.
+test -x "$appdir/usr/bin/zenity"
+mv "$appdir/usr/bin/zenity" "$appdir/usr/bin/zenity-real"
+install -m 755 scripts/launch-linux-picker.sh "$appdir/usr/bin/zenity"
 
 rm -f "$appdir/AppRun"
 install -m 755 scripts/launch-linux.sh "$appdir/AppRun"

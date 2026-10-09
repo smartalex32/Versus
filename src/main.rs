@@ -47,7 +47,10 @@ fn run(launch: Option<cli::LaunchRequest>) -> eframe::Result {
         if std::env::var_os("VERSUS_X11_COMPAT").as_deref() == Some(std::ffi::OsStr::new("1")) {
             // The private display has its own window manager. Let it resize this
             // window with the outer Xephyr window, without a second title bar.
-            viewport.with_maximized(true).with_decorations(false)
+            viewport
+                .with_maximized(true)
+                .with_decorations(false)
+                .with_min_inner_size([1.0, 1.0])
         } else {
             viewport
         };
