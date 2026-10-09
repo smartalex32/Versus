@@ -284,8 +284,9 @@ particular artifact has been executed on every supported operating system. Linux
 x86-64 packages are built on Rocky Linux 8.10, targeting glibc 2.28 or newer.
 Packaging rejects newer glibc requirements in the executable, bundled libraries,
 and AppImage runtime. CI also checks the packaged command-line entry point and
-window initialization in that environment. Linux still requires a compatible
-kernel, display stack, and graphics driver supplied by the host.
+window initialization in that environment. Ordinary launches use the host display
+and graphics driver. The AppImage also includes a software-rendered compatibility
+mode for older X11 servers, including standard X2Go/nxagent sessions.
 
 Download `linux-pr-artifacts` from a successful GitHub Actions CI run to get the
 latest branch build without installing compilers or build dependencies locally.
@@ -301,9 +302,41 @@ the minimum glibc requirement. The tar.gz convenience archive contains the plain
 executable, which requires its native libraries to be installed on the host;
 use the AppImage when you cannot install dependencies.
 
+### Older X11 servers and X2Go
+
+If startup fails while querying XInput2, run this **inside your existing X11
+desktop session**, such as the Rocky desktop opened through X2Go:
+
+```bash
+./Versus.AppImage --appimage-extract-and-run --compat-x11
+```
+
+The AppImage bundles a private Xephyr display, Openbox window management, Mesa
+software rendering, keyboard data/compiler, and a native picker fallback. Nothing
+is installed on the host, no administrator access is needed, and no X11 forwarding
+or alternative remote desktop is required. The outer window resizes the comparison;
+closing it also shuts down the private display and its helpers. Each instance has
+its own authenticated local display, with TCP listening disabled.
+
+Use the same option with Git or IDE launches, for example:
+
+```bash
+./Versus.AppImage --appimage-extract-and-run --compat-x11 --diff left.txt right.txt
+```
+
+Compatibility mode needs an existing `DISPLAY` and writable temporary storage.
+It uses more memory and can be slower than an ordinary launch. Clipboard and
+drag-and-drop between the host desktop and the private display are not bridged;
+use Browse or command-line paths to select inputs. This option belongs to the
+AppImage launcher; the plain executable in the tarball uses the host graphics stack.
+CI exercises the package through nxagent on Rocky 8, including window resizing,
+Ctrl+wheel input, file/folder picker selection, authentication, and cleanup. A
+specific organization's X2Go session configuration still needs local confirmation.
+
 Versus is licensed under [MIT](LICENSE). Each release includes
 `DEPENDENCY-LICENSES.md`, generated from Cargo metadata; review third-party
-licenses before redistributing.
+licenses before redistributing. The AppImage also carries license files for its
+additional Linux runtime packages under `usr/share/licenses/versus`.
 
 ## Build from source
 

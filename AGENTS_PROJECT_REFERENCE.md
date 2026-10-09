@@ -93,6 +93,17 @@ APIs and must fail cleanly when unavailable.
   ELF dependency discovery does not find them. Keep the build and its bundled
   dependencies on this baseline; AppImage extraction alone
   cannot make newer glibc requirements compatible with older hosts.
+  The AppImage's `--compat-x11` launcher supplies an authenticated private Xephyr
+  display, Openbox, Mesa software rendering and Zenity fallback for legacy X11
+  servers (including X2Go/nxagent). `build-xephyr-portable.sh` rebuilds the installed
+  Rocky server version with a PATH-resolved keyboard compiler, retaining its source
+  patches; `package-linux.sh` bundles helpers, XKB data, Mesa drivers, schemas,
+  configuration and licenses. `smoke-linux-x11.py` exercises the finished package
+  through real nxagent, with host xkbcomp hidden, resizing, input, native pickers,
+  authentication and cleanup. Compatibility mode only maximizes/undecorates the
+  main viewport; ordinary native launches are unchanged. Host clipboard/file drops
+  are not bridged across the private display. Keep launcher lifecycle and argument
+  tests in `scripts/test_linux_launcher.py` independent of a live display.
 
 ## Architectural constraints
 
