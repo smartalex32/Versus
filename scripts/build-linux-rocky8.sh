@@ -70,6 +70,34 @@ if ! "$window_opened"; then
   echo 'Packaged GUI did not create a Versus window on Rocky Linux 8.' >&2
   exit 1
 fi
+# Check actual mappings as well as the final RUNPATH invariant: the ordinary
+# app may load its keyboard libraries, but graphics/toolkit files stay native.
+python3 - <<'PYMAPS'
+from pathlib import Path
+found = False
+for process in Path("/proc").iterdir():
+    if not process.name.isdigit():
+        continue
+    try:
+        executable = (process / "exe").resolve(strict=True)
+        if executable.name != "versus" or executable.parent.name != "bin":
+            continue
+        found = True
+        root = executable.parents[2]
+        private = str(root / "usr/lib") + "/"
+        native = str(root / "usr/lib/native") + "/"
+        mappings = (process / "maps").read_text().splitlines()
+        unexpected = [line.split()[-1] for line in mappings
+                      if private in line and native not in line]
+        if unexpected:
+            raise SystemExit("Ordinary launch mapped private runtime libraries: " +
+                             ", ".join(unexpected))
+    except (FileNotFoundError, PermissionError):
+        continue
+if not found:
+    raise SystemExit("Cannot inspect the ordinary packaged Versus process")
+print("Ordinary launch keeps the private graphics/toolkit runtime isolated.")
+PYMAPS
 kill "$app_pid"
 wait "$app_pid" || true
 app_pid=''

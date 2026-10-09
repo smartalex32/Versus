@@ -31,6 +31,7 @@ printf 'xauth:%s\\n' "$*" >> "$TEST_LOG"
 test "${XAUTH_FAIL:-0}" != 1 || exit 9
 case " $* " in
   *" nlist :0 "*) printf '01000000000000124d49542d4d414749432d434f4f4b49452d31001000112233445566778899aabbccddeeff\\n' ;;
+  *" nmerge - "*) cat >/dev/null ;;
 esac
 exit 0
 """)
