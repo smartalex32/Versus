@@ -55,6 +55,13 @@ def find_window(environment, name):
     return result.stdout.splitlines()[0] if result.returncode == 0 and result.stdout else None
 
 
+def find_picker_window(environment, pid=None):
+    # GTK supplies the default title, which varies by action/version/locale.
+    selector = ["--pid", str(pid)] if pid is not None else ["--class", "[Zz]enity"]
+    result = command(["xdotool", "search", "--onlyvisible"] + selector, environment, False)
+    return result.stdout.splitlines()[0] if result.returncode == 0 and result.stdout else None
+
+
 def geometry(environment, window):
     output = command(["xdotool", "getwindowgeometry", "--shell", window], environment).stdout
     return dict(line.split("=", 1) for line in output.splitlines() if "=" in line)
@@ -202,19 +209,32 @@ def main():
                         picker = subprocess.Popen(arguments, env=nested, stdout=subprocess.PIPE,
                                                   stderr=subprocess.PIPE, universal_newlines=True)
                         try:
-                            dialog = eventually(lambda: find_window(nested, "File Selection"),
-                                                "bundled native picker did not open", launcher)
+                            def picker_window():
+                                if picker.poll() is not None:
+                                    stdout, stderr = picker.communicate()
+                                    raise RuntimeError("bundled picker exited {}: {}{}".format(
+                                        picker.returncode, stdout, stderr))
+                                return find_picker_window(nested, picker.pid)
+
+                            dialog = eventually(picker_window, "bundled native picker did not open", launcher)
                             command(["xdotool", "windowactivate", "--sync", dialog], nested)
                             command(["xdotool", "key", "ctrl+l"], host)
                             choice = root if directory else left
                             command(["xdotool", "type", "--clearmodifiers", str(choice)], host)
                             command(["xdotool", "key", "Return"], host)
                             time.sleep(0.2)
-                            if find_window(nested, "File Selection"):
+                            if find_picker_window(nested, picker.pid):
                                 command(["xdotool", "key", "Return"], host)
                             stdout, stderr = picker.communicate(timeout=10)
                             if picker.returncode != 0 or stdout.strip() != str(choice):
                                 raise RuntimeError("native picker did not return selected path: " + stderr)
+                        except Exception:
+                            print(command(["xwininfo", "-root", "-tree"], nested, False).stdout,
+                                  file=sys.stderr)
+                            stop(picker)
+                            stdout, stderr = picker.communicate()
+                            print("Picker output: {}{}".format(stdout, stderr), file=sys.stderr)
+                            raise
                         finally:
                             stop(picker)
 
@@ -228,11 +248,11 @@ def main():
                             time.sleep(0.2)
                         command(["xdotool", "mousemove", "--window", outer,
                                  "200", "100", "click", "1"], host)
-                        dialog = eventually(lambda: find_window(nested, "File Selection"),
+                        dialog = eventually(lambda: find_picker_window(nested),
                                             "Browse did not open its native picker", launcher)
                         command(["xdotool", "windowactivate", "--sync", dialog], nested)
                         command(["xdotool", "key", "Escape"], host)
-                        eventually(lambda: not find_window(nested, "File Selection"),
+                        eventually(lambda: not find_picker_window(nested),
                                    "native Browse picker did not cancel", launcher)
 
                     authority = Path(nested["XAUTHORITY"])
