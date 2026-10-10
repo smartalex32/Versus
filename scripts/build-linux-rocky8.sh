@@ -109,6 +109,9 @@ app_pid=''
 
 # These displays exist only inside the disposable build container. nxagent is
 # the legacy server behind standard X2Go, rather than a modern Xvfb substitute.
+# nxagent writes its compiled host keymap here on Rocky 8. The minimal
+# container does not create this runtime directory through a desktop session.
+mkdir -p /usr/share/X11/xkb/compiled
 DISPLAY=:99 nxagent :100 -geometry 1280x800 -nolisten tcp &
 nx_pid=$!
 for attempt in {1..100}; do

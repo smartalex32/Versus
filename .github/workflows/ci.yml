@@ -33,6 +33,7 @@ jobs:
           path: |
             dist/Versus.AppImage
             dist/versus-linux-x86_64.tar.gz
+            dist/linux-smoke-failure.png
       - uses: actions/upload-artifact@v4
         if: ${{ always() && hashFiles('dist/linux-runtime-sources.tar.gz') != '' }}
         with:

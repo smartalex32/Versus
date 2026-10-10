@@ -12,6 +12,7 @@ import struct
 import sys
 import tempfile
 import time
+import zlib
 
 
 def command(arguments, environment=None, check=True):
@@ -67,6 +68,40 @@ def geometry(environment, window):
     return dict(line.split("=", 1) for line in output.splitlines() if "=" in line)
 
 
+def save_failure_image(environment, destination):
+    """Capture the private desktop with standard CI tools and Python only."""
+    with tempfile.TemporaryDirectory(prefix="versus-capture-") as temporary:
+        raw = Path(temporary) / "desktop.xwd"
+        command(["xwd", "-silent", "-root", "-out", str(raw)], environment)
+        data = raw.read_bytes()
+    header = struct.unpack(">25I", data[:100])
+    width, height, bits, stride = header[4], header[5], header[11], header[12]
+    if bits not in (24, 32):
+        raise ValueError("unsupported XWD pixel depth: {}".format(bits))
+    pixels = data[header[0] + header[19] * 12:]
+    byte_order = "big" if header[7] else "little"
+    masks = header[14:17]
+    shifts = [(mask & -mask).bit_length() - 1 for mask in masks]
+    scanlines = bytearray()
+    for y in range(height):
+        scanlines.append(0)
+        for x in range(width):
+            offset = y * stride + x * (bits // 8)
+            pixel = int.from_bytes(pixels[offset:offset + bits // 8], byte_order)
+            for mask, shift in zip(masks, shifts):
+                scanlines.append(((pixel & mask) >> shift) * 255 // (mask >> shift))
+
+    def chunk(kind, payload):
+        return (struct.pack(">I", len(payload)) + kind + payload
+                + struct.pack(">I", zlib.crc32(kind + payload) & 0xffffffff))
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(b"\x89PNG\r\n\x1a\n"
+                           + chunk(b"IHDR", struct.pack(">2I5B", width, height, 8, 2, 0, 0, 0))
+                           + chunk(b"IDAT", zlib.compress(bytes(scanlines)))
+                           + chunk(b"IEND", b""))
+
+
 def stop(process):
     if process.poll() is None:
         process.terminate()
@@ -81,6 +116,7 @@ def main():
     image = Path(sys.argv[1]).resolve()
     host = os.environ.copy()
     host["DBUS_SESSION_BUS_ADDRESS"] = "unix:path=/nonexistent-versus-test-bus"
+    host["GSETTINGS_BACKEND"] = "memory"
     with tempfile.TemporaryDirectory(prefix="versus-nx-test-") as temporary:
         root = Path(temporary)
         subprocess.run([str(image), "--appimage-extract"], cwd=str(root),
@@ -229,6 +265,10 @@ def main():
                             if picker.returncode != 0 or stdout.strip() != str(choice):
                                 raise RuntimeError("native picker did not return selected path: " + stderr)
                         except Exception:
+                            try:
+                                save_failure_image(nested, image.parent / "linux-smoke-failure.png")
+                            except Exception as capture_error:
+                                print("Failure capture unavailable: {}".format(capture_error), file=sys.stderr)
                             print(command(["xwininfo", "-root", "-tree"], nested, False).stdout,
                                   file=sys.stderr)
                             stop(picker)
@@ -267,6 +307,11 @@ def main():
                         raise RuntimeError("launcher left private state after outer-window close")
                     print("NX compatibility passed: authenticated GUI, resize, Ctrl+wheel, file/folder pickers, cleanup.")
                 except Exception:
+                    if "nested" in locals() and not (image.parent / "linux-smoke-failure.png").exists():
+                        try:
+                            save_failure_image(nested, image.parent / "linux-smoke-failure.png")
+                        except Exception as capture_error:
+                            print("Failure capture unavailable: {}".format(capture_error), file=sys.stderr)
                     log.flush()
                     log.seek(0)
                     print(log.read(), file=sys.stderr)
