@@ -261,7 +261,14 @@ def main():
                         # XWarpPointer completes on nxagent before Xephyr has
                         # necessarily delivered its MotionNotify to GTK. Verify
                         # the private pointer before sending the button event.
-                        eventually(pointer_arrived, "host pointer did not reach the picker", launcher)
+                        try:
+                            eventually(pointer_arrived, "host pointer did not reach the picker", launcher)
+                        except Exception:
+                            print("Requested private pointer: {},{}; outer geometry: {}".format(
+                                x, y, geometry(host, outer)), file=sys.stderr)
+                            print(command(["xdotool", "getmouselocation", "--shell"], nested).stdout,
+                                  file=sys.stderr)
+                            raise
                         command(["xdotool", "click", "1"], host)
 
                     picker_failures = []

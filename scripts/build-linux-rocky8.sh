@@ -112,7 +112,9 @@ app_pid=''
 # nxagent writes its compiled host keymap here on Rocky 8. The minimal
 # container does not create this runtime directory through a desktop session.
 mkdir -p /usr/share/X11/xkb/compiled
-DISPLAY=:99 nxagent :100 -geometry 1280x800 -nolisten tcp &
+# Leave room for the outer window decorations and the largest resize case.
+# Otherwise the host pointer cannot reach the private desktop's bottom buttons.
+DISPLAY=:99 nxagent :100 -geometry 1600x1000 -nolisten tcp &
 nx_pid=$!
 for attempt in {1..100}; do
   DISPLAY=:100 xdpyinfo >/dev/null 2>&1 && break
