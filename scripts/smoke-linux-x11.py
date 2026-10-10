@@ -60,7 +60,14 @@ def find_picker_window(environment, pid=None):
     # GTK supplies the default title, which varies by action/version/locale.
     selector = ["--pid", str(pid)] if pid is not None else ["--class", "[Zz]enity"]
     result = command(["xdotool", "search", "--onlyvisible"] + selector, environment, False)
-    return result.stdout.splitlines()[0] if result.returncode == 0 and result.stdout else None
+    if result.returncode == 0:
+        for window in result.stdout.splitlines():
+            # GTK also maps tiny helper windows belonging to this process.
+            kind = command(["xprop", "-id", window, "_NET_WM_WINDOW_TYPE"], environment, False).stdout
+            size = geometry(environment, window)
+            if ("_NET_WM_WINDOW_TYPE_NORMAL" in kind or "_NET_WM_WINDOW_TYPE_DIALOG" in kind) and int(size.get("WIDTH", 0)) > 100 and int(size.get("HEIGHT", 0)) > 100:
+                return window
+    return None
 
 
 def geometry(environment, window):
@@ -238,10 +245,18 @@ def main():
 
                     # Exercise both bundled picker modes without a desktop
                     # portal; a successful selection also tests keyboard focus.
+                    picker_failures = []
                     for directory in [False, True]:
                         arguments = [str(appdir / "usr/bin/zenity"), "--file-selection"]
+                        choice = left
                         if directory:
-                            arguments.append("--directory")
+                            parent = root / "picker folders"
+                            choice = parent / "chosen folder"
+                            choice.mkdir(parents=True)
+                            # Start in a fixture directory with exactly one folder.
+                            # GTK's folder action requires selecting a list row;
+                            # its Recent location entry is not a file-open action.
+                            arguments.extend(["--directory", "--filename", str(parent) + "/"])
                         picker = subprocess.Popen(arguments, env=nested, stdout=subprocess.PIPE,
                                                   stderr=subprocess.PIPE, universal_newlines=True)
                         try:
@@ -254,17 +269,37 @@ def main():
 
                             dialog = eventually(picker_window, "bundled native picker did not open", launcher)
                             command(["xdotool", "windowactivate", "--sync", dialog], nested)
-                            command(["xdotool", "key", "ctrl+l"], host)
-                            choice = root if directory else left
-                            command(["xdotool", "type", "--clearmodifiers", str(choice)], host)
-                            command(["xdotool", "key", "Return"], host)
-                            time.sleep(0.2)
-                            if find_picker_window(nested, picker.pid):
+                            if directory:
+                                # Wait for the mapped chooser to finish painting,
+                                # then select its only folder and click OK through
+                                # the outer legacy display, as a user would.
+                                previous_dialog = [None]
+
+                                def painted_dialog():
+                                    command(["xwd", "-silent", "-id", dialog, "-out", str(before)], nested)
+                                    frame = before.read_bytes()
+                                    stable = previous_dialog[0] == frame
+                                    previous_dialog[0] = frame
+                                    return stable
+
+                                eventually(painted_dialog, "folder picker did not finish painting", launcher)
+                                bounds = geometry(nested, dialog)
+                                x, y = int(bounds["X"]), int(bounds["Y"])
+                                width, height = int(bounds["WIDTH"]), int(bounds["HEIGHT"])
+                                command(["xdotool", "mousemove", "--window", outer,
+                                         str(x + width // 2), str(y + 84), "click", "1"], host)
+                                command(["xdotool", "mousemove", "--window", outer,
+                                         str(x + width - 50), str(y + height - 23), "click", "1"], host)
+                            else:
+                                command(["xdotool", "key", "ctrl+l"], host)
+                                command(["xdotool", "type", "--clearmodifiers", str(choice)], host)
                                 command(["xdotool", "key", "Return"], host)
                             stdout, stderr = picker.communicate(timeout=10)
                             if picker.returncode != 0 or stdout.strip() != str(choice):
-                                raise RuntimeError("native picker did not return selected path: " + stderr)
-                        except Exception:
+                                raise RuntimeError("native picker returned {!r}, expected {!r}: {}".format(
+                                    stdout.strip(), str(choice), stderr))
+                            print("NX {} picker selection passed".format("folder" if directory else "file"), flush=True)
+                        except Exception as picker_error:
                             try:
                                 save_failure_image(nested, image.parent / "linux-smoke-failure.png")
                             except Exception as capture_error:
@@ -274,7 +309,7 @@ def main():
                             stop(picker)
                             stdout, stderr = picker.communicate()
                             print("Picker output: {}{}".format(stdout, stderr), file=sys.stderr)
-                            raise
+                            picker_failures.append(str(picker_error))
                         finally:
                             stop(picker)
 
@@ -305,6 +340,8 @@ def main():
                         raise RuntimeError("normal outer-window close returned a difftool error")
                     if authority.parent.exists():
                         raise RuntimeError("launcher left private state after outer-window close")
+                    if picker_failures:
+                        raise RuntimeError("Picker selection failed: " + "; ".join(picker_failures))
                     print("NX compatibility passed: authenticated GUI, resize, Ctrl+wheel, file/folder pickers, cleanup.")
                 except Exception:
                     if "nested" in locals() and not (image.parent / "linux-smoke-failure.png").exists():
