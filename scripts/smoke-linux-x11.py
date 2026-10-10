@@ -313,14 +313,18 @@ def main():
                                 x, y = int(bounds["X"]), int(bounds["Y"])
                                 width, height = int(bounds["WIDTH"]), int(bounds["HEIGHT"])
                                 click_through_host(x + width // 2, y + 84)
+                                click_through_host(x + width - 50, y + height - 23)
                             else:
                                 command(["xdotool", "key", "ctrl+l"], host)
                                 command(["xdotool", "type", "--clearmodifiers", str(choice)], host)
-                            bounds = geometry(nested, dialog)
-                            print("Confirming {} picker at {}".format(
-                                "folder" if directory else "file", bounds), flush=True)
-                            click_through_host(int(bounds["X"]) + int(bounds["WIDTH"]) - 50,
-                                               int(bounds["Y"]) + int(bounds["HEIGHT"]) - 23)
+                                # GTK's Recent location entry must be submitted
+                                # before its default action can accept the file.
+                                # The first Return may complete/navigate the path;
+                                # a remaining chooser then needs confirmation.
+                                command(["xdotool", "key", "Return"], host)
+                                time.sleep(0.2)
+                                if find_picker_window(nested, picker.pid):
+                                    command(["xdotool", "key", "Return"], host)
                             stdout, stderr = picker.communicate(timeout=10)
                             if picker.returncode != 0 or stdout.strip() != str(choice):
                                 raise RuntimeError("native picker returned {!r}, expected {!r}: {}".format(
