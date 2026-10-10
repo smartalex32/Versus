@@ -71,8 +71,13 @@ def find_picker_window(environment, pid=None):
 
 
 def geometry(environment, window):
-    output = command(["xdotool", "getwindowgeometry", "--shell", window], environment).stdout
-    return dict(line.split("=", 1) for line in output.splitlines() if "=" in line)
+    # Rocky 8's xdotool adds the client offset twice for reparented windows
+    # (fixed in later upstream versions). xwininfo reports true root positions.
+    output = command(["xwininfo", "-id", window], environment).stdout
+    fields = {"X": "Absolute upper-left X", "Y": "Absolute upper-left Y",
+              "WIDTH": "Width", "HEIGHT": "Height"}
+    return {key: re.search(r"{}:\s*(-?\d+)".format(label), output).group(1)
+            for key, label in fields.items()}
 
 
 def save_failure_image(environment, destination):
@@ -245,6 +250,20 @@ def main():
 
                     # Exercise both bundled picker modes without a desktop
                     # portal; a successful selection also tests keyboard focus.
+                    def click_through_host(x, y):
+                        command(["xdotool", "mousemove", "--window", outer, str(x), str(y)], host)
+
+                        def pointer_arrived():
+                            position = command(["xdotool", "getmouselocation", "--shell"], nested).stdout
+                            values = dict(line.split("=", 1) for line in position.splitlines() if "=" in line)
+                            return values.get("X") == str(x) and values.get("Y") == str(y)
+
+                        # XWarpPointer completes on nxagent before Xephyr has
+                        # necessarily delivered its MotionNotify to GTK. Verify
+                        # the private pointer before sending the button event.
+                        eventually(pointer_arrived, "host pointer did not reach the picker", launcher)
+                        command(["xdotool", "click", "1"], host)
+
                     picker_failures = []
                     for directory in [False, True]:
                         arguments = [str(appdir / "usr/bin/zenity"), "--file-selection"]
@@ -286,14 +305,15 @@ def main():
                                 bounds = geometry(nested, dialog)
                                 x, y = int(bounds["X"]), int(bounds["Y"])
                                 width, height = int(bounds["WIDTH"]), int(bounds["HEIGHT"])
-                                command(["xdotool", "mousemove", "--window", outer,
-                                         str(x + width // 2), str(y + 84), "click", "1"], host)
-                                command(["xdotool", "mousemove", "--window", outer,
-                                         str(x + width - 50), str(y + height - 23), "click", "1"], host)
+                                click_through_host(x + width // 2, y + 84)
                             else:
                                 command(["xdotool", "key", "ctrl+l"], host)
                                 command(["xdotool", "type", "--clearmodifiers", str(choice)], host)
-                                command(["xdotool", "key", "Return"], host)
+                            bounds = geometry(nested, dialog)
+                            print("Confirming {} picker at {}".format(
+                                "folder" if directory else "file", bounds), flush=True)
+                            click_through_host(int(bounds["X"]) + int(bounds["WIDTH"]) - 50,
+                                               int(bounds["Y"]) + int(bounds["HEIGHT"]) - 23)
                             stdout, stderr = picker.communicate(timeout=10)
                             if picker.returncode != 0 or stdout.strip() != str(choice):
                                 raise RuntimeError("native picker returned {!r}, expected {!r}: {}".format(
