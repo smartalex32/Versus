@@ -281,12 +281,65 @@ Tagged releases build these artifacts in GitHub Actions:
 
 The release workflow builds these artifacts; this repository does not claim that a
 particular artifact has been executed on every supported operating system. Linux
-still requires a compatible kernel, display stack, and graphics driver supplied by
-the host.
+x86-64 packages are built on Rocky Linux 8.10, targeting glibc 2.28 or newer.
+Packaging rejects newer glibc requirements in the executable, bundled libraries,
+and AppImage runtime. CI also checks the packaged command-line entry point and
+window initialization in that environment. Ordinary launches use the host display
+and graphics driver. The AppImage also includes a software-rendered compatibility
+mode for older X11 servers, including standard X2Go/nxagent sessions.
+
+Download `linux-pr-artifacts` from a successful GitHub Actions CI run to get the
+latest branch build without installing compilers or build dependencies locally.
+Copy `Versus.AppImage` to your Linux machine and run:
+
+```bash
+chmod +x Versus.AppImage
+./Versus.AppImage --appimage-extract-and-run
+```
+
+Extract-and-run does not require FUSE or administrator access. It does not change
+the minimum glibc requirement. The tar.gz convenience archive contains the plain
+executable, which requires its native libraries to be installed on the host;
+use the AppImage when you cannot install dependencies.
+
+### Older X11 servers and X2Go
+
+If startup fails while querying XInput2, run this **inside your existing X11
+desktop session**, such as the Rocky desktop opened through X2Go:
+
+```bash
+./Versus.AppImage --appimage-extract-and-run --compat-x11
+```
+
+The AppImage bundles a private Xephyr display, Openbox window management, Mesa
+software rendering, keyboard data/compiler, and a native picker fallback. Nothing
+is installed on the host, no administrator access is needed, and no X11 forwarding
+or alternative remote desktop is required. The outer window resizes the comparison;
+closing it finishes normally for Git/IDE callers and shuts down the private
+display and its helpers. Each instance has
+its own authenticated local display, with TCP listening disabled.
+
+Use the same option with Git or IDE launches, for example:
+
+```bash
+./Versus.AppImage --appimage-extract-and-run --compat-x11 --diff left.txt right.txt
+```
+
+Compatibility mode needs an existing `DISPLAY` and writable temporary storage.
+It uses more memory and can be slower than an ordinary launch. Clipboard and
+drag-and-drop between the host desktop and the private display are not bridged;
+use Browse or command-line paths to select inputs. This option belongs to the
+AppImage launcher; the plain executable in the tarball uses the host graphics stack.
+CI exercises the package through nxagent on Rocky 8, including window resizing,
+Ctrl+wheel input, file/folder picker selection, authentication, and cleanup. A
+specific organization's X2Go session configuration still needs local confirmation.
 
 Versus is licensed under [MIT](LICENSE). Each release includes
 `DEPENDENCY-LICENSES.md`, generated from Cargo metadata; review third-party
-licenses before redistributing.
+licenses before redistributing. The AppImage also carries license files for its
+additional Linux runtime packages under `usr/share/licenses/versus`. The separate
+`linux-runtime-sources` artifact contains their matching source RPMs and the Xephyr
+rebuild recipe; it is not needed to run the application.
 
 ## Build from source
 
@@ -318,7 +371,20 @@ Reapply it and update its checksums after refreshing dependencies.
 
 On Linux, install the host development libraries required by the native windowing
 backend, then use the same Cargo command. The release workflow lists the Ubuntu
-packages it uses as a reproducible reference.
+runner that hosts the build, but compilation and packaging run inside Rocky Linux
+8.10 so they do not inherit Ubuntu's newer glibc. On a development machine with
+Docker available, reproduce the portable Linux build from the repository root:
+
+```bash
+docker run --rm --platform linux/amd64 \
+  --volume "$PWD:/workspace" --workdir /workspace \
+  rockylinux/rockylinux:8.10 bash scripts/build-linux-rocky8.sh
+```
+
+The script installs build prerequisites and Rust inside the disposable container,
+runs checks, and writes the portable packages to `dist/`. Container setup and the
+packaging-tool download require internet access; Cargo still uses offline vendored
+dependencies. The Linux end-user machine needs no build tools.
 
 ## Development checks
 

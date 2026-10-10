@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<openbox_config xmlns="http://openbox.org/3.6/rc">
+  <theme>
+    <name>Onyx-Citrus</name>
+    <titleLayout>NLIMC</titleLayout>
+    <keepBorder>no</keepBorder>
+    <animateIconify>no</animateIconify>
+  </theme>
+  <desktops>
+    <number>1</number>
+    <firstdesk>1</firstdesk>
+    <showdesktoppopup>no</showdesktoppopup>
+  </desktops>
+  <focus>
+    <focusNew>yes</focusNew>
+    <focusLast>no</focusLast>
+    <underMouse>no</underMouse>
+    <focusDelay>0</focusDelay>
+    <raiseOnFocus>no</raiseOnFocus>
+  </focus>
+  <placement>
+    <policy>Smart</policy>
+    <center>yes</center>
+  </placement>
+  <resistance>
+    <strength>0</strength>
+    <screen_edge_strength>0</screen_edge_strength>
+  </resistance>
+  <applications>
+    <!-- eframe maps the window after first paint. Apply maximize at manage
+         time so its earlier request on the hidden window cannot be lost. -->
+    <application class="Versus" type="normal">
+      <maximized>yes</maximized>
+    </application>
+  </applications>
+</openbox_config>

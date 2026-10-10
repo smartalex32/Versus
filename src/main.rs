@@ -37,12 +37,25 @@ fn main() -> std::process::ExitCode {
 }
 
 fn run(launch: Option<cli::LaunchRequest>) -> eframe::Result {
+    let viewport = eframe::egui::ViewportBuilder::default()
+        .with_title("Versus — Compare")
+        .with_icon(logo::themed_icon(true))
+        .with_inner_size([1200.0, 800.0])
+        .with_min_inner_size([900.0, 650.0]);
+    #[cfg(target_os = "linux")]
+    let viewport =
+        if std::env::var_os("VERSUS_X11_COMPAT").as_deref() == Some(std::ffi::OsStr::new("1")) {
+            // The private display has its own window manager. Let it resize this
+            // window with the outer Xephyr window, without a second title bar.
+            viewport
+                .with_maximized(true)
+                .with_decorations(false)
+                .with_min_inner_size([1.0, 1.0])
+        } else {
+            viewport
+        };
     let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_title("Versus — Compare")
-            .with_icon(logo::themed_icon(true))
-            .with_inner_size([1200.0, 800.0])
-            .with_min_inner_size([900.0, 650.0]),
+        viewport,
         event_loop_builder: drop_capable_event_loop(),
         // Retain app zoom without introducing window-position persistence.
         persist_window: false,

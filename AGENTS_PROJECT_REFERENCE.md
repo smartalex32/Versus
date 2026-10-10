@@ -84,6 +84,33 @@ APIs and must fail cleanly when unavailable.
   `scripts/package-source-offline.sh` packages the offline source release.
 - `.github/workflows/ci.yml` checks Windows and Linux builds; `release.yml` builds
   tagged portable artifacts and the offline source archive.
+- Linux compilation, tests and packaging run in `rockylinux/rockylinux:8.10`
+  through `scripts/build-linux-rocky8.sh`, targeting x86-64/glibc 2.28.
+  `scripts/check-linux-compatibility.py` rejects newer/private glibc requirements
+  in the binary and packaged ELF libraries/runtime. Both workflows exercise the
+  packaged CLI and GUI startup on Rocky 8 with Xvfb/software rendering. Keep the
+  dynamically loaded xkbcommon keyboard libraries explicitly bundled; ordinary
+  ELF dependency discovery does not find them. Keep the build and its bundled
+  dependencies on this baseline; AppImage extraction alone
+  cannot make newer glibc requirements compatible with older hosts.
+  The AppImage's `--compat-x11` launcher supplies an authenticated private Xephyr
+  display, Openbox, Mesa software rendering and Zenity fallback for legacy X11
+  servers (including X2Go/nxagent). `build-xephyr-portable.sh` rebuilds the installed
+  Rocky server version with a PATH-resolved keyboard compiler and current monitor geometry and standard WM-close
+  handling, retaining its source patches; `package-linux.sh` bundles helpers, XKB data, Mesa drivers, schemas,
+  configuration and licenses. The separate `linux-runtime-sources` artifact retains
+  matching source RPMs and the modified Xephyr rebuild recipe. `smoke-linux-x11.py` exercises the finished package
+  through real nxagent, with host xkbcomp hidden, resizing, input, native pickers,
+  authentication and cleanup. Compatibility mode only maximizes/undecorates the
+  main viewport, with an Openbox rule applied when eframe maps its initially hidden
+  window; ordinary native launches are unchanged. Host clipboard/file drops
+  are not bridged across the private display. Keep launcher lifecycle and argument
+  tests in `scripts/test_linux_launcher.py` independent of a live display.
+  `linux-runtime-libraries.py` explicitly bundles the helpers' complete non-glibc
+  dependency closure; default linuxdeploy graphics exclusions are insufficient.
+  Ordinary Versus only receives `usr/lib/native` keyboard libraries. The private
+  display and `launch-linux-picker.sh` receive the full runtime in `usr/lib`,
+  keeping it out of ordinary host graphics selection.
 
 ## Architectural constraints
 
