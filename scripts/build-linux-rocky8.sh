@@ -30,11 +30,12 @@ bash scripts/package-linux.sh
 APPIMAGE_EXTRACT_AND_RUN=1 dist/Versus.AppImage --version
 
 # Verify both ordinary X11 and the older NX display used by X2Go.
-Xvfb :99 -screen 0 1600x1000x24 -nolisten tcp &
+Xvfb :99 -screen 0 1920x1200x24 -nolisten tcp &
 display_pid=$!
 app_pid=''
 nx_pid=''
 host_wm_pid=''
+base_wm_pid=''
 cleanup() {
   if test -n "$app_pid"; then
     kill "$app_pid" 2>/dev/null || true
@@ -47,6 +48,10 @@ cleanup() {
   if test -n "$nx_pid"; then
     kill "$nx_pid" 2>/dev/null || true
     wait "$nx_pid" 2>/dev/null || true
+  fi
+  if test -n "$base_wm_pid"; then
+    kill "$base_wm_pid" 2>/dev/null || true
+    wait "$base_wm_pid" 2>/dev/null || true
   fi
   kill "$display_pid" 2>/dev/null || true
   wait "$display_pid" 2>/dev/null || true
@@ -107,6 +112,20 @@ kill "$app_pid"
 wait "$app_pid" || true
 app_pid=''
 
+# nxagent switches to fullscreen and later restores a smaller saved size when
+# its parent display has no window manager. Give the test a normal parent desktop
+# so its requested geometry is stable and pointer targets remain on-screen.
+DISPLAY=:99 openbox --sm-disable --config-file /etc/xdg/openbox/rc.xml &
+base_wm_pid=$!
+for attempt in {1..100}; do
+  if DISPLAY=:99 xprop -root _NET_SUPPORTING_WM_CHECK | grep -q 'window id # 0x'; then
+    break
+  fi
+  kill -0 "$base_wm_pid"
+  sleep 0.1
+done
+DISPLAY=:99 xprop -root _NET_SUPPORTING_WM_CHECK | grep -q 'window id # 0x'
+
 # These displays exist only inside the disposable build container. nxagent is
 # the legacy server behind standard X2Go, rather than a modern Xvfb substitute.
 # nxagent writes its compiled host keymap here on Rocky 8. The minimal
@@ -114,7 +133,7 @@ app_pid=''
 mkdir -p /usr/share/X11/xkb/compiled
 # Leave room for the outer window decorations and the largest resize case.
 # Otherwise the host pointer cannot reach the private desktop's bottom buttons.
-DISPLAY=:99 nxagent :100 -geometry 1600x1000 -nolisten tcp &
+DISPLAY=:99 nxagent :100 -geometry 1600x1000+0+0 -nolisten tcp &
 nx_pid=$!
 for attempt in {1..100}; do
   DISPLAY=:100 xdpyinfo >/dev/null 2>&1 && break
@@ -122,6 +141,7 @@ for attempt in {1..100}; do
   sleep 0.1
 done
 DISPLAY=:100 xdpyinfo -ext XInputExtension
+DISPLAY=:100 xdpyinfo | grep -E 'dimensions:[[:space:]]+1600x1000[[:space:]]' >/dev/null
 # An ordinary host window manager gives the outer display the same close
 # protocol a user gets from the title-bar button in a remote desktop.
 DISPLAY=:100 openbox --sm-disable --config-file /etc/xdg/openbox/rc.xml &
