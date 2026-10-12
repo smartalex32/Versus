@@ -25,6 +25,16 @@ APIs and must fail cleanly when unavailable.
   sources and pending work; New comparison keeps the selected mode and theme.
 - `src/core/tree.rs` builds aligned folder trees with per-side types, ancestor
   status aggregation, and shared expansion state.
+- Refresh reloads the active file view, including folder drilldown, and keeps its
+  viewport. Folder refresh retains selection, expansion and scroll state for the
+  same roots; removed selected entries are cleared. Workers recheck missing sides
+  of folder files without following symlinks.
+- `src/recent.rs` stores up to 20 recent file/folder source pairs in a bounded,
+  versioned per-user local file, preserving native path bytes. The startup/New
+  comparison screen offers one-click reopening through background classification.
+  History IO runs on a serialized worker and queued writes finish on close; paths
+  are recorded once both sources are classified, even if the comparison is still
+  loading. File contents are never persisted. No new dependencies are required.
 - `src/core/file_view.rs` loads bounded text inputs and aligns numbered line rows.
   Identical entries are neutral gray; both views share difference status icons.
 - `tests/` covers externally observable comparison and filesystem behavior.

@@ -15,6 +15,12 @@ area or browse icon in either pane opens that mode's native folder or file picke
 directly. Selecting the second source starts comparison automatically. File
 Compare opens the line comparison without a Back button.
 
+The **Recently compared** list appears when Versus opens and after **New
+comparison**. Click a file or folder pair to recompare it without browsing again.
+The 20 most recent pairs are saved locally per user, newest first; reopening a
+pair moves it to the top. Paths and comparison type are saved, never file contents.
+Unavailable or changed sources show an error and can be selected again.
+
 Changing modes starts a fresh comparison and cancels pending work. Clicking the
 active mode preserves the current comparison; clicking Folder Compare while
 viewing a file from its tree returns to that tree. The **+** button at the right
@@ -24,7 +30,10 @@ results, and pending work while keeping the selected mode and theme.
 Both pane headers remain available for browsing in directly selected file views.
 Folder paths wrap to show the full path; file paths use a leading ellipsis with
 the full path on hover. LEFT/RIGHT and browse stay centered beside the path.
-The refresh icon at the upper right compares the same folders again. Local paths,
+The refresh icon at the upper right reloads the file comparison you are viewing,
+including files opened from a folder tree. In the folder view it compares the same
+folders again while preserving selection, expansion, and scroll position; a
+selection is cleared only if the entry no longer exists. Local paths,
 mapped drives, UNC shares, and mounted Linux paths all use the same filesystem
 APIs; paths can be entered through the native dialog.
 

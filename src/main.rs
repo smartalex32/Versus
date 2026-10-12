@@ -2,6 +2,7 @@
 
 mod app;
 mod logo;
+mod recent;
 mod selection;
 
 fn main() -> eframe::Result {
