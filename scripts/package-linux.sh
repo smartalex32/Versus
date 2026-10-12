@@ -3,7 +3,8 @@ set -euo pipefail
 
 baseline="${1:?Usage: package-linux.sh 2.35|2.28}"
 case "$baseline" in
-  2.35|2.28) ;;
+  2.28) exec bash scripts/package-linux-compat.sh "$baseline" ;;
+  2.35) ;;
   *) echo "Unsupported glibc baseline: $baseline" >&2; exit 1 ;;
 esac
 binary="${CARGO_TARGET_DIR:-target}/release/versus"

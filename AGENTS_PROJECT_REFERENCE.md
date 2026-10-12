@@ -100,12 +100,19 @@ APIs and must fail cleanly when unavailable.
   22.04) and glibc 2.28 (Rocky 8.10) through `scripts/build-linux.sh`. Artifact and
   release filenames include the baseline so outputs cannot collide.
   `scripts/package-linux.sh` takes the baseline explicitly, bundles dynamically
-  loaded keyboard libraries, and checks the finished AppImage/runtime and bundled
+  loaded window libraries, and checks the finished AppImage/runtime and bundled
   ELF files with `scripts/check-linux-compatibility.py`. Each baseline runs Rust
   tests, release compilation, packaged CLI checks and an Xvfb GUI startup test.
-  These are native builds using the host display/graphics stack; no nested X11
-  compatibility launcher is included. glibc compatibility does not supply XInput2
-  to older X2Go servers. Keep both baseline checks when changing Linux packaging.
+  The 2.28 AppImage adds automatic compatibility mode for X11 servers without
+  XInput2, using a small capability probe and a private authenticated Xephyr
+  display with software rendering. Modern displays retain the native path;
+  private graphics libraries must stay isolated from ordinary launches.
+  `--compat-x11` explicitly selects the fallback. The plain executable and 2.35
+  AppImage use host graphics. Rocky CI tests automatic selection through nxagent,
+  resizing, input, browsing, authentication and cleanup with host runtime files
+  hidden. Preserve these tests, runtime license/source inventory, and both glibc
+  checks when changing Linux packaging. Clipboard and file drops across the
+  private-display boundary are not bridged.
 
 ## Architectural constraints
 

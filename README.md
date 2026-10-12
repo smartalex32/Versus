@@ -287,7 +287,7 @@ and tagged releases:
 | GitHub artifact | Build environment / glibc baseline | AppImage |
 | --- | --- | --- |
 | `linux-glibc-2.35-x86_64` | Ubuntu 22.04 / glibc 2.35 | `Versus-linux-x86_64-glibc-2.35.AppImage` |
-| `linux-glibc-2.28-x86_64` | Rocky Linux 8.10 / glibc 2.28 | `Versus-linux-x86_64-glibc-2.28.AppImage` |
+| `linux-glibc-2.28-x86_64` | Rocky Linux 8.10 / glibc 2.28, automatic legacy X11 fallback | `Versus-linux-x86_64-glibc-2.28.AppImage` |
 
 Each artifact also includes a correspondingly named `.tar.gz` containing the plain
 executable, README and license. The AppImage bundles runtime libraries; the plain
@@ -303,17 +303,33 @@ chmod +x Versus-linux-x86_64-glibc-2.28.AppImage
 ```
 
 For the normal 2.35 build, substitute `2.35` in the filename. Extract-and-run needs
-no FUSE installation or administrator access. Both builds run the same native app
-from this repository. They use the host display and graphics stack; they do not
-include the earlier nested-display/X2Go workaround or a `--compat-x11` option.
-An X2Go server lacking XInput2 can still produce a separate display error even
-when the glibc version is compatible.
+no FUSE installation or administrator access. Both builds run the same app.
+The 2.35 AppImage and plain executables use the host display and graphics stack.
+
+The **2.28 AppImage automatically detects X11 displays without XInput2**, including
+traditional X2Go/nxagent sessions. On those displays it starts a bundled private
+display and software renderer within the existing desktop. Launch it with the
+same command above; no additional installation, remote service, or launch option
+is needed. Normal X11 and Wayland-only sessions retain the native launch path. The
+AppImage also accepts `--compat-x11` to explicitly select the fallback, including
+when used as a Git/IDE diff tool. `--help` and `--version` do not open a display.
+
+Compatibility mode retains comparisons, navigation, highlighting, filtering,
+browsing and zoom. It increases package size and may use more CPU for rendering.
+Clipboard contents and file drops from the surrounding desktop are not bridged
+into the private display; use Browse or command-line paths. Automatic selection
+checks XInput2 support, not every possible graphics-driver incompatibility.
+The 2.28 artifact also includes `linux-runtime-sources-glibc-2.28.tar.gz` with
+matching runtime sources and the helper rebuild recipe; it is not needed to run.
 
 Both build jobs run formatting, unit/integration tests and a release build in their
 baseline container. Packaging checks the glibc requirements of the final AppImage
 runtime and all bundled ELF files, then tests the packaged CLI and GUI startup
-with Xvfb/software rendering in that same environment. This verifies the baseline
-builds, not every user's display configuration, kernel or graphics driver.
+with Xvfb/software rendering in that same environment. The Rocky job additionally
+tests automatic fallback through real nxagent, with host graphics/picker resources
+hidden to check that the bundle supplies them. It exercises resizing, Ctrl+wheel,
+file/folder pickers, private-display authentication and normal window closing.
+This verifies those configurations, not every user's display, kernel or driver.
 
 Tagged releases additionally publish:
 

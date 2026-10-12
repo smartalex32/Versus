@@ -1,0 +1,186 @@
+--- a/hw/kdrive/ephyr/hostx.c
++++ b/hw/kdrive/ephyr/hostx.c
+@@ -32,6 +32,7 @@
+ 
+ #include <stdlib.h>
+ #include <stdio.h>
++#include <fcntl.h>
+ #include <unistd.h>
+ #include <string.h>             /* for memset */
+ #include <errno.h>
+@@ -40,6 +41,7 @@
+ 
+ #include <sys/ipc.h>
+ #include <sys/shm.h>
++#include <sys/stat.h>
+ #include <sys/time.h>
+ #include <sys/mman.h>
+ 
+@@ -72,6 +74,8 @@
+     xcb_render_pictformat_t argb_format;
+     xcb_cursor_t empty_cursor;
+     xcb_generic_event_t *saved_event;
++    xcb_atom_t wm_protocols;
++    xcb_atom_t wm_delete_window;
+     int depth;
+     Bool use_sw_cursor;
+     Bool use_fullscreen;
+@@ -89,6 +93,34 @@
+ /*static EphyrHostXVars HostX = { "?", 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};*/
+ static EphyrHostXVars HostX;
+ 
++static Bool
++hostx_init_wm_delete_atoms(void)
++{
++    xcb_intern_atom_cookie_t protocols_cookie;
++    xcb_intern_atom_cookie_t delete_cookie;
++    xcb_intern_atom_reply_t *protocols_reply;
++    xcb_intern_atom_reply_t *delete_reply;
++
++    protocols_cookie = xcb_intern_atom(HostX.conn, FALSE,
++                                       strlen("WM_PROTOCOLS"), "WM_PROTOCOLS");
++    delete_cookie = xcb_intern_atom(HostX.conn, FALSE,
++                                    strlen("WM_DELETE_WINDOW"),
++                                    "WM_DELETE_WINDOW");
++    protocols_reply = xcb_intern_atom_reply(HostX.conn, protocols_cookie, NULL);
++    delete_reply = xcb_intern_atom_reply(HostX.conn, delete_cookie, NULL);
++    if (!protocols_reply || !delete_reply) {
++        free(protocols_reply);
++        free(delete_reply);
++        return FALSE;
++    }
++
++    HostX.wm_protocols = protocols_reply->atom;
++    HostX.wm_delete_window = delete_reply->atom;
++    free(protocols_reply);
++    free(delete_reply);
++    return TRUE;
++}
++
+ static int HostXWantDamageDebug = 0;
+ 
+ extern Bool EphyrWantResize;
+@@ -228,9 +260,47 @@
+     }
+     else {
+         return 0;
++    }
++}
++
++Bool
++hostx_is_wm_delete_event(const xcb_client_message_event_t *event)
++{
++    int index;
++
++    if (!event || event->format != 32 ||
++        event->type != HostX.wm_protocols ||
++        event->data.data32[0] != HostX.wm_delete_window)
++        return FALSE;
++
++    for (index = 0; index < HostX.n_screens; index++) {
++        EphyrScrPriv *scrpriv = HostX.screens[index]->driver;
++
++        if (scrpriv && scrpriv->win_pre_existing == XCB_WINDOW_NONE &&
++            event->window == scrpriv->win)
++            return TRUE;
+     }
++
++    return FALSE;
+ }
+ 
++Bool
++hostx_write_close_marker(void)
++{
++    const char *path = getenv("VERSUS_X11_CLOSE_MARKER");
++    int fd;
++
++    if (!path || !*path)
++        return TRUE;
++
++    fd = open(path, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC | O_NOFOLLOW,
++              S_IRUSR | S_IWUSR);
++    if (fd < 0)
++        return FALSE;
++
++    return close(fd) == 0;
++}
++
+ void
+ hostx_get_output_geometry(const char *output,
+                           int *x, int *y,
+@@ -549,6 +619,11 @@
+         HostX.conn = xcb_connect(NULL, &HostX.screen);
+     if (!HostX.conn || xcb_connection_has_error(HostX.conn)) {
+         fprintf(stderr, "\nXephyr cannot open host display. Is DISPLAY set?\n");
++        exit(1);
++    }
++
++    if (!hostx_init_wm_delete_atoms()) {
++        fprintf(stderr, "\nXephyr cannot initialize window-manager atoms.\n");
+         exit(1);
+     }
+ 
+@@ -638,6 +713,15 @@
+                               attr_mask,
+                               attrs);
+ 
++            xcb_change_property(HostX.conn,
++                                XCB_PROP_MODE_REPLACE,
++                                scrpriv->win,
++                                HostX.wm_protocols,
++                                XCB_ATOM_ATOM,
++                                32,
++                                1,
++                                &HostX.wm_delete_window);
++
+             hostx_set_win_title(screen,
+                                 "(ctrl+shift grabs mouse and keyboard)");
+ 
+--- a/hw/kdrive/ephyr/hostx.h
++++ b/hw/kdrive/ephyr/hostx.h
+@@ -95,6 +95,12 @@
+ int
+ hostx_want_preexisting_window(KdScreenInfo *screen);
+ 
++Bool
++hostx_is_wm_delete_event(const xcb_client_message_event_t *event);
++
++Bool
++hostx_write_close_marker(void);
++
+ void
+  hostx_use_preexisting_window(unsigned long win_id);
+ 
+--- a/hw/kdrive/ephyr/ephyr.c
++++ b/hw/kdrive/ephyr/ephyr.c
+@@ -635,6 +635,11 @@
+         if (!output)
+             return FALSE;
+         RROutputSetModes(output, NULL, 0, 0);
++        /* Root geometry alone does not update the legacy driver's CRTC mode.
++         * Refresh it before clients query Xinerama/work-area geometry so
++         * maximized windows follow host ConfigureNotify resizing. */
++        if (!RRGetInfo(pScreen, TRUE))
++            return FALSE;
+     }
+ 
+     return ret;
+@@ -1169,6 +1169,18 @@
+             free(configure);
+             configure = xev;
+             xev = NULL;
++            break;
++
++        case XCB_CLIENT_MESSAGE:
++            if (hostx_is_wm_delete_event((xcb_client_message_event_t *) xev)) {
++                if (!hostx_write_close_marker())
++                    FatalError("Unable to create VERSUS_X11_CLOSE_MARKER\n");
++                free(xev);
++                free(expose);
++                free(configure);
++                GiveUp(0);
++                return;
++            }
+             break;
+         }
+ 

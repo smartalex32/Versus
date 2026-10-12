@@ -42,3 +42,4 @@ jobs:
           path: |
             dist/Versus-linux-x86_64-glibc-${{ matrix.glibc }}.AppImage
             dist/versus-linux-x86_64-glibc-${{ matrix.glibc }}.tar.gz
+            dist/linux-runtime-sources-glibc-${{ matrix.glibc }}.tar.gz

@@ -15,14 +15,17 @@ case "$baseline" in
       libxkbcommon-x11-0 libwayland-dev xvfb x11-utils libgl1-mesa-dri
     ;;
   2.28)
-    dnf install --assumeyes dnf-plugins-core epel-release
+    dnf install --assumeyes dnf-plugins-core epel-release rpm-build
     dnf config-manager --set-enabled powertools
     dnf install --assumeyes gcc gcc-c++ make pkgconf-pkg-config curl \
       ca-certificates binutils file patchelf python3 tar gzip findutils \
       fontconfig-devel mesa-libGL-devel gtk3-devel libX11-devel \
       libXrandr-devel libXi-devel libXcursor-devel libxkbcommon-devel \
       libxkbcommon-x11 wayland-devel xorg-x11-server-Xvfb xorg-x11-utils \
-      mesa-dri-drivers
+      mesa-dri-drivers xorg-x11-server-Xephyr xorg-x11-xauth \
+      xorg-x11-xkb-utils xkeyboard-config mesa-libEGL openbox zenity nxagent \
+      xdotool xorg-x11-apps
+    bash scripts/build-xephyr-portable.sh
     ;;
   *) echo "Unsupported glibc baseline: $baseline" >&2; exit 1 ;;
 esac
@@ -33,6 +36,11 @@ export PATH="${HOME}/.cargo/bin:$PATH"
 rustup component add rustfmt
 # Cargo does not track the host glibc as a build input. Keep baseline caches apart.
 export CARGO_TARGET_DIR="target/linux-glibc-$baseline"
+if test "$baseline" = 2.28; then
+  mkdir -p "$CARGO_TARGET_DIR"
+  gcc -std=c99 -Wall -Wextra -Werror scripts/check-x11-capabilities.c \
+    -o "$CARGO_TARGET_DIR/check-x11-capabilities" $(pkg-config --cflags --libs x11 xi)
+fi
 
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p 'test_linux_*.py'
 cargo fmt --check
@@ -43,6 +51,10 @@ bash scripts/package-linux.sh "$baseline"
 image="$PWD/dist/Versus-linux-x86_64-glibc-$baseline.AppImage"
 APPIMAGE_EXTRACT_AND_RUN=1 "$image" --version
 APPIMAGE_EXTRACT_AND_RUN=1 "$image" --help
+if test "$baseline" = 2.28; then
+  bash scripts/test-linux-x11.sh "$image"
+  exit 0
+fi
 
 # Launch the finished package with the same loader/libraries as its baseline.
 # Software rendering avoids requiring a GPU on the GitHub runner.
