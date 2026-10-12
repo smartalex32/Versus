@@ -112,6 +112,10 @@ native_libraries=(
 private_libraries=(
   "${native_libraries[@]}" "$libdir/libGL.so.1" "$libdir/libEGL.so.1" "$libdir/libGLdispatch.so.0" "$libdir/libGLX.so.0"
   "$libdir/libGLX_mesa.so.0" "$libdir/libEGL_mesa.so.0" "$libdir/libgbm.so.1" "$libdir/libglapi.so.0"
+  # OpenSSL FIPS verification loads both libraries even where ELF metadata does
+  # not name libssl directly. Their RPM-provided HMAC sidecars are copied by the
+  # runtime helper and checked again after AppImage creation.
+  "$libdir/libssl.so.1.1" "$libdir/libcrypto.so.1.1" "$libdir/libgcrypt.so.20"
 )
 for library in "${private_libraries[@]}"; do require_file "$library"; done
 drivers=("$libdir/dri/swrast_dri.so")
@@ -181,6 +185,7 @@ mkdir "$verification_directory"
 (cd "$verification_directory" && "$output" --appimage-extract >/dev/null)
 payload="$verification_directory/squashfs-root"
 python3 scripts/check-linux-compatibility.py --maximum "$baseline" "$output" "$payload"
+python3 scripts/linux-runtime-libraries.py --manifest "$runtime_manifest" --verify-manifest "$payload"
 test "$(patchelf --print-rpath "$payload/usr/bin/versus")" = '$ORIGIN/../lib/native'
 for name in "${native_libraries[@]##*/}"; do test -f "$payload/usr/lib/native/$name"; done
 test -x "$payload/usr/bin/check-x11-capabilities"

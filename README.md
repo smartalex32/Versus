@@ -299,12 +299,19 @@ Download the artifact from a successful CI run, unzip it, and run:
 
 ```bash
 chmod +x Versus-linux-x86_64-glibc-2.28.AppImage
-./Versus-linux-x86_64-glibc-2.28.AppImage --appimage-extract-and-run
+./Versus-linux-x86_64-glibc-2.28.AppImage
 ```
 
-For the normal 2.35 build, substitute `2.35` in the filename. Extract-and-run needs
-no FUSE installation or administrator access. Both builds run the same app.
+For the normal 2.35 build, substitute `2.35` in the filename. If the host cannot
+mount AppImages through FUSE, append `--appimage-extract-and-run`; this optional
+fallback needs no FUSE installation or administrator access. Both builds run the
+same app.
 The 2.35 AppImage and plain executables use the host display and graphics stack.
+
+The 2.28 package preserves Rocky’s original crypto libraries and their vendor
+integrity files so the display helpers can perform FIPS self-tests. It leaves
+host crypto policies unchanged. CI exercises vendor FIPS activation and integrity
+checks; this is not a claim of FIPS certification.
 
 The **2.28 AppImage automatically detects X11 displays without XInput2**, including
 traditional X2Go/nxagent sessions. On those displays it starts a bundled private

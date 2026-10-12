@@ -24,7 +24,7 @@ case "$baseline" in
       libxkbcommon-x11 wayland-devel xorg-x11-server-Xvfb xorg-x11-utils \
       mesa-dri-drivers xorg-x11-server-Xephyr xorg-x11-xauth \
       xorg-x11-xkb-utils xkeyboard-config mesa-libEGL openbox zenity nxagent \
-      xdotool xorg-x11-apps
+      xdotool xorg-x11-apps libgcrypt-devel openssl-devel
     bash scripts/build-xephyr-portable.sh
     ;;
   *) echo "Unsupported glibc baseline: $baseline" >&2; exit 1 ;;
@@ -53,6 +53,7 @@ APPIMAGE_EXTRACT_AND_RUN=1 "$image" --version
 APPIMAGE_EXTRACT_AND_RUN=1 "$image" --help
 if test "$baseline" = 2.28; then
   bash scripts/test-linux-x11.sh "$image"
+  PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-linux-fips.py "$image"
   exit 0
 fi
 
