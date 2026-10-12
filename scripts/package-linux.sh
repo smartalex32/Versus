@@ -20,10 +20,15 @@ install -m 644 LICENSE "$appdir/usr/share/licenses/versus/LICENSE"
 printf '[Desktop Entry]\nType=Application\nName=Versus\nExec=versus\nIcon=versus\nCategories=Development;Utility;\nTerminal=false\n' > "$appdir/usr/share/applications/versus.desktop"
 install -m 644 assets/logo-icon.png "$appdir/usr/share/pixmaps/versus.png"
 
-# winit loads these keyboard libraries dynamically, so ordinary ELF dependency
-# discovery cannot reliably find them. Explicitly bundle them on both baselines.
+# The window backends load these libraries dynamically, so ordinary ELF
+# dependency discovery cannot reliably find them. Graphics drivers stay native.
+runtime_libraries=(
+  libxkbcommon.so.0 libxkbcommon-x11.so.0 libxcb-xkb.so.1 libXau.so.6
+  libX11.so.6 libXcursor.so.1 libX11-xcb.so.1 libXi.so.6 libXrender.so.1
+  libwayland-client.so.0 libwayland-cursor.so.0 libwayland-egl.so.1
+)
 library_arguments=()
-for name in libxkbcommon.so.0 libxkbcommon-x11.so.0 libxcb-xkb.so.1 libXau.so.6; do
+for name in "${runtime_libraries[@]}"; do
   test -f "$libdir/$name"
   library_arguments+=(--library "$libdir/$name")
 done
@@ -39,6 +44,9 @@ test -s "$OUTPUT"
 # Check the final runtime and every packaged ELF, not just the original binary.
 mkdir "$build_directory/check"
 (cd "$build_directory/check" && "$OUTPUT" --appimage-extract >/dev/null)
+for name in "${runtime_libraries[@]}"; do
+  test -f "$build_directory/check/squashfs-root/usr/lib/$name"
+done
 python3 scripts/check-linux-compatibility.py --maximum "$baseline" \
   "$OUTPUT" "$build_directory/check/squashfs-root"
 
