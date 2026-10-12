@@ -143,7 +143,18 @@ for package in xorg-x11-server-Xephyr xorg-x11-utils xorg-x11-xauth xorg-x11-xkb
   libX11 libXau libxcb libXi libXcursor libXrender libX11-xcb openbox zenity glib2 gtk3; do
   bundle_rpm_license_family "$package"
 done
-while IFS= read -r runtime_path; do bundle_rpm_license_family "$(rpm -qf --qf '%{NAME}' "$runtime_path")"; done < <({
+while IFS= read -r runtime_path; do
+  # Some integrity files belong to both runtime and development RPMs. Keep
+  # owners separate rather than concatenating them into an invalid package name.
+  if ! runtime_owners="$(rpm -qf --qf '%{NAME}\n' "$runtime_path")"; then
+    echo "Cannot identify the RPM owner of runtime file: $runtime_path" >&2
+    exit 1
+  fi
+  while IFS= read -r runtime_owner; do
+    test -n "$runtime_owner" || continue
+    bundle_rpm_license_family "$runtime_owner"
+  done <<< "$runtime_owners"
+done < <({
   awk '$2 == "<-" {print $3}' "$runtime_manifest"
   for runtime_path in "${rpm_executables[@]}" "${drivers[@]}"; do readlink -f "$runtime_path"; done
 } | sort -u)
