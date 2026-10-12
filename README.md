@@ -281,19 +281,45 @@ that option.
 
 ## Releases
 
-Tagged releases build these artifacts in GitHub Actions:
+GitHub Actions builds two separate native Linux x86-64 distributions in both CI
+and tagged releases:
 
-- `Versus.exe`: the portable Windows executable for Windows 10 and 11.
-- `Versus.AppImage`: the primary portable Linux x86-64 distribution. Run `chmod +x
-  Versus.AppImage && ./Versus.AppImage`.
-- `Versus-windows-x86_64.zip` and `versus-linux-x86_64.tar.gz`: convenience archives.
+| GitHub artifact | Build environment / glibc baseline | AppImage |
+| --- | --- | --- |
+| `linux-glibc-2.35-x86_64` | Ubuntu 22.04 / glibc 2.35 | `Versus-linux-x86_64-glibc-2.35.AppImage` |
+| `linux-glibc-2.28-x86_64` | Rocky Linux 8.10 / glibc 2.28 | `Versus-linux-x86_64-glibc-2.28.AppImage` |
+
+Each artifact also includes a correspondingly named `.tar.gz` containing the plain
+executable, README and license. The AppImage bundles runtime libraries; the plain
+executable requires its native libraries on the host. Linux filenames include the
+baseline so both variants can coexist in a release without overwriting each other.
+
+Check your system with `getconf GNU_LIBC_VERSION`. Use the 2.28 artifact on Rocky 8.
+Download the artifact from a successful CI run, unzip it, and run:
+
+```bash
+chmod +x Versus-linux-x86_64-glibc-2.28.AppImage
+./Versus-linux-x86_64-glibc-2.28.AppImage --appimage-extract-and-run
+```
+
+For the normal 2.35 build, substitute `2.35` in the filename. Extract-and-run needs
+no FUSE installation or administrator access. Both builds run the same native app
+from this repository. They use the host display and graphics stack; they do not
+include the earlier nested-display/X2Go workaround or a `--compat-x11` option.
+An X2Go server lacking XInput2 can still produce a separate display error even
+when the glibc version is compatible.
+
+Both build jobs run formatting, unit/integration tests and a release build in their
+baseline container. Packaging checks the glibc requirements of the final AppImage
+runtime and all bundled ELF files, then tests the packaged CLI and GUI startup
+with Xvfb/software rendering in that same environment. This verifies the baseline
+builds, not every user's display configuration, kernel or graphics driver.
+
+Tagged releases additionally publish:
+
+- `Versus.exe` and `Versus-windows-x86_64.zip` for Windows 10 and 11.
 - `versus-source-offline.tar.gz`: source, lockfile, vendor tree, build scripts, and
   generated dependency/license inventory for disconnected builds.
-
-The release workflow builds these artifacts; this repository does not claim that a
-particular artifact has been executed on every supported operating system. Linux
-still requires a compatible kernel, display stack, and graphics driver supplied by
-the host.
 
 Versus is licensed under [MIT](LICENSE). Each release includes
 `DEPENDENCY-LICENSES.md`, generated from Cargo metadata; review third-party
@@ -328,8 +354,17 @@ The vendor tree includes a [native drop-position patch](docs/vendor-winit-drop-p
 Reapply it and update its checksums after refreshing dependencies.
 
 On Linux, install the host development libraries required by the native windowing
-backend, then use the same Cargo command. The release workflow lists the Ubuntu
-packages it uses as a reproducible reference.
+backend, then use the same Cargo command. `scripts/build-linux.sh` lists the
+Ubuntu 22.04 and Rocky 8.10 build packages used by CI and releases. On a machine
+with Docker, reproduce either Linux build with:
+
+```bash
+docker run --rm --platform linux/amd64 -v "$PWD:/workspace" -w /workspace ubuntu:22.04 bash scripts/build-linux.sh 2.35
+docker run --rm --platform linux/amd64 -v "$PWD:/workspace" -w /workspace rockylinux/rockylinux:8.10 bash scripts/build-linux.sh 2.28
+```
+
+Use separate clean checkouts for concurrent baseline builds. Container setup and
+packaging need network access; Cargo compilation uses the vendored dependencies.
 
 ## Development checks
 

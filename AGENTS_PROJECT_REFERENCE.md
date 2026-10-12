@@ -96,6 +96,16 @@ APIs and must fail cleanly when unavailable.
   `scripts/package-source-offline.sh` packages the offline source release.
 - `.github/workflows/ci.yml` checks Windows and Linux builds; `release.yml` builds
   tagged portable artifacts and the offline source archive.
+- Both workflows build separate native Linux artifacts for glibc 2.35 (Ubuntu
+  22.04) and glibc 2.28 (Rocky 8.10) through `scripts/build-linux.sh`. Artifact and
+  release filenames include the baseline so outputs cannot collide.
+  `scripts/package-linux.sh` takes the baseline explicitly, bundles dynamically
+  loaded keyboard libraries, and checks the finished AppImage/runtime and bundled
+  ELF files with `scripts/check-linux-compatibility.py`. Each baseline runs Rust
+  tests, release compilation, packaged CLI checks and an Xvfb GUI startup test.
+  These are native builds using the host display/graphics stack; no nested X11
+  compatibility launcher is included. glibc compatibility does not supply XInput2
+  to older X2Go servers. Keep both baseline checks when changing Linux packaging.
 
 ## Architectural constraints
 
