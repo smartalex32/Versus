@@ -5,6 +5,7 @@ mod cli;
 mod logo;
 #[cfg(windows)]
 mod native_drop;
+mod recent;
 mod selection;
 
 fn main() -> std::process::ExitCode {

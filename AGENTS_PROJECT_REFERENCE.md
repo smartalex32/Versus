@@ -31,6 +31,18 @@ APIs and must fail cleanly when unavailable.
 - `src/core/tree.rs` builds aligned folder trees with per-side types, ancestor
   status aggregation, shared expansion state, and full-tree traversal for diff
   navigation that skips folders and reveals changed files' collapsed ancestors.
+- Refresh reloads the active file view, including folder drilldown, and keeps its
+  viewport. Folder refresh retains selection, expansion and scroll state for the
+  same roots; removed selected entries are cleared. Workers recheck missing sides
+  of folder files without following symlinks.
+- `src/recent.rs` stores up to 20 recent file/folder source pairs in a bounded,
+  versioned per-user local file, preserving native path bytes. The startup/New
+  comparison screen offers one-click reopening through background classification.
+  Recent rows show only the active file/folder mode as left-aligned path pairs
+  with a bold vs separator and alternating neutral backgrounds.
+  History IO runs on a serialized worker and queued writes finish on close; paths
+  are recorded once both sources are classified, even if the comparison is still
+  loading. File contents are never persisted. No new dependencies are required.
 - `src/core/file_view.rs` loads bounded text inputs and aligns numbered line rows.
   Rows retain original line numbers, terminators, and UTF-8 highlight ranges.
   Changed blocks use bounded similarity alignment to pair edited lines across
@@ -46,8 +58,8 @@ APIs and must fail cleanly when unavailable.
   of the differences filter; Ctrl/Command + wheel changes
   UI scale using egui’s smooth zoom delta, without scrolling the comparison.
   Zoom is applied once per frame and bounded to egui’s 20–500% range.
-  UI zoom alone is saved through eframe storage; compared content and paths are
-  session-local. Row/control geometry follows font metrics.
+  UI zoom is saved through eframe storage; recent source paths are saved separately
+  and compared content remains session-local. Row/control geometry follows font metrics.
 - Shared UI options filter identical entries and independently ignore inline
   whitespace or line endings. Differences-only filtering and both ignore rules are
   enabled by default. Filtering keeps a top-visible or nearest-surviving anchor;

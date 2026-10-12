@@ -1,3 +1,4 @@
+use crate::recent::{RecentComparison, RecentComparisons};
 use crate::selection::{self, ComparisonMode, SelectionMode, SourceKind};
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 use std::{
@@ -83,11 +84,73 @@ struct ComparisonJob {
 }
 
 struct FileJob {
-    receiver: Receiver<Result<Option<FileComparison>, CompareError>>,
+    receiver: Receiver<Result<Option<LoadedFile>, CompareError>>,
     cancellation: Arc<AtomicBool>,
     started: Instant,
     progress: Arc<ComparisonProgress>,
     ignore_line_endings: bool,
+}
+
+struct LoadedFile {
+    comparison: FileComparison,
+    sources: [Option<PathBuf>; 2],
+}
+
+struct RecentStore {
+    sender: Option<mpsc::Sender<RecentComparison>>,
+    receiver: Receiver<Result<Option<RecentComparisons>, String>>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl RecentStore {
+    fn start(ctx: &egui::Context, history_path: Option<PathBuf>) -> Self {
+        let ctx = ctx.clone();
+        let (sender, requests) = mpsc::channel::<RecentComparison>();
+        let (results, receiver) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let loaded = match &history_path {
+                Some(path) => RecentComparisons::load_from(path),
+                None => RecentComparisons::load(),
+            };
+            let mut recent = match loaded {
+                Ok(recent) => {
+                    let _ = results.send(Ok(Some(recent.clone())));
+                    recent
+                }
+                Err(error) => {
+                    let _ = results.send(Err(format!("Cannot load recent comparisons: {error}")));
+                    RecentComparisons::default()
+                }
+            };
+            ctx.request_repaint();
+            for entry in requests {
+                recent.record(entry.mode, entry.paths);
+                let saved = match &history_path {
+                    Some(path) => recent.save_to(path),
+                    None => recent.save(),
+                };
+                let result = saved
+                    .map(|()| None)
+                    .map_err(|error| format!("Cannot save recent comparisons: {error}"));
+                let _ = results.send(result);
+                ctx.request_repaint();
+            }
+        });
+        Self {
+            sender: Some(sender),
+            receiver,
+            worker: Some(worker),
+        }
+    }
+}
+
+impl Drop for RecentStore {
+    fn drop(&mut self) {
+        self.sender.take();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
 }
 
 struct SourceJob {
@@ -163,6 +226,9 @@ pub struct VersusApp {
     native_drag_position: Option<Pos2>,
     drop_hover_side: Option<usize>,
     drop_message: Option<String>,
+    recent: RecentComparisons,
+    recent_store: Option<RecentStore>,
+    recent_message: Option<String>,
 }
 
 impl Default for VersusApp {
@@ -200,6 +266,9 @@ impl Default for VersusApp {
             native_drag_position: None,
             drop_hover_side: None,
             drop_message: None,
+            recent: RecentComparisons::default(),
+            recent_store: None,
+            recent_message: None,
         }
     }
 }
@@ -215,11 +284,57 @@ impl VersusApp {
         }
         let mut app = Self::default();
         app.preferences_context = Some(cc.egui_ctx.clone());
+        app.recent_store = Some(RecentStore::start(&cc.egui_ctx, None));
         if let Some(launch) = launch {
             app.open_launch_request(launch);
             cc.egui_ctx.request_repaint();
         }
         app
+    }
+
+    fn record_recent(&mut self, mode: ComparisonMode, paths: [PathBuf; 2]) {
+        if paths.iter().any(|path| empty_diff_side(path)) {
+            return;
+        }
+        self.recent.record(mode, paths.clone());
+        if let Some(sender) = self
+            .recent_store
+            .as_ref()
+            .and_then(|store| store.sender.as_ref())
+        {
+            if sender.send(RecentComparison { mode, paths }).is_err() {
+                self.recent_message =
+                    Some("Cannot save recent comparisons: the history worker stopped.".into());
+            }
+        }
+    }
+
+    fn poll_recent(&mut self, ctx: &egui::Context) {
+        let Some(store) = &self.recent_store else {
+            return;
+        };
+        while let Ok(result) = store.receiver.try_recv() {
+            match result {
+                Ok(Some(mut saved)) => {
+                    for entry in self.recent.entries().iter().rev() {
+                        saved.record(entry.mode, entry.paths.clone());
+                    }
+                    self.recent = saved;
+                    ctx.request_repaint();
+                }
+                Ok(None) => self.recent_message = None,
+                Err(error) => self.recent_message = Some(error),
+            }
+        }
+    }
+
+    fn open_recent(&mut self, entry: RecentComparison) {
+        self.new_comparison();
+        self.comparison_mode = entry.mode;
+        for (side, path) in entry.paths.into_iter().enumerate() {
+            self.select_path(side, path);
+        }
+        self.launch_mode = Some(Some(entry.mode));
     }
 
     fn open_launch_request(&mut self, launch: crate::cli::LaunchRequest) {
@@ -388,7 +503,7 @@ impl VersusApp {
                             ComparisonMode::Folder => "folders",
                         }
                     ));
-                    self.message = "Cannot compare these command-line sources.".into();
+                    self.message = "Cannot compare these sources.".into();
                     return;
                 }
             } else {
@@ -410,6 +525,9 @@ impl VersusApp {
                     .source_kinds
                     .iter()
                     .all(|kind| *kind == Some(SourceKind::File));
+                if ready && !paths.iter().any(|path| empty_diff_side(path)) {
+                    self.record_recent(ComparisonMode::File, paths.clone());
+                }
                 self.file_view = Some(Self::create_file_view(
                     paths,
                     sources,
@@ -450,6 +568,7 @@ impl VersusApp {
             job.cancellation.store(true, Ordering::Relaxed);
         }
         let roots = self.comparison_paths();
+        self.record_recent(ComparisonMode::Folder, roots.clone());
         let worker_roots = roots.clone();
         let cancellation = Arc::new(AtomicBool::new(false));
         let worker_cancellation = cancellation.clone();
@@ -600,17 +719,32 @@ impl VersusApp {
         let cancellation = Arc::new(AtomicBool::new(false));
         let worker_cancellation = cancellation.clone();
         let worker_sources = sources.clone();
+        let worker_paths = paths.clone();
         let (sender, receiver) = mpsc::channel();
         let progress = Arc::new(ComparisonProgress::default());
         options.progress = Some(progress.clone());
         let ignore_line_endings = options.ignore_line_endings;
         if ready && !type_mismatch {
             std::thread::spawn(move || {
-                let result = load_file_comparison_with_options(
-                    &worker_sources,
-                    &worker_cancellation,
-                    &options,
-                );
+                let sources = if from_folders {
+                    std::array::from_fn(|side| {
+                        // Only a missing path represents an empty side. Keep other
+                        // inspection failures visible through the guarded loader.
+                        (!std::fs::symlink_metadata(&worker_paths[side])
+                            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound))
+                        .then(|| worker_paths[side].clone())
+                    })
+                } else {
+                    worker_sources
+                };
+                let result =
+                    load_file_comparison_with_options(&sources, &worker_cancellation, &options)
+                        .map(|comparison| {
+                            comparison.map(|comparison| LoadedFile {
+                                comparison,
+                                sources,
+                            })
+                        });
                 let _ = sender.send(result);
             });
         }
@@ -659,7 +793,9 @@ impl VersusApp {
                 return;
             }
             match result {
-                Ok(Some(comparison)) => {
+                Ok(Some(loaded)) => {
+                    let comparison = loaded.comparison;
+                    view.sources = loaded.sources;
                     // Ignore rules can change row alignment. Restore the viewport
                     // and navigation by source line number, rather than row index.
                     let anchor = file_line_anchor(
@@ -732,8 +868,22 @@ impl VersusApp {
         {
             self.start_comparison();
         }
+        self.reload_file(false);
+    }
+
+    fn refresh_file(&mut self) {
+        self.reload_file(true);
+    }
+
+    fn reload_file(&mut self, refresh_types: bool) {
+        if self.source_jobs.iter().any(Option::is_some) {
+            return;
+        }
         let options = self.file_options();
         if let Some(view) = &mut self.file_view {
+            if refresh_types {
+                view.error_icon = StatusIcon::Error;
+            }
             let ready = view.from_folders
                 || self
                     .source_kinds
@@ -1226,8 +1376,10 @@ impl VersusApp {
             );
             ui.ctx().request_repaint();
         }
-        if self.mode() == SelectionMode::Folder {
-            self.controls(&mut controls_ui);
+        match self.mode() {
+            SelectionMode::Folder => self.controls(&mut controls_ui),
+            SelectionMode::File => self.file_controls(&mut controls_ui),
+            _ => {}
         }
     }
 
@@ -1378,6 +1530,35 @@ impl VersusApp {
                 job.cancellation.store(true, Ordering::Relaxed);
             }
             ui.spinner();
+        }
+    }
+
+    fn file_controls(&mut self, ui: &mut egui::Ui) {
+        let ready = self.source_jobs.iter().all(Option::is_none)
+            && self.source_errors.iter().all(Option::is_none)
+            && self.file_view.as_ref().is_some_and(|view| {
+                view.job.is_none()
+                    && (view.from_folders || self.source_kinds == [Some(SourceKind::File); 2])
+            });
+        if icon_button(ui, ToolbarIcon::Refresh, ready, "Refresh comparison").clicked() {
+            self.refresh_file();
+        }
+        if let Some(job) = self.file_view.as_ref().and_then(|view| view.job.as_ref()) {
+            let cancelling = job.cancellation.load(Ordering::Relaxed);
+            if icon_button(
+                ui,
+                ToolbarIcon::Cancel,
+                !cancelling,
+                if cancelling {
+                    "Cancelling…"
+                } else {
+                    "Cancel comparison"
+                },
+            )
+            .clicked()
+            {
+                job.cancellation.store(true, Ordering::Relaxed);
+            }
         }
     }
 
@@ -2129,6 +2310,10 @@ impl VersusApp {
                         self.selected = Some(path);
                     }
                     self.tree_keyboard_focus = tree_keyboard_focus;
+                } else if self.paths.iter().all(String::is_empty)
+                    && (!self.recent.entries().is_empty() || self.recent_message.is_some())
+                {
+                    self.recent_area(ui, body_height);
                 } else {
                     let title = if self.job.is_some() {
                         "Comparing folders…"
@@ -2151,6 +2336,56 @@ impl VersusApp {
             });
         if let Some((path, present, type_mismatch)) = open {
             self.open_file(path, present, type_mismatch);
+        }
+    }
+
+    fn recent_area(&mut self, ui: &mut egui::Ui, height: f32) {
+        let palette = Palette::for_context(ui.ctx());
+        let mut open = None;
+        let entries: Vec<_> = self
+            .recent
+            .entries()
+            .iter()
+            .filter(|entry| entry.mode == self.comparison_mode)
+            .collect();
+        egui::ScrollArea::vertical()
+            .id_salt(("recent-comparisons", self.comparison_mode.source_label()))
+            .auto_shrink([false, false])
+            .max_height(height)
+            .show(ui, |ui| {
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new("Recently compared")
+                            .size(14.0)
+                            .color(palette.muted),
+                    );
+                });
+                ui.add_space(6.0);
+                if let Some(message) = &self.recent_message {
+                    ui.colored_label(palette.error, message);
+                    ui.add_space(6.0);
+                }
+                if entries.is_empty() {
+                    ui.label(
+                        RichText::new(format!(
+                            "No recent {} comparisons.",
+                            self.comparison_mode.source_label()
+                        ))
+                        .color(palette.muted),
+                    );
+                }
+                ui.spacing_mut().item_spacing.y = 0.0;
+                for (index, entry) in entries.into_iter().enumerate() {
+                    if recent_comparison_row(ui, entry, index, palette).clicked() {
+                        open = Some(entry.clone());
+                    }
+                }
+            });
+        if let Some(entry) = open {
+            self.open_recent(entry);
+            ui.ctx().request_repaint();
         }
     }
 
@@ -2210,6 +2445,7 @@ impl eframe::App for VersusApp {
             .to_normalized_gamma_f32()
     }
     fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        self.poll_recent(ctx);
         self.poll_sources(ctx);
         self.poll_comparison(ctx);
         self.poll_file_comparison(ctx);
@@ -2280,6 +2516,106 @@ fn control_extent(ui: &egui::Ui) -> f32 {
 
 fn comparison_font(ctx: &egui::Context) -> FontId {
     egui::TextStyle::Monospace.resolve(&ctx.style_of(ctx.theme()))
+}
+
+fn recent_comparison_row(
+    ui: &mut egui::Ui,
+    entry: &RecentComparison,
+    index: usize,
+    palette: Palette,
+) -> egui::Response {
+    let paths = entry
+        .paths
+        .each_ref()
+        .map(|path| path.display().to_string());
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let separator_font = FontId::new(font.size + 2.0, font.family.clone());
+    let separator = ui
+        .painter()
+        .layout_no_wrap("vs".into(), separator_font, palette.text);
+    let padding = 8.0;
+    let gap = 10.0;
+    let available =
+        (ui.available_width() - padding * 2.0 - gap * 2.0 - separator.size().x).max(1.0);
+    let mut labels = paths.each_ref().map(|path| {
+        ui.painter()
+            .layout_no_wrap(path.clone(), font.clone(), palette.text)
+    });
+    if labels.iter().map(|label| label.size().x).sum::<f32>() > available {
+        // Keep both paths readable at narrow widths instead of hiding one side.
+        labels = paths.each_ref().map(|path| {
+            ui.painter()
+                .layout(path.clone(), font.clone(), palette.text, available / 2.0)
+        });
+    }
+    let height = labels
+        .iter()
+        .map(|label| label.size().y)
+        .fold(separator.size().y, f32::max)
+        + padding * 2.0;
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(
+            ui.available_width(),
+            height.max(ui.spacing().interact_size.y),
+        ),
+        Sense::hover(),
+    );
+    let response = ui.interact(
+        rect,
+        egui::Id::new(("recent-comparison", entry.mode.source_label(), index)),
+        Sense::click(),
+    );
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::WidgetType::Button,
+            ui.is_enabled(),
+            format!("{} vs {}", paths[0], paths[1]),
+        )
+    });
+    let painter = ui.painter().with_clip_rect(rect);
+    painter.rect_filled(
+        rect,
+        0,
+        if response.hovered() || response.is_pointer_button_down_on() {
+            palette.hover
+        } else if index % 2 == 0 {
+            palette.panel
+        } else {
+            palette.alternate
+        },
+    );
+    if response.has_focus() {
+        painter.rect_stroke(
+            rect,
+            0,
+            Stroke::new(1.0, palette.accent),
+            egui::StrokeKind::Inside,
+        );
+    }
+    let left = egui::pos2(
+        rect.left() + padding,
+        rect.center().y - labels[0].size().y / 2.0,
+    );
+    let versus = egui::pos2(
+        left.x + labels[0].size().x + gap,
+        rect.center().y - separator.size().y / 2.0,
+    );
+    let right = egui::pos2(
+        versus.x + separator.size().x + gap,
+        rect.center().y - labels[1].size().y / 2.0,
+    );
+    painter.galley(left, labels[0].clone(), palette.text);
+    // Egui's default proportional font has no bold face. A small overprint gives
+    // just the separator a heavier weight without adding a font dependency.
+    painter.galley(versus, separator.clone(), palette.text);
+    painter.galley(versus + egui::vec2(0.5, 0.0), separator, palette.text);
+    painter.galley(right, labels[1].clone(), palette.text);
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(format!(
+            "{} vs {}\nRecompare these sources",
+            paths[0], paths[1]
+        ))
 }
 
 fn absolute_path(path: &str) -> PathBuf {
@@ -5312,8 +5648,14 @@ mod tests {
             progress: Arc::new(ComparisonProgress::default()),
             ignore_line_endings: false,
         });
+        let sources = view.sources.clone();
         app.file_view = Some(view);
-        sender.send(Ok(Some(replacement))).unwrap();
+        sender
+            .send(Ok(Some(LoadedFile {
+                comparison: replacement,
+                sources,
+            })))
+            .unwrap();
         app.poll_file_comparison(&ctx);
         let view = app.file_view.as_ref().unwrap();
         assert_eq!(view.scroll_y, 2.0 * ROW_HEIGHT + 5.0);
@@ -5338,12 +5680,16 @@ mod tests {
                 progress: Arc::new(ComparisonProgress::default()),
                 ignore_line_endings: false,
             });
+            let sources = view.sources.clone();
             app.file_view = Some(view);
             if cancelled {
                 sender
-                    .send(Ok(Some(FileComparison {
-                        rows: vec![],
-                        message: None,
+                    .send(Ok(Some(LoadedFile {
+                        comparison: FileComparison {
+                            rows: vec![],
+                            message: None,
+                        },
+                        sources,
                     })))
                     .unwrap();
             } else {
@@ -7157,5 +7503,413 @@ mod tests {
         );
         assert!(text.contains("entries found"));
         assert!(!text.contains("left in this stage"));
+    }
+
+    #[test]
+    fn recent_pairs_reopen_and_are_kept_when_starting_over() {
+        let sources = SourceFixture::new();
+        let ctx = egui::Context::default();
+        let paths = [
+            sources.path("left/model.txt"),
+            sources.path("right/model.txt"),
+        ];
+        let mut app = VersusApp::default();
+        app.open_recent(RecentComparison {
+            mode: ComparisonMode::File,
+            paths: paths.clone(),
+        });
+        settle_sources(&mut app, &ctx);
+        assert_eq!(app.comparison_paths(), paths);
+        assert_eq!(app.recent.entries().len(), 1);
+        app.new_comparison();
+        assert_eq!(app.recent.entries().len(), 1);
+    }
+
+    #[test]
+    fn refreshing_a_folder_drilldown_rechecks_newly_created_sides() {
+        let sources = SourceFixture::new();
+        let ctx = egui::Context::default();
+        let mut app = VersusApp::default();
+        app.select_path(0, sources.path("left"));
+        app.select_path(1, sources.path("right"));
+        settle_sources(&mut app, &ctx);
+        std::fs::remove_file(sources.path("right/model.txt")).unwrap();
+        app.open_file("model.txt".into(), [true, false], false);
+        settle_sources(&mut app, &ctx);
+        std::fs::write(sources.path("right/model.txt"), "common\nold\n").unwrap();
+        app.refresh_file();
+        settle_sources(&mut app, &ctx);
+        assert!(
+            app.file_view
+                .as_ref()
+                .unwrap()
+                .sources
+                .iter()
+                .all(Option::is_some)
+        );
+        assert_eq!(app.file_view.as_ref().unwrap().counts[0], 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refreshing_a_folder_drilldown_does_not_follow_a_symlink() {
+        let sources = SourceFixture::new();
+        let ctx = egui::Context::default();
+        let mut app = VersusApp::default();
+        app.select_path(0, sources.path("left"));
+        app.select_path(1, sources.path("right"));
+        settle_sources(&mut app, &ctx);
+        app.open_file("model.txt".into(), [true, true], false);
+        settle_sources(&mut app, &ctx);
+        std::fs::remove_file(sources.path("left/model.txt")).unwrap();
+        std::os::unix::fs::symlink(
+            sources.path("right/model.txt"),
+            sources.path("left/model.txt"),
+        )
+        .unwrap();
+        app.refresh_file();
+        settle_sources(&mut app, &ctx);
+        assert!(
+            app.file_view
+                .as_ref()
+                .unwrap()
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("non-symlink")
+        );
+    }
+
+    #[test]
+    fn folder_file_refresh_reports_inspection_errors_instead_of_an_empty_side() {
+        let sources = SourceFixture::new();
+        let ctx = egui::Context::default();
+        let mut app = VersusApp::default();
+        app.select_path(0, sources.path("left"));
+        app.select_path(1, sources.path("right"));
+        settle_sources(&mut app, &ctx);
+        app.open_file("model.txt".into(), [true, true], false);
+        settle_sources(&mut app, &ctx);
+        // A child below a regular file is NotADirectory on Unix but NotFound on
+        // Windows. An embedded NUL produces a genuine inspection error on both.
+        let invalid_path = sources.path("right/invalid\0path.txt");
+        let inspection_error = std::fs::symlink_metadata(&invalid_path).unwrap_err();
+        assert_eq!(inspection_error.kind(), std::io::ErrorKind::InvalidInput);
+        let previous = app.file_view.as_ref().unwrap().comparison.clone();
+        app.file_view.as_mut().unwrap().paths[1] = invalid_path;
+        app.refresh_file();
+        settle_sources(&mut app, &ctx);
+        assert!(app.file_view.as_ref().unwrap().error.is_some());
+        assert_eq!(app.file_view.as_ref().unwrap().comparison, previous);
+    }
+
+    #[test]
+    fn recent_pairs_reopen_from_startup_and_survive_new_comparison() {
+        let sources = SourceFixture::new();
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        for mode in [ComparisonMode::File, ComparisonMode::Folder] {
+            let mut app = VersusApp::default();
+            let paths = match mode {
+                ComparisonMode::File => [
+                    sources.path("left/model.txt"),
+                    sources.path("right/model.txt"),
+                ],
+                ComparisonMode::Folder => [sources.path("left"), sources.path("right")],
+            };
+            app.open_recent(RecentComparison {
+                mode,
+                paths: paths.clone(),
+            });
+            settle_sources(&mut app, &ctx);
+            assert!(app.error.is_none());
+            assert_eq!(app.comparison_mode, mode);
+            assert_eq!(
+                app.recent.entries(),
+                &[RecentComparison {
+                    mode,
+                    paths: paths.clone()
+                }]
+            );
+            assert_eq!(app.tree.is_some(), mode == ComparisonMode::Folder);
+            assert_eq!(app.file_view.is_some(), mode == ComparisonMode::File);
+            app.new_comparison();
+            let output = render(&mut app, &ctx, vec![]);
+            assert_eq!(text_positions(&output, "Recently compared").len(), 1);
+            let target = ctx
+                .read_response(egui::Id::new(("recent-comparison", mode.source_label(), 0)))
+                .unwrap()
+                .rect
+                .center();
+            output.drop_without_applying_deltas();
+            click(&mut app, &ctx, target);
+            settle_sources(&mut app, &ctx);
+            assert!(app.error.is_none());
+            assert_eq!(app.comparison_paths(), paths);
+            assert_eq!(app.recent.entries().len(), 1);
+        }
+    }
+
+    #[test]
+    fn recent_list_filters_by_mode_and_uses_plain_alternating_rows() {
+        for theme in [egui::Theme::Light, egui::Theme::Dark] {
+            let ctx = egui::Context::default();
+            apply_theme(&ctx);
+            set_theme(&ctx, theme);
+            let mut app = VersusApp::default();
+            for (mode, name) in [
+                (ComparisonMode::Folder, "folder-old"),
+                (ComparisonMode::File, "file-old"),
+                (ComparisonMode::Folder, "folder-new"),
+                (ComparisonMode::File, "file-new"),
+            ] {
+                app.recent.record(
+                    mode,
+                    [
+                        format!("/{name}/left").into(),
+                        format!("/{name}/right").into(),
+                    ],
+                );
+            }
+            for (mode, visible, hidden) in [
+                (ComparisonMode::Folder, "folder", "file"),
+                (ComparisonMode::File, "file", "folder"),
+            ] {
+                app.switch_comparison_mode(mode);
+                let output = render(&mut app, &ctx, vec![]);
+                let palette = Palette::for_context(&ctx);
+                let mut positions = Vec::new();
+                for (index, age, fill) in [(0, "new", palette.panel), (1, "old", palette.alternate)]
+                {
+                    let left = text_positions(&output, &format!("/{visible}-{age}/left"));
+                    let right = text_positions(&output, &format!("/{visible}-{age}/right"));
+                    assert_eq!(left.len(), 1);
+                    assert_eq!(right.len(), 1);
+                    assert_eq!(left[0].y, right[0].y);
+                    let row = ctx
+                        .read_response(egui::Id::new((
+                            "recent-comparison",
+                            mode.source_label(),
+                            index,
+                        )))
+                        .unwrap()
+                        .rect;
+                    assert!(left[0].x < row.center().x && right[0].x > left[0].x);
+                    assert!(output.shapes.iter().any(|shape| {
+                        matches!(&shape.shape, egui::Shape::Rect(shape) if shape.rect == row && shape.fill == fill && shape.stroke == Stroke::NONE)
+                    }));
+                    assert!(text_positions(&output, &format!("/{hidden}-{age}/left")).is_empty());
+                    assert!(text_positions(&output, &format!("/{hidden}-{age}/right")).is_empty());
+                    positions.push(left[0]);
+                }
+                assert_eq!(positions[0].x, positions[1].x);
+                assert!(positions[0].y < positions[1].y);
+                output.drop_without_applying_deltas();
+            }
+        }
+    }
+
+    #[test]
+    fn recent_list_shows_an_empty_message_for_the_active_mode() {
+        let ctx = egui::Context::default();
+        let mut app = VersusApp::default();
+        app.recent.record(
+            ComparisonMode::Folder,
+            ["/left/folder".into(), "/right/folder".into()],
+        );
+        app.switch_comparison_mode(ComparisonMode::File);
+        let output = render(&mut app, &ctx, vec![]);
+        assert_eq!(
+            text_positions(&output, "No recent file comparisons.").len(),
+            1
+        );
+        assert!(text_positions(&output, "/left/folder").is_empty());
+        assert!(text_positions(&output, "/right/folder").is_empty());
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn recent_missing_or_changed_sources_report_errors_and_keep_history() {
+        let sources = SourceFixture::new();
+        let ctx = egui::Context::default();
+        for (paths, expected) in [
+            (
+                [sources.path("missing.txt"), sources.path("right/model.txt")],
+                "Cannot inspect",
+            ),
+            (
+                [sources.path("left"), sources.path("right")],
+                "requires two regular",
+            ),
+        ] {
+            let mut app = VersusApp::default();
+            let entry = RecentComparison {
+                mode: ComparisonMode::File,
+                paths,
+            };
+            app.recent.record(entry.mode, entry.paths.clone());
+            app.open_recent(entry.clone());
+            settle_sources(&mut app, &ctx);
+            assert!(app.error.as_deref().unwrap().contains(expected));
+            assert!(app.job.is_none() && app.file_view.is_none());
+            assert_eq!(app.recent.entries(), &[entry]);
+            app.new_comparison();
+            assert_eq!(app.recent.entries().len(), 1);
+        }
+    }
+
+    #[test]
+    fn history_worker_finishes_writes_on_close_and_merges_startup_history() {
+        let sources = SourceFixture::new();
+        let ctx = egui::Context::default();
+        let history_path = sources.path("settings/recent-comparisons.v1");
+        let first = [sources.path("left"), sources.path("right")];
+        let second = [
+            sources.path("left/model.txt"),
+            sources.path("right/model.txt"),
+        ];
+        let mut saved = RecentComparisons::default();
+        saved.record(ComparisonMode::Folder, first.clone());
+        saved.save_to(&history_path).unwrap();
+        let mut app = VersusApp::default();
+        app.recent_store = Some(RecentStore::start(&ctx, Some(history_path.clone())));
+        app.record_recent(ComparisonMode::File, second.clone());
+        // Closing must drain the queued save, including when load was still pending.
+        drop(app);
+        let reopened = RecentComparisons::load_from(&history_path).unwrap();
+        assert_eq!(
+            reopened.entries(),
+            &[
+                RecentComparison {
+                    mode: ComparisonMode::File,
+                    paths: second.clone()
+                },
+                RecentComparison {
+                    mode: ComparisonMode::Folder,
+                    paths: first.clone()
+                },
+            ]
+        );
+        let mut app = VersusApp::default();
+        app.recent_store = Some(RecentStore::start(&ctx, Some(history_path)));
+        app.record_recent(ComparisonMode::Folder, first.clone());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.recent.entries().len() != 2 {
+            app.poll_recent(&ctx);
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(
+            app.recent.entries(),
+            &[
+                RecentComparison {
+                    mode: ComparisonMode::Folder,
+                    paths: first
+                },
+                RecentComparison {
+                    mode: ComparisonMode::File,
+                    paths: second
+                },
+            ]
+        );
+        assert!(app.recent_message.is_none());
+    }
+
+    #[test]
+    fn refresh_button_reloads_direct_files_and_folder_drilldown() {
+        let sources = SourceFixture::new();
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        for from_folders in [false, true] {
+            std::fs::write(sources.path("right/model.txt"), "common\nnew\n").unwrap();
+            let mut app = VersusApp::default();
+            if from_folders {
+                app.select_path(0, sources.path("left"));
+                app.select_path(1, sources.path("right"));
+                settle_sources(&mut app, &ctx);
+                app.selected = Some("model.txt".into());
+                app.open_file("model.txt".into(), [true, true], false);
+            } else {
+                app.comparison_mode = ComparisonMode::File;
+                app.select_path(0, sources.path("left/model.txt"));
+                app.select_path(1, sources.path("right/model.txt"));
+            }
+            settle_sources(&mut app, &ctx);
+            let paths = app.file_view.as_ref().unwrap().paths.clone();
+            assert_eq!(app.file_view.as_ref().unwrap().counts[1], 1);
+            std::fs::write(sources.path("right/model.txt"), "common\nold\n").unwrap();
+            render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+            let refresh = ctx
+                .read_response(egui::Id::new("Refresh comparison"))
+                .unwrap()
+                .rect
+                .center();
+            click(&mut app, &ctx, refresh);
+            assert!(app.file_view.as_ref().unwrap().job.is_some());
+            assert!(app.job.is_none());
+            settle_sources(&mut app, &ctx);
+            let view = app.file_view.as_ref().unwrap();
+            assert_eq!(view.paths, paths);
+            assert_eq!(view.from_folders, from_folders);
+            assert_eq!(view.counts[1], 0);
+            assert_eq!(view.counts[0], 2);
+            if from_folders {
+                app.file_view = None;
+                assert_eq!(
+                    app.selected.as_deref(),
+                    Some(std::path::Path::new("model.txt"))
+                );
+                assert!(app.tree.is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn folder_file_refresh_discovers_created_and_removed_sides_and_rejects_symlinks() {
+        let sources = SourceFixture::new();
+        let ctx = egui::Context::default();
+        let mut app = VersusApp::default();
+        app.select_path(0, sources.path("left"));
+        app.select_path(1, sources.path("right"));
+        settle_sources(&mut app, &ctx);
+        std::fs::remove_file(sources.path("right/model.txt")).unwrap();
+        app.open_file("model.txt".into(), [true, false], false);
+        settle_sources(&mut app, &ctx);
+        std::fs::write(sources.path("right/model.txt"), "common\nold\n").unwrap();
+        app.refresh_file();
+        settle_sources(&mut app, &ctx);
+        assert!(
+            app.file_view
+                .as_ref()
+                .unwrap()
+                .sources
+                .iter()
+                .all(Option::is_some)
+        );
+        assert_eq!(app.file_view.as_ref().unwrap().counts[0], 2);
+        std::fs::remove_file(sources.path("left/model.txt")).unwrap();
+        app.refresh_file();
+        settle_sources(&mut app, &ctx);
+        assert!(app.file_view.as_ref().unwrap().sources[0].is_none());
+        assert_eq!(app.file_view.as_ref().unwrap().counts[3], 2);
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(
+                sources.path("right/model.txt"),
+                sources.path("left/model.txt"),
+            )
+            .unwrap();
+            app.refresh_file();
+            settle_sources(&mut app, &ctx);
+            assert!(
+                app.file_view
+                    .as_ref()
+                    .unwrap()
+                    .error
+                    .as_deref()
+                    .unwrap()
+                    .contains("non-symlink")
+            );
+        }
     }
 }
