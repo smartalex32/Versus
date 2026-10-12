@@ -7,8 +7,9 @@ on Windows and Linux. Header buttons choose Folder Compare or File Compare;
 browse opens the corresponding native picker directly. Matching pairs compare
 automatically and mixed types show an explanation. Linked folder trees
 open read-only, aligned text comparisons on file double-click; Back preserves
-folder-view state and is omitted for directly selected files. Merge primitives remain
-in the core for future work. Runtime behavior must
+folder-view state and is omitted for directly selected files. File Merge opens
+Incoming / editable Result / Current, with an optional common ancestor input.
+Runtime behavior must
 not rely on Internet services, telemetry, automatic updates, a managed runtime, or
 background services. Network-mounted paths are handled through normal filesystem
 APIs and must fail cleanly when unavailable.
@@ -20,6 +21,15 @@ APIs and must fail cleanly when unavailable.
 - `src/app.rs` renders linked folder trees and file comparison panes, with
   cancellable background loading; `src/core/` owns filesystem comparison,
   text diff, merge, and saving. The core library is independent from UI rendering.
+- `src/app/merge_view.rs` owns the GUI-only merge workflow, background input loads
+  and saves, source selectors, per-block safe arrows and per-line conflict arrows,
+  a full editable result, undo, and discard/overwrite confirmation. Input panes
+  share diff alignment; the result uses its own live line numbers. All three panes
+  share vertical scrolling, with independent horizontal scrolling.
+  `src/core/merge_workspace.rs` owns optional-base conflict detection, action
+  targets in the live buffer, atomic safe auto-merge and undo snapshots. With no
+  base, differences require manual choices. Preserve saves emit the buffer exactly,
+  including original endings and final newline. Results and undo stay session-local.
 - `src/selection.rs` classifies sources without following symlinks and configures
   native pickers for the selected comparison mode. Switching modes clears both
   sources and pending work; New comparison keeps the selected mode and theme.
@@ -153,3 +163,10 @@ Refresh dependencies only on a connected development machine:
 The release workflow is the configured production packaging path. Do not claim
 local release artifacts were validated unless the relevant platform build and launch
 were actually performed.
+
+## Agent template
+
+The shared guide, `.codex/` roles/configuration, and `.agents/skills/` were checked
+against [Codex-App](https://github.com/smartalex32/Codex-App) commit
+`67cabb07d2345053322491c0308357d2e8ecd104` on 2026-10-12 and match that revision.
+Keep this project reference specific to Versus when refreshing the template.

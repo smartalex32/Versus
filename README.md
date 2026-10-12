@@ -1,12 +1,35 @@
 # Versus
 
-Versus is an offline engineering workspace for comparing two files or two folders
-in side-by-side panes. It uses operating-system filesystem paths, so
+Versus is an offline engineering workspace for comparing files or folders and
+merging text files. It uses operating-system filesystem paths, so
 mapped drives and UNC paths on Windows and mounted network filesystems on Linux
 work through the same local APIs as other paths. Versus does not implement network
 authentication or make outbound network requests at runtime.
 
 ## Use
+
+**File Merge**, at the upper right, opens Incoming on the left, an editable Result
+in the middle, and Current on the right. Browse or paste the two file paths and,
+optionally, their common ancestor in **Base**, then click **Open merge**. Opening
+merge from a file comparison preselects its two files. The result starts with
+Current's contents; the input files remain read-only.
+
+With a base file, **Auto merge nonconflicting** combines the safe changes as one
+undoable operation. Each consecutive nonconflicting block has one inward arrow
+per side. Conflicting lines have **!** indicators and individual arrows. Without
+a base, differing lines require a manual choice. You can also select, paste, and
+type freely in the middle pane. Source panes retain their diff alignment and
+original line numbers; the result has its own live line numbers. Vertical
+scrolling is shared and horizontal scrolling is independent.
+
+**Undo** reverses typing, arrows, and automatic merges; Ctrl/Command+Z works while
+editing the result. Manual edits that overlap a pending action disable its arrow
+to protect your text; finish that part by typing, or undo the edit. **Save** chooses
+an output file initially and **Save As…** chooses another destination. Existing
+files require explicit overwrite confirmation. Saves preserve the buffer's line
+endings and final newline. Leaving or replacing an unsaved result asks before
+discarding it. Merge contents are never stored in comparison history. This merge
+workflow is currently GUI-only.
 
 Choose **Folder Compare** or **File Compare** in the center of the header. Each
 button includes a folder or file icon. The active mode is highlighted, with Folder

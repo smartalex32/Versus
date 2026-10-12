@@ -1,6 +1,8 @@
 use crate::recent::{RecentComparison, RecentComparisons};
 use crate::selection::{self, ComparisonMode, SelectionMode, SourceKind};
+mod merge_view;
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, Vec2};
+use merge_view::MergeView;
 use std::{
     path::PathBuf,
     sync::{
@@ -192,6 +194,8 @@ impl Drop for FileView {
 }
 
 pub struct VersusApp {
+    merge_view: Option<MergeView>,
+    pending_merge_exit: Option<MergeExit>,
     comparison_mode: ComparisonMode,
     file_view: Option<FileView>,
     paths: [String; 2],
@@ -231,9 +235,17 @@ pub struct VersusApp {
     recent_message: Option<String>,
 }
 
+#[derive(Clone, Copy)]
+enum MergeExit {
+    Mode(ComparisonMode),
+    Close,
+}
+
 impl Default for VersusApp {
     fn default() -> Self {
         Self {
+            merge_view: None,
+            pending_merge_exit: None,
             comparison_mode: ComparisonMode::Folder,
             file_view: None,
             paths: Default::default(),
@@ -449,6 +461,13 @@ impl VersusApp {
     }
 
     fn switch_comparison_mode(&mut self, mode: ComparisonMode) {
+        if let Some(view) = &self.merge_view {
+            if view.needs_guard() {
+                self.pending_merge_exit = Some(MergeExit::Mode(mode));
+                return;
+            }
+            self.merge_view = None;
+        }
         if self.comparison_mode == mode {
             if mode == ComparisonMode::Folder
                 && self
@@ -1247,6 +1266,10 @@ impl VersusApp {
             .show(ui, |ui| {
                 self.header(ui);
                 ui.add_space(5.0);
+                if let Some(view) = &mut self.merge_view {
+                    view.render(ui);
+                    return;
+                }
                 self.legend(ui);
                 ui.add_space(5.0);
                 if self.file_view.is_some() {
@@ -1282,7 +1305,10 @@ impl VersusApp {
                     self.footer(ui);
                 });
             });
-        self.drag_and_drop(ui);
+        if self.merge_view.is_none() {
+            self.drag_and_drop(ui);
+        }
+        self.merge_exit_dialog(ui.ctx());
     }
 
     fn header(&mut self, ui: &mut egui::Ui) {
@@ -1331,7 +1357,7 @@ impl VersusApp {
                 rect,
                 labels[index].clone(),
                 mode,
-                self.comparison_mode == mode,
+                self.merge_view.is_none() && self.comparison_mode == mode,
             )
             .clicked()
             {
@@ -1375,6 +1401,25 @@ impl VersusApp {
                 },
             );
             ui.ctx().request_repaint();
+        }
+        let merge_button = controls_ui.add(
+            egui::Button::new(RichText::new("File Merge").strong())
+                .selected(self.merge_view.is_some()),
+        );
+        if merge_button
+            .on_hover_text("Merge Incoming and Current into an editable result")
+            .clicked()
+        {
+            if self.merge_view.is_none() {
+                let mut view = MergeView::default();
+                if let Some(file) = &self.file_view {
+                    view.set_sources(file.sources.clone());
+                }
+                self.merge_view = Some(view);
+            }
+        }
+        if self.merge_view.is_some() {
+            return;
         }
         match self.mode() {
             SelectionMode::Folder => self.controls(&mut controls_ui),
@@ -2418,6 +2463,45 @@ impl VersusApp {
             ui.label(RichText::new("Click a folder to expand both trees.  •  Double-click a file to compare.  •  Symlinks are not traversed.").size(10.0).color(palette.muted));
         }
     }
+
+    fn merge_exit_dialog(&mut self, ctx: &egui::Context) {
+        if ctx.input(|input| input.viewport().close_requested())
+            && self.merge_view.as_ref().is_some_and(MergeView::needs_guard)
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.pending_merge_exit = Some(MergeExit::Close);
+        }
+        let Some(destination) = self.pending_merge_exit else {
+            return;
+        };
+        let saving = self.merge_view.as_ref().is_some_and(MergeView::is_saving);
+        let mut discard = false;
+        let mut cancel = false;
+        egui::Modal::new(egui::Id::new("leave-merge")).show(ctx, |ui| {
+            ui.heading("Leave merge?");
+            ui.label(if saving {
+                "Wait for the save to finish before leaving."
+            } else {
+                "The result has unsaved changes. Save it before leaving, or discard those changes."
+            });
+            ui.horizontal(|ui| {
+                cancel = ui.button("Keep merging").clicked();
+                discard = ui
+                    .add_enabled(!saving, egui::Button::new("Discard and leave"))
+                    .clicked();
+            });
+        });
+        if cancel {
+            self.pending_merge_exit = None;
+        } else if discard {
+            self.pending_merge_exit = None;
+            self.merge_view = None;
+            match destination {
+                MergeExit::Mode(mode) => self.switch_comparison_mode(mode),
+                MergeExit::Close => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            }
+        }
+    }
 }
 
 impl Drop for VersusApp {
@@ -2449,6 +2533,9 @@ impl eframe::App for VersusApp {
         self.poll_sources(ctx);
         self.poll_comparison(ctx);
         self.poll_file_comparison(ctx);
+        if let Some(view) = &mut self.merge_view {
+            view.poll(ctx);
+        }
     }
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         #[cfg(windows)]
