@@ -16,7 +16,8 @@ The Base path can specify their common ancestor; leaving it blank uses Current.
 Selecting sources starts
 the merge; committing a typed path with Enter or leaving its field reloads it. Opening
 merge from a file comparison preselects its two files. The result starts with
-Current's contents; the input files remain read-only.
+Current's contents. The source panes remain read-only; typing and merge actions
+change only the in-memory result.
 
 The legend row centers four icons with tooltips: **Accept All Left**, **Accept All
 Right**, **Auto Merge Non-Conflicts**, and **Undo**. Accept All replaces the result
@@ -34,11 +35,15 @@ scrolling is shared and horizontal scrolling is independent.
 **Undo** reverses typing, arrows, and automatic merges; Ctrl/Command+Z works while
 editing the result. Manual edits that overlap a pending action disable its arrow
 to protect your text; finish that part by typing, or undo the edit. **Save** and
-**Finish Merge** sit at the bottom right. Save chooses an output file initially;
-right-click Save for **Save As…**. Finish Merge saves outstanding edits and returns
-to the comparison after a successful save. Cancelling or failing a save keeps the
-merge open. Existing
-files require explicit overwrite confirmation. Saves preserve the buffer's line
+**Finish Merge** sit at the bottom right. **Save** writes the middle pane to the
+selected common ancestor file, or to **Current** when the Base path is blank;
+it does not open a destination picker. Existing files require explicit overwrite
+confirmation. **Unsaved Changes** appears at the bottom left in bold highlight
+color until the middle buffer matches the saved destination. **Finish Merge**
+returns to comparison only when there are no unsaved changes and never writes
+files itself. Right-click Save for **Save As…** to export a copy; exporting does
+not change the regular Save destination or mark its outstanding changes saved.
+Cancelling or failing a save keeps the merge open. Saves preserve the buffer's line
 endings and final newline. Leaving or replacing an unsaved result asks before
 discarding it. Merge contents are never stored in comparison history. This merge
 workflow is currently GUI-only.

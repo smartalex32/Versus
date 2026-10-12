@@ -33,8 +33,14 @@ APIs and must fail cleanly when unavailable.
   File drops target all three panes using shared compare-mode pointer handling,
   dashed empty targets and foreground drag highlights. A background worker checks
   regular-file type before changing a source; invalid drops preserve the merge.
-  Save and Finish Merge sit at the bottom right; finishing saves outstanding edits
-  before returning to comparison and keeps the merge open on cancellation/failure.
+  Save and Finish Merge sit at the bottom right. Save writes the middle buffer to
+  the loaded common ancestor path, or Current when Base is blank, retaining native
+  path bytes. Edits stay in memory until explicit Save and overwrite confirmation.
+  Finish only returns to comparison when the result is clean; it never writes.
+  Unsaved Changes is bold highlight text at the bottom left. Dirty state compares
+  the buffer against the actual save destination, including the initial Base
+  contents. Save As exports a copy without retargeting Save or clearing that dirty
+  state. Cancellation/failure preserves unsaved edits.
   Bulk source choices use one undo snapshot, preserving original bytes. Source
   header paths revert to the loaded inputs after a cancelled or failed reload.
   Input panes share diff alignment; the result uses its own live line numbers. All three panes

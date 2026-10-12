@@ -50,7 +50,6 @@ pub(super) struct MergeView {
     scroll_y: f32,
     start_requested: bool,
     path_edits: [bool; 3],
-    finish_requested: bool,
     finished: bool,
     pane_rects: Option<[Rect; 3]>,
     drop_hover_side: Option<usize>,
@@ -94,6 +93,7 @@ impl MergeView {
     }
 
     fn open(&mut self, ctx: &egui::Context) {
+        self.start_requested = false;
         let incoming = self.source_path(0);
         let current = self.source_path(2);
         let base = Some(if self.paths[1].is_empty() {
@@ -183,9 +183,14 @@ impl MergeView {
             match result {
                 Ok(Some(workspace)) => {
                     self.workspace = Some(workspace);
+                    let target = if display_paths[1].is_empty() { 2 } else { 1 };
+                    self.output = Some(
+                        native_paths[target]
+                            .clone()
+                            .unwrap_or_else(|| PathBuf::from(&display_paths[target])),
+                    );
                     self.loaded_paths = Some(display_paths);
                     self.loaded_native_paths = Some(native_paths);
-                    self.output = None;
                     self.generation += 1;
                     self.scroll_y = 0.0;
                     self.navigation_row = None;
@@ -225,28 +230,22 @@ impl MergeView {
         match event {
             SaveEvent::Overwrite(path, contents) => self.overwrite = Some((path, contents)),
             SaveEvent::Complete(path, contents) => {
-                if let Some(workspace) = &mut self.workspace {
-                    workspace.mark_saved_result(&contents);
-                }
-                self.message = format!("Saved {}", path.display());
-                self.output = Some(path);
-                self.error = None;
-                if self.finish_requested {
-                    self.finished = self
-                        .workspace
-                        .as_ref()
-                        .is_some_and(|workspace| !workspace.is_dirty());
-                    self.finish_requested = false;
-                    if !self.finished {
-                        self.message =
-                            "Saved snapshot. Finish Merge again to save the latest edits.".into();
+                let is_destination = self.output.as_ref().is_none_or(|target| *target == path);
+                if is_destination {
+                    if let Some(workspace) = &mut self.workspace {
+                        workspace.mark_saved_result(&contents);
                     }
+                    self.output = Some(path.clone());
+                    self.message = format!("Saved {}", path.display());
+                } else {
+                    self.message = format!(
+                        "Exported copy to {}. Save writes to the merge destination.",
+                        path.display()
+                    );
                 }
+                self.error = None;
             }
-            SaveEvent::Failed(error) => {
-                self.error = Some(error);
-                self.finish_requested = false;
-            }
+            SaveEvent::Failed(error) => self.error = Some(error),
         }
     }
 
@@ -257,7 +256,7 @@ impl MergeView {
         let Some(workspace) = &self.workspace else {
             return;
         };
-        let path = if save_as || self.output.is_none() {
+        let path = if save_as {
             let mut dialog = rfd::FileDialog::new().set_title("Save merged result");
             if let Some(path) = &self.output {
                 if let Some(parent) = path.parent() {
@@ -269,9 +268,24 @@ impl MergeView {
             }
             dialog.save_file()
         } else {
-            self.output.clone()
+            self.output.clone().or_else(|| {
+                let paths = self.loaded_paths.as_ref().unwrap_or(&self.paths);
+                let index = if paths[1].is_empty() { 2 } else { 1 };
+                let native = self
+                    .loaded_native_paths
+                    .as_ref()
+                    .unwrap_or(&self.native_paths);
+                (!paths[index].is_empty()).then(|| {
+                    native[index]
+                        .clone()
+                        .unwrap_or_else(|| PathBuf::from(&paths[index]))
+                })
+            })
         };
         if let Some(path) = path {
+            if !save_as {
+                self.output = Some(path.clone());
+            }
             self.start_save(ctx, path, workspace.result().to_owned(), false);
         }
     }
@@ -437,7 +451,7 @@ impl MergeView {
         }
     }
 
-    fn finish_merge(&mut self, ctx: &egui::Context) {
+    fn finish_merge(&mut self) {
         if self.workspace.is_none()
             || self.is_saving()
             || self.load.is_some()
@@ -448,11 +462,7 @@ impl MergeView {
         if self.output.is_some() && !self.workspace.as_ref().unwrap().is_dirty() {
             self.finished = true;
         } else {
-            self.finish_requested = true;
-            self.save_result(ctx, false);
-            if !self.is_saving() {
-                self.finish_requested = false;
-            }
+            self.error = Some("Save changes before finishing the merge.".into());
         }
     }
 
@@ -739,44 +749,100 @@ impl MergeView {
             && self.load.is_none()
             && !self.is_saving()
             && self.drop_job.is_none();
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui
-                .add_enabled(ready, egui::Button::new("Finish Merge"))
-                .on_hover_text("Save any outstanding edits and finish this merge")
-                .clicked()
-            {
-                self.finish_merge(ui.ctx());
-            }
-            let save = ui
-                .add_enabled(ready, egui::Button::new("Save"))
-                .on_hover_text("Save the merged result. Right-click for Save As.");
-            if save.clicked() {
-                self.save_result(ui.ctx(), false);
-            }
-            save.context_menu(|ui| {
+        let dirty = self
+            .workspace
+            .as_ref()
+            .is_some_and(MergeWorkspace::is_dirty);
+        let extent = control_extent(ui);
+        let gap = ui.spacing().item_spacing.x;
+        let buttons_width: f32 = ["Save", "Finish Merge"]
+            .into_iter()
+            .map(|label| {
+                ui.painter()
+                    .layout_no_wrap(
+                        label.into(),
+                        egui::TextStyle::Button.resolve(ui.style()),
+                        palette.text,
+                    )
+                    .size()
+                    .x
+                    + 2.0 * ui.spacing().button_padding.x
+            })
+            .sum::<f32>()
+            + gap;
+        let (row, _) =
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), extent), Sense::hover());
+        let controls = Rect::from_min_max(
+            egui::pos2((row.right() - buttons_width).max(row.left()), row.top()),
+            row.max,
+        );
+        let status = Rect::from_min_max(
+            row.min,
+            egui::pos2((controls.left() - gap).max(row.left()), row.bottom()),
+        );
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(status)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            |ui| {
+                ui.set_clip_rect(ui.clip_rect().intersect(status));
+                if dirty {
+                    ui.label(
+                        RichText::new("Unsaved Changes")
+                            .strong()
+                            .color(palette.changed),
+                    );
+                }
+                if let Some(path) = &self.output {
+                    status_label(ui, &path.display().to_string(), palette.muted);
+                }
+            },
+        );
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(controls)
+                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+            |ui| {
                 if ui
-                    .add_enabled(ready, egui::Button::new("Save As…"))
+                    .add_enabled(
+                        ready && !dirty && self.output.is_some(),
+                        egui::Button::new("Finish Merge"),
+                    )
+                    .on_hover_text(if dirty {
+                        "Save changes before finishing this merge"
+                    } else {
+                        "Return to comparison without writing any files"
+                    })
                     .clicked()
                 {
-                    self.save_result(ui.ctx(), true);
-                    ui.close();
+                    self.finish_merge();
                 }
-            });
-            let path = self
-                .output
-                .as_ref()
-                .map(|path| path.display().to_string())
-                .unwrap_or_else(|| "Merged result".into());
-            let dirty = self
-                .workspace
-                .as_ref()
-                .is_some_and(MergeWorkspace::is_dirty);
-            status_label(
-                ui,
-                &format!("{}{}", path, if dirty { " · Unsaved changes" } else { "" }),
-                palette.muted,
-            );
-        });
+                let target = self
+                    .output
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| {
+                        "the selected Base file, or Current when Base is blank".into()
+                    });
+                let save = ui
+                    .add_enabled(ready, egui::Button::new("Save"))
+                    .on_hover_text(format!(
+                        "Save the middle pane to {target}. Right-click for Save As."
+                    ));
+                if save.clicked() {
+                    self.save_result(ui.ctx(), false);
+                }
+                save.context_menu(|ui| {
+                    if ui
+                        .add_enabled(ready, egui::Button::new("Save As…"))
+                        .clicked()
+                    {
+                        self.save_result(ui.ctx(), true);
+                        ui.close();
+                    }
+                });
+            },
+        );
     }
 
     fn inputs(&mut self, ui: &mut egui::Ui) {
@@ -982,7 +1048,6 @@ impl MergeView {
             });
             if cancel {
                 self.overwrite = None;
-                self.finish_requested = false;
             }
             if confirm {
                 let (path, contents) = self.overwrite.take().unwrap();
@@ -1509,30 +1574,33 @@ mod tests {
     }
 
     #[test]
-    fn finishing_requires_successful_current_snapshot_and_keeps_edits_on_failure() {
-        let ctx = egui::Context::default();
+    fn finish_never_writes_and_requires_the_latest_result_to_be_saved() {
         let mut view = fixture();
-        view.finish_requested = true;
+        view.output = Some(PathBuf::from("result.txt"));
+        view.workspace
+            .as_mut()
+            .unwrap()
+            .edit_result("unsaved".into());
+        view.finish_merge();
+        assert!(!view.is_finished() && !view.is_saving());
+        assert!(view.error.is_some());
         view.accept_save_event(SaveEvent::Failed("write failed".into()));
-        assert!(!view.is_finished() && !view.finish_requested);
+        assert!(!view.is_finished());
         let snapshot = view.workspace.as_ref().unwrap().result().to_owned();
-        view.finish_requested = true;
         view.workspace
             .as_mut()
             .unwrap()
             .edit_result("newer edits".into());
         view.accept_save_event(SaveEvent::Complete(PathBuf::from("result.txt"), snapshot));
-        assert!(!view.is_finished());
+        view.finish_merge();
+        assert!(!view.is_finished() && !view.is_saving());
         assert!(view.workspace.as_ref().unwrap().is_dirty());
-        view.finish_requested = true;
         view.accept_save_event(SaveEvent::Complete(
             PathBuf::from("result.txt"),
             "newer edits".into(),
         ));
-        assert!(view.is_finished());
-        let mut view = fixture();
-        view.output = Some(PathBuf::from("already-saved.txt"));
-        view.finish_merge(&ctx);
+        assert!(!view.is_finished());
+        view.finish_merge();
         assert!(view.is_finished() && !view.is_saving());
     }
 
@@ -1915,5 +1983,138 @@ mod tests {
             assert!(app.native_drag_position.is_none());
         }
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn save_button_targets_current_or_selected_ancestor_and_edits_remain_in_memory() {
+        for select_base in [false, true] {
+            let directory = temp_directory();
+            let incoming = directory.join("incoming.txt");
+            let current = directory.join("current.txt");
+            let base = directory.join("ancestor.txt");
+            for (path, text) in [
+                (&incoming, "incoming\r\n"),
+                (&current, "current\r\n"),
+                (&base, "ancestor\r\n"),
+            ] {
+                std::fs::write(path, text).unwrap();
+            }
+            let ctx = egui::Context::default();
+            apply_theme(&ctx);
+            let mut view = MergeView::default();
+            view.set_sources([Some(incoming.clone()), Some(current.clone())]);
+            if select_base {
+                view.paths[1] = base.to_string_lossy().into_owned();
+                view.native_paths[1] = Some(base.clone());
+            }
+            view.open(&ctx);
+            settle(&mut view, &ctx);
+            let target = if select_base { &base } else { &current };
+            assert_eq!(view.output.as_ref(), Some(target));
+            assert_eq!(view.workspace.as_ref().unwrap().is_dirty(), select_base);
+            let merged = "\u{feff}merged\r\n日本語\nlast";
+            view.workspace.as_mut().unwrap().edit_result(merged.into());
+            view.workspace
+                .as_mut()
+                .unwrap()
+                .accept_all(MergeSide::Current);
+            view.workspace.as_mut().unwrap().undo();
+            view.finish_merge();
+            assert!(!view.is_finished() && !view.is_saving());
+            assert_eq!(std::fs::read_to_string(&incoming).unwrap(), "incoming\r\n");
+            assert_eq!(std::fs::read_to_string(&current).unwrap(), "current\r\n");
+            assert_eq!(std::fs::read_to_string(&base).unwrap(), "ancestor\r\n");
+            let output = render(&mut view, &ctx, Vec::new());
+            click(&mut view, &ctx, text_center(&output, "Save"));
+            settle(&mut view, &ctx);
+            assert_eq!(&view.overwrite.as_ref().unwrap().0, target);
+            assert_ne!(std::fs::read_to_string(target).unwrap(), merged);
+            // Existing-file replacement remains an explicit confirmation.
+            render(&mut view, &ctx, Vec::new()).drop_without_applying_deltas();
+            let output = render(&mut view, &ctx, Vec::new());
+            click(&mut view, &ctx, text_center(&output, "Replace file"));
+            settle(&mut view, &ctx);
+            assert_eq!(std::fs::read_to_string(target).unwrap(), merged);
+            assert!(!view.workspace.as_ref().unwrap().is_dirty());
+            assert_eq!(view.output.as_ref(), Some(target));
+            assert_eq!(std::fs::read_to_string(&incoming).unwrap(), "incoming\r\n");
+            if select_base {
+                assert_eq!(std::fs::read_to_string(&current).unwrap(), "current\r\n");
+            } else {
+                assert_eq!(std::fs::read_to_string(&base).unwrap(), "ancestor\r\n");
+            }
+            view.finish_merge();
+            assert!(view.is_finished() && !view.is_saving());
+            std::fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
+    #[test]
+    fn save_as_copy_does_not_retarget_save_or_clear_unsaved_destination_changes() {
+        let mut view = fixture();
+        let target = PathBuf::from("current.txt");
+        view.output = Some(target.clone());
+        view.workspace
+            .as_mut()
+            .unwrap()
+            .edit_result("changed".into());
+        view.accept_save_event(SaveEvent::Complete(
+            PathBuf::from("exported-copy.txt"),
+            "changed".into(),
+        ));
+        assert_eq!(view.output.as_ref(), Some(&target));
+        assert!(view.workspace.as_ref().unwrap().is_dirty());
+        view.finish_merge();
+        assert!(!view.is_finished() && !view.is_saving());
+    }
+
+    #[test]
+    fn unsaved_label_is_left_aligned_and_uses_highlight_color_in_both_themes() {
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            for (width, height) in [(900.0, 650.0), (1200.0, 800.0)] {
+                let ctx = egui::Context::default();
+                set_theme(&ctx, theme);
+                let mut view = fixture();
+                view.output = Some(PathBuf::from("current.txt"));
+                view.workspace
+                    .as_mut()
+                    .unwrap()
+                    .edit_result("unsaved".into());
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(
+                            Pos2::ZERO,
+                            egui::vec2(width, height),
+                        )),
+                        ..Default::default()
+                    },
+                    |ui| view.render(ui),
+                );
+                output.textures_delta.clear();
+                let text = output
+                    .shapes
+                    .iter()
+                    .find_map(|shape| match &shape.shape {
+                        egui::Shape::Text(text) if text.galley.text() == "Unsaved Changes" => {
+                            Some(text)
+                        }
+                        _ => None,
+                    })
+                    .unwrap();
+                assert!(text.pos.x < 15.0);
+                assert!(text.pos.y > height - 35.0);
+                assert_eq!(
+                    text.galley.job.sections[0].format.color,
+                    Palette::for_context(&ctx).changed
+                );
+                let save = text_center(&output, "Save");
+                let finish = text_center(&output, "Finish Merge");
+                assert!(text.pos.x + text.galley.size().x < save.x && save.x < finish.x);
+                assert!(save.x > width * 0.7);
+                view.workspace.as_mut().unwrap().mark_saved();
+                let clean = render(&mut view, &ctx, Vec::new());
+                assert!(!clean.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == "Unsaved Changes")));
+            }
+        }
     }
 }

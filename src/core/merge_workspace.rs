@@ -325,7 +325,10 @@ pub fn load_merge_workspace(
     if cancelled(cancellation) {
         return Ok(None);
     }
-    let workspace = MergeWorkspace::new(base.as_deref(), &incoming, &current_text);
+    let mut workspace = MergeWorkspace::new(base.as_deref(), &incoming, &current_text);
+    // The GUI saves to Base when selected, otherwise Current. Dirty state must
+    // compare the middle buffer against the file that Save will actually replace.
+    workspace.mark_saved_result(base.as_deref().unwrap_or(&current_text));
     Ok((!cancelled(cancellation)).then_some(workspace))
 }
 
