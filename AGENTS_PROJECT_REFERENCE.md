@@ -96,6 +96,26 @@ APIs and must fail cleanly when unavailable.
   `scripts/package-source-offline.sh` packages the offline source release.
 - `.github/workflows/ci.yml` checks Windows and Linux builds; `release.yml` builds
   tagged portable artifacts and the offline source archive.
+- Both workflows build separate native Linux artifacts for glibc 2.35 (Ubuntu
+  22.04) and glibc 2.28 (Rocky 8.10) through `scripts/build-linux.sh`. Artifact and
+  release filenames include the baseline so outputs cannot collide.
+  `scripts/package-linux.sh` takes the baseline explicitly, bundles dynamically
+  loaded window libraries, and checks the finished AppImage/runtime and bundled
+  ELF files with `scripts/check-linux-compatibility.py`. Each baseline runs Rust
+  tests, release compilation, packaged CLI checks and an Xvfb GUI startup test.
+  The 2.28 AppImage adds automatic compatibility mode for X11 servers without
+  XInput2, using a small capability probe and a private authenticated Xephyr
+  display with software rendering. Modern displays retain the native path;
+  private graphics libraries must stay isolated from ordinary launches.
+  `--compat-x11` explicitly selects the fallback. The plain executable and 2.35
+  AppImage use host graphics. Rocky CI tests automatic selection through nxagent,
+  resizing, input, browsing, authentication and cleanup with host runtime files
+  hidden. Preserve these tests, runtime license/source inventory, and both glibc
+  checks when changing Linux packaging. Original Rocky crypto libraries and their
+  vendor HMAC sidecars (including GMP’s `fipscheck/` file) must remain byte-identical.
+  Final package verification and forced vendor FIPS self-tests (including negative controls and the nxagent GUI)
+  run in CI. FIPS activation hooks are test-only; runtime host policy is preserved.
+  Clipboard and file drops across the private-display boundary are not bridged.
 
 ## Architectural constraints
 
