@@ -2354,11 +2354,14 @@ impl VersusApp {
             .max_height(height)
             .show(ui, |ui| {
                 ui.add_space(8.0);
-                ui.label(
-                    RichText::new("Recently compared")
-                        .size(12.0)
-                        .color(palette.muted),
-                );
+                ui.horizontal(|ui| {
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new("Recently compared")
+                            .size(14.0)
+                            .color(palette.muted),
+                    );
+                });
                 ui.add_space(6.0);
                 if let Some(message) = &self.recent_message {
                     ui.colored_label(palette.error, message);
@@ -2526,9 +2529,10 @@ fn recent_comparison_row(
         .each_ref()
         .map(|path| path.display().to_string());
     let font = egui::TextStyle::Body.resolve(ui.style());
+    let separator_font = FontId::new(font.size + 2.0, font.family.clone());
     let separator = ui
         .painter()
-        .layout_no_wrap("vs".into(), font.clone(), palette.text);
+        .layout_no_wrap("vs".into(), separator_font, palette.text);
     let padding = 8.0;
     let gap = 10.0;
     let available =
@@ -2588,9 +2592,18 @@ fn recent_comparison_row(
             egui::StrokeKind::Inside,
         );
     }
-    let left = rect.min + egui::vec2(padding, padding);
-    let versus = left + egui::vec2(labels[0].size().x + gap, 0.0);
-    let right = versus + egui::vec2(separator.size().x + gap, 0.0);
+    let left = egui::pos2(
+        rect.left() + padding,
+        rect.center().y - labels[0].size().y / 2.0,
+    );
+    let versus = egui::pos2(
+        left.x + labels[0].size().x + gap,
+        rect.center().y - separator.size().y / 2.0,
+    );
+    let right = egui::pos2(
+        versus.x + separator.size().x + gap,
+        rect.center().y - labels[1].size().y / 2.0,
+    );
     painter.galley(left, labels[0].clone(), palette.text);
     // Egui's default proportional font has no bold face. A small overprint gives
     // just the separator a heavier weight without adding a font dependency.
