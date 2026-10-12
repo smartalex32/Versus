@@ -141,6 +141,31 @@ impl FolderTree {
         rows
     }
 
+    /// Returns every non-root node in the same depth-first order as
+    /// [`Self::visible_rows`], regardless of the current expansion state.
+    pub fn all_rows(&self) -> Vec<VisibleTreeRow<'_>> {
+        let mut rows = Vec::new();
+        Self::collect_all(&self.root, 0, &mut rows);
+        rows
+    }
+
+    /// Reveals `relative_path` by expanding every expandable ancestor. Returns
+    /// `true` when the target exists in this tree.
+    pub fn expand_parents(&mut self, relative_path: impl AsRef<Path>) -> bool {
+        let relative_path = relative_path.as_ref();
+        let Some(target) = find_node(&self.root, relative_path) else {
+            return false;
+        };
+        let mut ancestor = target.relative_path.parent();
+        while let Some(path) = ancestor {
+            if !path.as_os_str().is_empty() {
+                self.expanded.insert(path.to_path_buf());
+            }
+            ancestor = path.parent();
+        }
+        true
+    }
+
     fn collect_visible<'a>(
         &'a self,
         parent: &'a TreeNode,
@@ -154,6 +179,27 @@ impl FolderTree {
             }
         }
     }
+
+    fn collect_all<'a>(parent: &'a TreeNode, depth: usize, rows: &mut Vec<VisibleTreeRow<'a>>) {
+        for child in &parent.children {
+            rows.push(VisibleTreeRow { node: child, depth });
+            Self::collect_all(child, depth + 1, rows);
+        }
+    }
+}
+
+fn find_node<'a>(root: &'a TreeNode, relative_path: &Path) -> Option<&'a TreeNode> {
+    if relative_path.as_os_str().is_empty() {
+        return Some(root);
+    }
+    let mut current = root;
+    for component in relative_path.components() {
+        current = current
+            .children
+            .iter()
+            .find(|child| child.name == component.as_os_str())?;
+    }
+    Some(current)
 }
 
 fn aggregate_child_size(

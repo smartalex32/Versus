@@ -189,6 +189,106 @@ pub fn buffered_files_equal_cancellable(
     }
 }
 
+/// Compares files as bounded UTF-8 text when an ignore option is active. Files
+/// that are binary, invalid UTF-8, or larger than [`DEFAULT_TEXT_SIZE_LIMIT`]
+/// retain the regular byte-comparison behavior.
+///
+/// `Ok(None)` means cancellation was requested. Reads are performed in bounded
+/// chunks, with cancellation checked between chunks.
+pub(crate) fn files_equal_with_ignores_cancellable(
+    left: impl AsRef<Path>,
+    right: impl AsRef<Path>,
+    buffer_size: usize,
+    ignore_whitespace: bool,
+    ignore_line_endings: bool,
+    cancellation: Option<&AtomicBool>,
+) -> Result<Option<bool>, CompareError> {
+    let left = left.as_ref();
+    let right = right.as_ref();
+    // Equal bytes are equal under every ignore rule. Avoid decoding and
+    // allocating normalized copies for the unchanged majority of a folder.
+    let exact = buffered_files_equal_cancellable(left, right, buffer_size, cancellation)?;
+    if exact != Some(false) || (!ignore_whitespace && !ignore_line_endings) {
+        return Ok(exact);
+    }
+    let left_len = fs::metadata(left)
+        .map_err(|error| CompareError::io(left, error))?
+        .len();
+    let right_len = fs::metadata(right)
+        .map_err(|error| CompareError::io(right, error))?
+        .len();
+    if left_len > DEFAULT_TEXT_SIZE_LIMIT || right_len > DEFAULT_TEXT_SIZE_LIMIT {
+        return Ok(if is_cancelled(cancellation) {
+            None
+        } else {
+            exact
+        });
+    }
+    let Some(left_text) = read_bounded_text_cancellable(left, left_len, buffer_size, cancellation)?
+    else {
+        return Ok(None);
+    };
+    let Some(right_text) =
+        read_bounded_text_cancellable(right, right_len, buffer_size, cancellation)?
+    else {
+        return Ok(None);
+    };
+    let (Some(left_text), Some(right_text)) = (left_text, right_text) else {
+        return Ok(if is_cancelled(cancellation) {
+            None
+        } else {
+            exact
+        });
+    };
+    if is_cancelled(cancellation) {
+        return Ok(None);
+    }
+    let options = FileCompareOptions {
+        buffer_size,
+        ignore_whitespace,
+        ignore_line_endings,
+        ..FileCompareOptions::default()
+    };
+    Ok(Some(
+        normalized(&left_text, &options) == normalized(&right_text, &options),
+    ))
+}
+
+/// The outer `Option` reports cancellation and the inner one reports binary or
+/// invalid UTF-8 data, which must fall back to a byte comparison.
+fn read_bounded_text_cancellable(
+    path: &Path,
+    length: u64,
+    buffer_size: usize,
+    cancellation: Option<&AtomicBool>,
+) -> Result<Option<Option<String>>, CompareError> {
+    let mut reader = BufReader::with_capacity(
+        buffer_size.max(1),
+        fs::File::open(path).map_err(|error| CompareError::io(path, error))?,
+    );
+    let mut bytes = Vec::with_capacity(length as usize);
+    let mut buffer = vec![0; buffer_size.max(1)];
+    loop {
+        if is_cancelled(cancellation) {
+            return Ok(None);
+        }
+        let read = reader
+            .read(&mut buffer)
+            .map_err(|error| CompareError::io(path, error))?;
+        if read == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&buffer[..read]);
+        if bytes.len() as u64 > DEFAULT_TEXT_SIZE_LIMIT {
+            return Ok(Some(None));
+        }
+    }
+    match decode_text(path, &bytes) {
+        Ok(text) => Ok(Some(Some(text))),
+        Err(_) => Ok(Some(None)),
+    }
+}
+
 fn is_cancelled(cancellation: Option<&AtomicBool>) -> bool {
     cancellation.is_some_and(|value| value.load(Ordering::Relaxed))
 }
@@ -213,31 +313,74 @@ pub(crate) fn decode_text(path: &Path, bytes: &[u8]) -> Result<String, CompareEr
     String::from_utf8(bytes.to_vec()).map_err(|_| CompareError::invalid_text(path))
 }
 pub(crate) fn display_lines(text: &str) -> Vec<String> {
-    text.split_inclusive('\n')
-        .map(|s| {
-            let line = s.strip_suffix('\n').unwrap_or(s);
-            line.strip_suffix('\r').unwrap_or(line).to_owned()
+    split_preserving_line_endings(text)
+        .into_iter()
+        .map(|line| {
+            line.strip_suffix("\r\n")
+                .or_else(|| line.strip_suffix('\n'))
+                .or_else(|| line.strip_suffix('\r'))
+                .unwrap_or(&line)
+                .to_owned()
         })
         .collect()
 }
 pub(crate) fn normalized(text: &str, options: &FileCompareOptions) -> Vec<String> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-    let source = if options.ignore_line_endings {
-        text.replace("\r\n", "\n").replace('\r', "\n")
-    } else {
-        text.to_owned()
-    };
-    source
-        .split_inclusive('\n')
-        .map(|line| {
-            let line = line.strip_suffix('\n').unwrap_or(line);
-            if options.ignore_whitespace {
-                line.chars().filter(|c| !c.is_whitespace()).collect()
-            } else {
-                line.to_owned()
-            }
-        })
+    if options.ignore_line_endings {
+        return text
+            .replace("\r\n", "\n")
+            .replace('\r', "\n")
+            .split_inclusive('\n')
+            .map(|line| {
+                normalize_inline_whitespace(line.strip_suffix('\n').unwrap_or(line), options)
+            })
+            .collect();
+    }
+    split_preserving_line_endings(text)
+        .into_iter()
+        .map(|line| normalize_inline_whitespace(&line, options))
         .collect()
+}
+
+fn normalize_inline_whitespace(line: &str, options: &FileCompareOptions) -> String {
+    if options.ignore_whitespace {
+        line.chars()
+            .filter(|character| !character.is_whitespace() || matches!(character, '\r' | '\n'))
+            .collect()
+    } else {
+        line.to_owned()
+    }
+}
+
+fn split_preserving_line_endings(text: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut start = 0;
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\n' => {
+                lines.push(text[start..=index].to_owned());
+                index += 1;
+                start = index;
+            }
+            b'\r' => {
+                let end = if bytes.get(index + 1) == Some(&b'\n') {
+                    index + 1
+                } else {
+                    index
+                };
+                lines.push(text[start..=end].to_owned());
+                index = end + 1;
+                start = index;
+            }
+            _ => index += 1,
+        }
+    }
+    if start < text.len() {
+        lines.push(text[start..].to_owned());
+    }
+    lines
 }
 pub(crate) fn build_hunks(left: &[String], right: &[String]) -> Vec<DiffHunk> {
     let left_refs: Vec<&str> = left.iter().map(String::as_str).collect();
@@ -270,6 +413,8 @@ pub(crate) fn build_hunks(left: &[String], right: &[String]) -> Vec<DiffHunk> {
                     has_delete = false;
                     has_insert = false;
                 }
+                end_left = change.old_index().unwrap_or(end_left) + 1;
+                end_right = change.new_index().unwrap_or(end_right) + 1;
             }
             ChangeTag::Delete => {
                 if !active {
