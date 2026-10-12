@@ -7584,22 +7584,23 @@ mod tests {
     fn folder_file_refresh_reports_inspection_errors_instead_of_an_empty_side() {
         let sources = SourceFixture::new();
         let ctx = egui::Context::default();
-        for side in ["left", "right"] {
-            std::fs::create_dir(sources.path(&format!("{side}/sub"))).unwrap();
-            std::fs::write(sources.path(&format!("{side}/sub/item.txt")), "contents\n").unwrap();
-        }
         let mut app = VersusApp::default();
         app.select_path(0, sources.path("left"));
         app.select_path(1, sources.path("right"));
         settle_sources(&mut app, &ctx);
-        app.open_file("sub/item.txt".into(), [true, true], false);
+        app.open_file("model.txt".into(), [true, true], false);
         settle_sources(&mut app, &ctx);
-        std::fs::remove_file(sources.path("right/sub/item.txt")).unwrap();
-        std::fs::remove_dir(sources.path("right/sub")).unwrap();
-        std::fs::write(sources.path("right/sub"), "now a file").unwrap();
+        // A child below a regular file is NotADirectory on Unix but NotFound on
+        // Windows. An embedded NUL produces a genuine inspection error on both.
+        let invalid_path = sources.path("right/invalid\0path.txt");
+        let inspection_error = std::fs::symlink_metadata(&invalid_path).unwrap_err();
+        assert_eq!(inspection_error.kind(), std::io::ErrorKind::InvalidInput);
+        let previous = app.file_view.as_ref().unwrap().comparison.clone();
+        app.file_view.as_mut().unwrap().paths[1] = invalid_path;
         app.refresh_file();
         settle_sources(&mut app, &ctx);
         assert!(app.file_view.as_ref().unwrap().error.is_some());
+        assert_eq!(app.file_view.as_ref().unwrap().comparison, previous);
     }
 
     #[test]
