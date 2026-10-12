@@ -38,6 +38,8 @@ APIs and must fail cleanly when unavailable.
 - `src/recent.rs` stores up to 20 recent file/folder source pairs in a bounded,
   versioned per-user local file, preserving native path bytes. The startup/New
   comparison screen offers one-click reopening through background classification.
+  Recent rows show only the active file/folder mode as left-aligned path pairs
+  with a bold vs separator and alternating neutral backgrounds.
   History IO runs on a serialized worker and queued writes finish on close; paths
   are recorded once both sources are classified, even if the comparison is still
   loading. File contents are never persisted. No new dependencies are required.

@@ -2342,47 +2342,42 @@ impl VersusApp {
     fn recent_area(&mut self, ui: &mut egui::Ui, height: f32) {
         let palette = Palette::for_context(ui.ctx());
         let mut open = None;
+        let entries: Vec<_> = self
+            .recent
+            .entries()
+            .iter()
+            .filter(|entry| entry.mode == self.comparison_mode)
+            .collect();
         egui::ScrollArea::vertical()
-            .id_salt("recent-comparisons")
+            .id_salt(("recent-comparisons", self.comparison_mode.source_label()))
             .auto_shrink([false, false])
             .max_height(height)
             .show(ui, |ui| {
-                ui.add_space(12.0);
-                ui.heading("Recently compared");
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new("Recently compared")
+                        .size(12.0)
+                        .color(palette.muted),
+                );
                 ui.add_space(6.0);
                 if let Some(message) = &self.recent_message {
                     ui.colored_label(palette.error, message);
                     ui.add_space(6.0);
                 }
-                if self.recent.entries().is_empty() {
+                if entries.is_empty() {
                     ui.label(
-                        RichText::new(
-                            "Your recent file and folder comparisons will appear here. Choose two sources above to begin.",
-                        )
+                        RichText::new(format!(
+                            "No recent {} comparisons.",
+                            self.comparison_mode.source_label()
+                        ))
                         .color(palette.muted),
                     );
                 }
-                for (index, entry) in self.recent.entries().iter().enumerate() {
-                    ui.push_id(("recent-comparison", index), |ui| {
-                        let text = format!(
-                            "{}\nLEFT   {}\nRIGHT  {}",
-                            entry.mode.label(),
-                            entry.paths[0].display(),
-                            entry.paths[1].display()
-                        );
-                        let response = ui
-                            .add_sized(
-                                [ui.available_width(), 64.0],
-                                egui::Button::new(text)
-                                    .wrap()
-                                    .min_size(egui::vec2(0.0, 64.0)),
-                            )
-                            .on_hover_text("Recompare these sources");
-                        if response.clicked() {
-                            open = Some(entry.clone());
-                        }
-                    });
-                    ui.add_space(6.0);
+                ui.spacing_mut().item_spacing.y = 0.0;
+                for (index, entry) in entries.into_iter().enumerate() {
+                    if recent_comparison_row(ui, entry, index, palette).clicked() {
+                        open = Some(entry.clone());
+                    }
                 }
             });
         if let Some(entry) = open {
@@ -2518,6 +2513,96 @@ fn control_extent(ui: &egui::Ui) -> f32 {
 
 fn comparison_font(ctx: &egui::Context) -> FontId {
     egui::TextStyle::Monospace.resolve(&ctx.style_of(ctx.theme()))
+}
+
+fn recent_comparison_row(
+    ui: &mut egui::Ui,
+    entry: &RecentComparison,
+    index: usize,
+    palette: Palette,
+) -> egui::Response {
+    let paths = entry
+        .paths
+        .each_ref()
+        .map(|path| path.display().to_string());
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let separator = ui
+        .painter()
+        .layout_no_wrap("vs".into(), font.clone(), palette.text);
+    let padding = 8.0;
+    let gap = 10.0;
+    let available =
+        (ui.available_width() - padding * 2.0 - gap * 2.0 - separator.size().x).max(1.0);
+    let mut labels = paths.each_ref().map(|path| {
+        ui.painter()
+            .layout_no_wrap(path.clone(), font.clone(), palette.text)
+    });
+    if labels.iter().map(|label| label.size().x).sum::<f32>() > available {
+        // Keep both paths readable at narrow widths instead of hiding one side.
+        labels = paths.each_ref().map(|path| {
+            ui.painter()
+                .layout(path.clone(), font.clone(), palette.text, available / 2.0)
+        });
+    }
+    let height = labels
+        .iter()
+        .map(|label| label.size().y)
+        .fold(separator.size().y, f32::max)
+        + padding * 2.0;
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(
+            ui.available_width(),
+            height.max(ui.spacing().interact_size.y),
+        ),
+        Sense::hover(),
+    );
+    let response = ui.interact(
+        rect,
+        egui::Id::new(("recent-comparison", entry.mode.source_label(), index)),
+        Sense::click(),
+    );
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::WidgetType::Button,
+            ui.is_enabled(),
+            format!("{} vs {}", paths[0], paths[1]),
+        )
+    });
+    let painter = ui.painter().with_clip_rect(rect);
+    painter.rect_filled(
+        rect,
+        0,
+        if response.hovered() || response.is_pointer_button_down_on() {
+            palette.hover
+        } else if index % 2 == 0 {
+            palette.panel
+        } else {
+            palette.alternate
+        },
+    );
+    if response.has_focus() {
+        painter.rect_stroke(
+            rect,
+            0,
+            Stroke::new(1.0, palette.accent),
+            egui::StrokeKind::Inside,
+        );
+    }
+    let left = rect.min + egui::vec2(padding, padding);
+    let versus = left + egui::vec2(labels[0].size().x + gap, 0.0);
+    let right = versus + egui::vec2(separator.size().x + gap, 0.0);
+    painter.galley(left, labels[0].clone(), palette.text);
+    // Egui's default proportional font has no bold face. A small overprint gives
+    // just the separator a heavier weight without adding a font dependency.
+    painter.galley(versus, separator.clone(), palette.text);
+    painter.galley(versus + egui::vec2(0.5, 0.0), separator, palette.text);
+    painter.galley(right, labels[1].clone(), palette.text);
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(format!(
+            "{} vs {}\nRecompare these sources",
+            paths[0], paths[1]
+        ))
 }
 
 fn absolute_path(path: &str) -> PathBuf {
@@ -7537,13 +7622,11 @@ mod tests {
             app.new_comparison();
             let output = render(&mut app, &ctx, vec![]);
             assert_eq!(text_positions(&output, "Recently compared").len(), 1);
-            let row_text = format!(
-                "{}\nLEFT   {}\nRIGHT  {}",
-                mode.label(),
-                paths[0].display(),
-                paths[1].display()
-            );
-            let target = text_centers(&output, &row_text)[0];
+            let target = ctx
+                .read_response(egui::Id::new(("recent-comparison", mode.source_label(), 0)))
+                .unwrap()
+                .rect
+                .center();
             output.drop_without_applying_deltas();
             click(&mut app, &ctx, target);
             settle_sources(&mut app, &ctx);
@@ -7551,6 +7634,84 @@ mod tests {
             assert_eq!(app.comparison_paths(), paths);
             assert_eq!(app.recent.entries().len(), 1);
         }
+    }
+
+    #[test]
+    fn recent_list_filters_by_mode_and_uses_plain_alternating_rows() {
+        for theme in [egui::Theme::Light, egui::Theme::Dark] {
+            let ctx = egui::Context::default();
+            apply_theme(&ctx);
+            set_theme(&ctx, theme);
+            let mut app = VersusApp::default();
+            for (mode, name) in [
+                (ComparisonMode::Folder, "folder-old"),
+                (ComparisonMode::File, "file-old"),
+                (ComparisonMode::Folder, "folder-new"),
+                (ComparisonMode::File, "file-new"),
+            ] {
+                app.recent.record(
+                    mode,
+                    [
+                        format!("/{name}/left").into(),
+                        format!("/{name}/right").into(),
+                    ],
+                );
+            }
+            for (mode, visible, hidden) in [
+                (ComparisonMode::Folder, "folder", "file"),
+                (ComparisonMode::File, "file", "folder"),
+            ] {
+                app.switch_comparison_mode(mode);
+                let output = render(&mut app, &ctx, vec![]);
+                let palette = Palette::for_context(&ctx);
+                let mut positions = Vec::new();
+                for (index, age, fill) in [(0, "new", palette.panel), (1, "old", palette.alternate)]
+                {
+                    let left = text_positions(&output, &format!("/{visible}-{age}/left"));
+                    let right = text_positions(&output, &format!("/{visible}-{age}/right"));
+                    assert_eq!(left.len(), 1);
+                    assert_eq!(right.len(), 1);
+                    assert_eq!(left[0].y, right[0].y);
+                    let row = ctx
+                        .read_response(egui::Id::new((
+                            "recent-comparison",
+                            mode.source_label(),
+                            index,
+                        )))
+                        .unwrap()
+                        .rect;
+                    assert!(left[0].x < row.center().x && right[0].x > left[0].x);
+                    assert!(output.shapes.iter().any(|shape| {
+                        matches!(&shape.shape, egui::Shape::Rect(shape) if shape.rect == row && shape.fill == fill && shape.stroke == Stroke::NONE)
+                    }));
+                    assert!(text_positions(&output, &format!("/{hidden}-{age}/left")).is_empty());
+                    assert!(text_positions(&output, &format!("/{hidden}-{age}/right")).is_empty());
+                    positions.push(left[0]);
+                }
+                assert_eq!(positions[0].x, positions[1].x);
+                assert!(positions[0].y < positions[1].y);
+                output.drop_without_applying_deltas();
+            }
+        }
+    }
+
+    #[test]
+    fn recent_list_shows_an_empty_message_for_the_active_mode() {
+        let ctx = egui::Context::default();
+        let mut app = VersusApp::default();
+        app.recent.record(
+            ComparisonMode::Folder,
+            ["/left/folder".into(), "/right/folder".into()],
+        );
+        app.switch_comparison_mode(ComparisonMode::File);
+        let output = render(&mut app, &ctx, vec![]);
+        assert_eq!(
+            text_positions(&output, "No recent file comparisons.").len(),
+            1
+        );
+        assert!(text_positions(&output, "/left/folder").is_empty());
+        assert!(text_positions(&output, "/right/folder").is_empty());
+        output.drop_without_applying_deltas();
     }
 
     #[test]

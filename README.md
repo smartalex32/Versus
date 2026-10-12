@@ -17,6 +17,8 @@ Compare opens the line comparison without a Back button.
 
 The **Recently compared** list appears when Versus opens and after **New
 comparison**. Click a file or folder pair to recompare it without browsing again.
+The list shows only the active comparison type, with left-aligned path pairs
+separated by a bold **vs** and subtle alternating row backgrounds.
 The 20 most recent pairs are saved locally per user, newest first; reopening a
 pair moves it to the top. Paths and comparison type are saved, never file contents.
 Unavailable or changed sources show an error and can be selected again.
