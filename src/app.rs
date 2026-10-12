@@ -1096,26 +1096,7 @@ impl VersusApp {
     }
 
     fn drag_and_drop(&mut self, ui: &mut egui::Ui) {
-        let (hovering, frame_position, retained_position) = ui.input(|input| {
-            (
-                !input.raw.hovered_files.is_empty(),
-                // A position delivered with Drop is more precise than a later
-                // live-cursor sample taken when the UI redraws.
-                input.raw.events.iter().rev().find_map(|event| match event {
-                    egui::Event::PointerMoved(position) => Some(*position),
-                    _ => None,
-                }),
-                // Native drags can report PointerGone after the drag position
-                // in the same frame. Keep that position for hit testing the drop.
-                input.pointer.interact_pos(),
-            )
-        });
-        let position = frame_position
-            .or(self.native_drag_position.take())
-            .or(retained_position);
-        let dropped = ui
-            .ctx()
-            .input_mut(|input| std::mem::take(&mut input.raw.dropped_files));
+        let (hovering, position, dropped) = native_drop_frame(ui, self.native_drag_position.take());
         let side =
             position.and_then(|pos| self.pane_rects.iter().position(|rect| rect.contains(pos)));
         if hovering {
@@ -1128,38 +1109,13 @@ impl VersusApp {
                 self.drop_hover_side = side;
             }
             if let Some(side) = side.or(self.drop_hover_side) {
-                let rect = self.pane_rects[side].shrink(3.0);
-                let palette = Palette::for_context(ui.ctx());
-                // Draw above the empty-state text and rows. Native
-                // drops are hit-tested by geometry, not intercepted by widgets.
-                let painter = ui.ctx().layer_painter(egui::LayerId::new(
-                    egui::Order::Foreground,
-                    egui::Id::new("native-drop-highlight"),
-                ));
-                painter.rect_filled(rect, 4, palette.accent.gamma_multiply(0.1));
-                painter.rect_stroke(
-                    rect,
-                    4,
-                    Stroke::new(3.0, palette.accent),
-                    egui::StrokeKind::Inside,
-                );
-                let label = painter.layout_no_wrap(
-                    format!(
+                paint_native_drop_highlight(
+                    ui.ctx(),
+                    self.pane_rects[side],
+                    &format!(
                         "Drop a file or folder on {}",
                         if side == 0 { "LEFT" } else { "RIGHT" }
                     ),
-                    FontId::proportional(16.0),
-                    palette.text,
-                );
-                let label_rect = Rect::from_center_size(
-                    egui::pos2(rect.center().x, rect.top() + 64.0),
-                    label.size() + egui::vec2(24.0, 16.0),
-                );
-                painter.rect_filled(label_rect, 4, palette.panel);
-                painter.galley(
-                    label_rect.center() - label.size() * 0.5,
-                    label,
-                    palette.text,
                 );
             }
         }
@@ -1310,7 +1266,9 @@ impl VersusApp {
                     self.footer(ui);
                 });
             });
-        if self.merge_view.is_none() {
+        if let Some(view) = &mut self.merge_view {
+            view.drag_and_drop(ui, self.native_drag_position.take());
+        } else {
             self.drag_and_drop(ui);
         }
         self.merge_exit_dialog(ui.ctx());
@@ -3707,6 +3665,72 @@ fn paint_icon(
     }
 }
 
+// Shared by compare and merge so native targeting and feedback stay consistent.
+fn native_drop_frame(
+    ui: &egui::Ui,
+    native_position: Option<Pos2>,
+) -> (bool, Option<Pos2>, Vec<egui::DroppedFileHandle>) {
+    let (hovering, frame_position, retained_position) = ui.input(|input| {
+        (
+            !input.raw.hovered_files.is_empty(),
+            input.raw.events.iter().rev().find_map(|event| match event {
+                egui::Event::PointerMoved(position) => Some(*position),
+                _ => None,
+            }),
+            input.pointer.interact_pos(),
+        )
+    });
+    let position = frame_position.or(native_position).or(retained_position);
+    let dropped = ui
+        .ctx()
+        .input_mut(|input| std::mem::take(&mut input.raw.dropped_files));
+    (hovering, position, dropped)
+}
+
+fn paint_drop_outline(painter: &egui::Painter, target: Rect, color: Color32) {
+    let corners = [
+        target.left_top(),
+        target.right_top(),
+        target.right_bottom(),
+        target.left_bottom(),
+        target.left_top(),
+    ];
+    painter.extend(egui::Shape::dashed_line(
+        &corners,
+        Stroke::new(1.0, color),
+        6.0,
+        4.0,
+    ));
+}
+
+fn paint_native_drop_highlight(ctx: &egui::Context, pane: Rect, message: &str) {
+    let rect = pane.shrink(3.0);
+    let palette = Palette::for_context(ctx);
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("native-drop-highlight"),
+    ));
+    painter.rect_filled(rect, 4, palette.accent.gamma_multiply(0.1));
+    painter.rect_stroke(
+        rect,
+        4,
+        Stroke::new(3.0, palette.accent),
+        egui::StrokeKind::Inside,
+    );
+    let label =
+        painter.layout_no_wrap(message.to_owned(), FontId::proportional(16.0), palette.text);
+    let label_rect = Rect::from_center_size(
+        egui::pos2(rect.center().x, rect.top() + 64.0),
+        label.size() + egui::vec2(24.0, 16.0),
+    );
+    painter.rect_filled(label_rect, 4, palette.panel);
+    painter.galley(
+        label_rect.center() - label.size() * 0.5,
+        label,
+        palette.text,
+    );
+}
+
 fn empty_display(ui: &mut egui::Ui, height: f32, title: &str, subtitle: &str) {
     let palette = Palette::for_context(ui.ctx());
     let (rect, _) = ui.allocate_exact_size(
@@ -3722,19 +3746,7 @@ fn empty_display(ui: &mut egui::Ui, height: f32, title: &str, subtitle: &str) {
         let chooser = title.starts_with("Choose ");
         for (side, half) in split_rect(rect).into_iter().enumerate() {
             let target = half.shrink(8.0);
-            let corners = [
-                target.left_top(),
-                target.right_top(),
-                target.right_bottom(),
-                target.left_bottom(),
-                target.left_top(),
-            ];
-            painter.extend(egui::Shape::dashed_line(
-                &corners,
-                Stroke::new(1.0, palette.border),
-                6.0,
-                4.0,
-            ));
+            paint_drop_outline(&painter, target, palette.border);
             ui.interact(
                 target,
                 ui.id().with(("empty-drop-target", side)),

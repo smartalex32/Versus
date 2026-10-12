@@ -308,22 +308,24 @@ pub fn load_merge_workspace(
     if cancelled(cancellation) {
         return Ok(None);
     }
+    let incoming = read_merge_text(incoming, cancellation)?;
+    if cancelled(cancellation) {
+        return Ok(None);
+    }
+    let current_text = read_merge_text(current, cancellation)?;
+    if cancelled(cancellation) {
+        return Ok(None);
+    }
+    // A Current-as-Base merge must use one consistent file snapshot.
     let base = match base {
+        Some(path) if path == current => Some(current_text.clone()),
         Some(path) => Some(read_merge_text(path, cancellation)?),
         None => None,
     };
     if cancelled(cancellation) {
         return Ok(None);
     }
-    let incoming = read_merge_text(incoming, cancellation)?;
-    if cancelled(cancellation) {
-        return Ok(None);
-    }
-    let current = read_merge_text(current, cancellation)?;
-    if cancelled(cancellation) {
-        return Ok(None);
-    }
-    let workspace = MergeWorkspace::new(base.as_deref(), &incoming, &current);
+    let workspace = MergeWorkspace::new(base.as_deref(), &incoming, &current_text);
     Ok((!cancelled(cancellation)).then_some(workspace))
 }
 

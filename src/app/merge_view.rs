@@ -52,6 +52,12 @@ pub(super) struct MergeView {
     path_edits: [bool; 3],
     finish_requested: bool,
     finished: bool,
+    pane_rects: Option<[Rect; 3]>,
+    drop_hover_side: Option<usize>,
+    drop_job: Option<(SourceJob, usize, PathBuf)>,
+    navigation_row: Option<usize>,
+    navigation_scroll_pending: bool,
+    row_height: f32,
 }
 
 impl MergeView {
@@ -90,7 +96,11 @@ impl MergeView {
     fn open(&mut self, ctx: &egui::Context) {
         let incoming = self.source_path(0);
         let current = self.source_path(2);
-        let base = (!self.paths[1].is_empty()).then(|| self.source_path(1));
+        let base = Some(if self.paths[1].is_empty() {
+            current.clone()
+        } else {
+            self.source_path(1)
+        });
         let cancellation = Arc::new(AtomicBool::new(false));
         let cancelled = cancellation.clone();
         let (sender, receiver) = mpsc::channel();
@@ -126,6 +136,34 @@ impl MergeView {
     }
 
     pub(super) fn poll(&mut self, ctx: &egui::Context) {
+        let dropped =
+            self.drop_job
+                .as_ref()
+                .and_then(|(job, _, _)| match job.receiver.try_recv() {
+                    Ok(result) => Some(result),
+                    Err(TryRecvError::Disconnected) => {
+                        Some(Err("Cannot inspect dropped file: worker stopped.".into()))
+                    }
+                    Err(TryRecvError::Empty) => None,
+                });
+        if let Some(result) = dropped {
+            let (_, side, path) = self.drop_job.take().unwrap();
+            match result {
+                Ok(SourceKind::File) => {
+                    self.load = None;
+                    self.paths[side] = path.to_string_lossy().into_owned();
+                    self.native_paths[side] = Some(path);
+                    self.path_edits[side] = false;
+                    self.start_requested = true;
+                    self.error = None;
+                }
+                Ok(_) => {
+                    self.error =
+                        Some("Merge requires a regular file, not a folder or symlink.".into())
+                }
+                Err(error) => self.error = Some(error),
+            }
+        }
         let loaded = self
             .load
             .as_ref()
@@ -150,6 +188,8 @@ impl MergeView {
                     self.output = None;
                     self.generation += 1;
                     self.scroll_y = 0.0;
+                    self.navigation_row = None;
+                    self.navigation_scroll_pending = false;
                     self.message = "Choose arrows or edit the result, then Save.".into();
                 }
                 Ok(None) => {
@@ -176,7 +216,7 @@ impl MergeView {
             self.save = None;
             self.accept_save_event(event);
         }
-        if self.load.is_some() || self.save.is_some() {
+        if self.load.is_some() || self.save.is_some() || self.drop_job.is_some() {
             ctx.request_repaint_after(Duration::from_millis(60));
         }
     }
@@ -273,6 +313,7 @@ impl MergeView {
             && !self.paths[2].is_empty()
             && self.load.is_none()
             && !self.is_saving()
+            && self.drop_job.is_none()
     }
 
     fn restore_loaded_sources(&mut self) {
@@ -281,6 +322,105 @@ impl MergeView {
             self.native_paths = self.loaded_native_paths.clone().unwrap_or_default();
             self.path_edits = [false; 3];
             self.start_requested = false;
+        }
+    }
+
+    pub(super) fn drag_and_drop(&mut self, ui: &mut egui::Ui, native_position: Option<Pos2>) {
+        let (hovering, position, dropped) = native_drop_frame(ui, native_position);
+        let side = position.and_then(|position| {
+            self.pane_rects
+                .and_then(|rects| rects.iter().position(|rect| rect.contains(position)))
+        });
+        if hovering {
+            if cfg!(windows) {
+                ui.ctx().request_repaint_after(Duration::from_millis(33));
+            }
+            if position.is_some() {
+                self.drop_hover_side = side;
+            }
+            if let Some(side) = side.or(self.drop_hover_side) {
+                if let Some(rects) = self.pane_rects {
+                    paint_native_drop_highlight(
+                        ui.ctx(),
+                        rects[side],
+                        &format!(
+                            "Drop a file on {}",
+                            ["LEFT (Incoming)", "BASE", "RIGHT (Current)"][side]
+                        ),
+                    );
+                }
+            }
+        }
+        if !dropped.is_empty() {
+            let target = if position.is_some() {
+                side
+            } else {
+                self.drop_hover_side
+            };
+            if self.is_saving() {
+                self.error =
+                    Some("Wait for the save to finish before replacing a merge input.".into());
+            } else if dropped.len() != 1 {
+                self.error = Some("Drop one file at a time.".into());
+            } else if dropped[0].path().as_os_str().is_empty() {
+                self.error =
+                    Some("This drag did not include a file path. Use Browse to select it.".into());
+            } else if let Some(side) = target {
+                let path = dropped[0].path().to_path_buf();
+                let inspected = path.clone();
+                let cancellation = Arc::new(AtomicBool::new(false));
+                let cancelled = cancellation.clone();
+                let (sender, receiver) = mpsc::channel();
+                let ctx = ui.ctx().clone();
+                std::thread::spawn(move || {
+                    let result = selection::classify_path(&inspected);
+                    if !cancelled.load(Ordering::Relaxed) {
+                        let _ = sender.send(result);
+                        ctx.request_repaint();
+                    }
+                });
+                self.drop_job = Some((
+                    SourceJob {
+                        receiver,
+                        cancellation,
+                    },
+                    side,
+                    path,
+                ));
+            } else {
+                self.error = Some("Drop into the LEFT, BASE, or RIGHT pane.".into());
+            }
+            ui.ctx().request_repaint();
+        }
+        if !hovering {
+            self.drop_hover_side = None;
+        }
+    }
+
+    fn jump_difference(&mut self, forward: bool) {
+        let Some(workspace) = &self.workspace else {
+            return;
+        };
+        let top = (self.scroll_y / self.row_height.max(1.0)).floor() as usize;
+        let anchor = self.navigation_row.unwrap_or(top);
+        let actions = workspace.actions();
+        let target = if forward {
+            actions.iter().find(|action| {
+                if self.navigation_row.is_some() {
+                    action.row_range.start > anchor
+                } else {
+                    action.row_range.start >= anchor
+                }
+            })
+        } else {
+            actions
+                .iter()
+                .rev()
+                .find(|action| action.row_range.start < anchor)
+        };
+        if let Some(target) = target {
+            self.navigation_row = Some(target.row_range.start);
+            self.navigation_scroll_pending = true;
         }
     }
 
@@ -298,7 +438,11 @@ impl MergeView {
     }
 
     fn finish_merge(&mut self, ctx: &egui::Context) {
-        if self.workspace.is_none() || self.is_saving() || self.load.is_some() {
+        if self.workspace.is_none()
+            || self.is_saving()
+            || self.load.is_some()
+            || self.drop_job.is_some()
+        {
             return;
         }
         if self.output.is_some() && !self.workspace.as_ref().unwrap().is_dirty() {
@@ -352,6 +496,14 @@ impl MergeView {
             available.min,
             egui::pos2(available.right(), (footer.top() - 5.0).max(available.top())),
         );
+        let gap = ui.spacing().item_spacing.x;
+        let pane_width = (body.width() - 2.0 * gap) / 3.0;
+        self.pane_rects = Some(std::array::from_fn(|index| {
+            Rect::from_min_size(
+                body.min + egui::vec2(index as f32 * (pane_width + gap), 0.0),
+                egui::vec2(pane_width, body.height()),
+            )
+        }));
         ui.scope_builder(egui::UiBuilder::new().max_rect(body), |ui| {
             ui.set_clip_rect(ui.clip_rect().intersect(body));
             egui::Frame::new()
@@ -374,13 +526,8 @@ impl MergeView {
                                     egui::vec2(column.available_width(), height),
                                     Sense::hover(),
                                 );
-                                let target = rect.shrink2(egui::vec2(24.0, 40.0));
-                                column.painter().rect_stroke(
-                                    target,
-                                    6,
-                                    Stroke::new(1.0, palette.border),
-                                    egui::StrokeKind::Inside,
-                                );
+                                let target = rect.shrink(8.0);
+                                paint_drop_outline(column.painter(), target, palette.border);
                                 column.painter().text(
                                     target.center() - egui::vec2(0.0, 12.0),
                                     Align2::CENTER_CENTER,
@@ -396,9 +543,9 @@ impl MergeView {
                                     target.center() + egui::vec2(0.0, 12.0),
                                     Align2::CENTER_CENTER,
                                     if index == 1 {
-                                        "Base file is optional"
+                                        "Drop a base file, or use Current"
                                     } else {
-                                        "Browse or paste a path above"
+                                        "Drop a file here, or use Browse above"
                                     },
                                     FontId::proportional(11.0),
                                     palette.muted,
@@ -527,17 +674,21 @@ impl MergeView {
                     .x
                     + 2.0 * ui.spacing().button_padding.x
                     + 2.0 * (extent + gap);
-                let width = (ui.available_width() - zoom_width - gap).max(0.0);
+                let width = (ui.available_width() - zoom_width - 2.0 * extent - 3.0 * gap).max(0.0);
                 ui.allocate_ui_with_layout(
                     egui::vec2(width, extent),
                     egui::Layout::left_to_right(egui::Align::Center),
                     |ui| {
+                        ui.set_min_width(width);
                         ui.set_clip_rect(ui.clip_rect().intersect(ui.max_rect()));
                         if let Some(error) = &self.error {
                             status_label(ui, error, palette.error);
                         } else if self.load.is_some() {
                             ui.spinner();
                             status_label(ui, "Loading merge…", palette.muted);
+                        } else if self.drop_job.is_some() {
+                            ui.spinner();
+                            status_label(ui, "Opening dropped file…", palette.muted);
                         } else if self.is_saving() {
                             ui.spinner();
                             status_label(ui, "Saving merge…", palette.muted);
@@ -549,22 +700,45 @@ impl MergeView {
                                     action.kind == MergeActionKind::Conflict && action.is_pending
                                 })
                                 .count();
+                            let actions = workspace.actions();
+                            let navigation = self.navigation_row.and_then(|row| {
+                                actions
+                                    .iter()
+                                    .position(|action| action.row_range.start == row)
+                            });
                             status_label(
                                 ui,
-                                &format!("{count} conflict lines to review"),
+                                &navigation.map_or_else(
+                                    || format!("{count} conflict lines to review"),
+                                    |index| format!("Change {} of {}", index + 1, actions.len()),
+                                ),
                                 palette.muted,
                             );
                         }
                     },
                 );
                 zoom_controls(ui);
+                let has_differences =
+                    ready && !self.workspace.as_ref().unwrap().actions().is_empty();
+                for (icon, forward, label) in [
+                    (ToolbarIcon::Previous, false, "Previous difference"),
+                    (ToolbarIcon::Next, true, "Next difference"),
+                ] {
+                    if icon_button(ui, icon, has_differences, label).clicked() {
+                        self.jump_difference(forward);
+                        ui.ctx().request_repaint();
+                    }
+                }
             },
         );
     }
 
     fn footer(&mut self, ui: &mut egui::Ui) {
         let palette = Palette::for_context(ui.ctx());
-        let ready = self.workspace.is_some() && self.load.is_none() && !self.is_saving();
+        let ready = self.workspace.is_some()
+            && self.load.is_none()
+            && !self.is_saving()
+            && self.drop_job.is_none();
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui
                 .add_enabled(ready, egui::Button::new("Finish Merge"))
@@ -612,11 +786,14 @@ impl MergeView {
                 egui::Frame::new().inner_margin(7).show(column, |ui| {
                     ui.horizontal(|ui| {
                         let palette = Palette::for_context(ui.ctx());
-                        let (label, _) = ui.allocate_exact_size(egui::vec2(40.0, control_extent(ui)), Sense::hover());
-                        ui.painter().text(label.left_center(), Align2::LEFT_CENTER, ["LEFT", "BASE", "RIGHT"][index], FontId::monospace(10.0), [palette.left_only, palette.accent, palette.right_only][index]);
+                        let title = ["LEFT (Incoming)", "BASE", "RIGHT (Current)"][index];
+                        let label_font = FontId::monospace(10.0);
+                        let label_width = ui.painter().layout_no_wrap(title.into(), label_font.clone(), palette.text).size().x.max(40.0);
+                        let (label, _) = ui.allocate_exact_size(egui::vec2(label_width, control_extent(ui)), Sense::hover());
+                        ui.painter().text(label.left_center(), Align2::LEFT_CENTER, title, label_font, [palette.left_only, palette.accent, palette.right_only][index]);
                         let width = (ui.available_width() - control_extent(ui) - ui.spacing().item_spacing.x).max(20.0);
-                        let response = ui.add(egui::TextEdit::singleline(&mut self.paths[index]).id_salt(("merge-path", index)).font(comparison_font(ui.ctx())).margin(0).frame(egui::Frame::NONE).desired_width(width).hint_text(if index == 1 { "Optional ancestor" } else { "Choose a file" })).on_hover_text(if index == 1 { "Optional common ancestor for conflict detection. The Base pane below is the editable merged result." } else if index == 0 { "Incoming file (Left)" } else { "Current file (Right)" });
-                        if response.changed() { self.native_paths[index] = None; self.path_edits[index] = true; self.load = None; }
+                        let response = ui.add(egui::TextEdit::singleline(&mut self.paths[index]).id_salt(("merge-path", index)).font(comparison_font(ui.ctx())).margin(0).frame(egui::Frame::NONE).desired_width(width).hint_text(if index == 1 { "Defaults to Current" } else { "Choose a file" })).on_hover_text(if index == 1 { "Common ancestor for conflict detection. When blank, Current is used as Base. The pane below is the editable merged result." } else if index == 0 { "Incoming file (Left)" } else { "Current file (Right)" });
+                        if response.changed() { self.native_paths[index] = None; self.path_edits[index] = true; self.load = None; self.drop_job = None; }
                         if self.path_edits[index] && (response.lost_focus() || (response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)))) {
                             self.path_edits[index] = false;
                             commit = true;
@@ -626,7 +803,7 @@ impl MergeView {
                             let mut dialog = rfd::FileDialog::new().set_title(browse);
                             if let Some(parent) = self.source_path(index).parent().filter(|parent| !parent.as_os_str().is_empty()) { dialog = dialog.set_directory(parent); }
                             if let Some(path) = dialog.pick_file() {
-                                self.paths[index] = path.to_string_lossy().into_owned(); self.native_paths[index] = Some(path); commit = true;
+                                self.paths[index] = path.to_string_lossy().into_owned(); self.native_paths[index] = Some(path); self.drop_job = None; self.load = None; commit = true;
                             }
                         }
                     });
@@ -643,11 +820,23 @@ impl MergeView {
         let workspace = self.workspace.as_mut().unwrap();
         let font = comparison_font(ui.ctx());
         let row_height = ui.fonts_mut(|fonts| fonts.row_height(&font));
+        if self.row_height > 0.0 {
+            self.scroll_y *= row_height / self.row_height;
+        }
+        self.row_height = row_height;
         let mut choice = None;
         let mut result = workspace.result().to_owned();
         let before = result.clone();
         let actions = workspace.actions().to_vec();
         let height = ui.available_height().max(0.0);
+        if self.navigation_scroll_pending {
+            let rows = workspace
+                .rows()
+                .len()
+                .max(display_result_text(&result).split('\n').count());
+            self.scroll_y = (self.navigation_row.unwrap_or(0) as f32 * row_height)
+                .clamp(0.0, (rows as f32 * row_height + 8.0 - height).max(0.0));
+        }
         let min_content_height = height.max(workspace.rows().len() as f32 * row_height);
         let outer = egui::ScrollArea::vertical()
             .id_salt(("merge-shared-scroll", self.generation))
@@ -738,7 +927,11 @@ impl MergeView {
                     }
                 });
             });
+        if !self.navigation_scroll_pending && (self.scroll_y - outer.state.offset.y).abs() > 0.1 {
+            self.navigation_row = None;
+        }
         self.scroll_y = outer.state.offset.y;
+        self.navigation_scroll_pending = false;
         if result != before {
             workspace.edit_result(result);
         }
@@ -881,6 +1074,71 @@ fn display_result_text(text: &str) -> String {
 mod tests {
     use super::*;
 
+    #[derive(Debug)]
+    struct TestDrop(PathBuf);
+    impl egui::DroppedFile for TestDrop {
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+        fn bytes(&self) -> Result<Vec<u8>, String> {
+            panic!("Drop handler must not read contents on the UI thread")
+        }
+    }
+
+    fn temp_directory() -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "versus-merge-input-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn drop_frame(
+        view: &mut MergeView,
+        ctx: &egui::Context,
+        position: Pos2,
+        paths: Vec<PathBuf>,
+        hover: bool,
+        native: Option<Pos2>,
+    ) -> egui::FullOutput {
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0))),
+                events: vec![
+                    egui::Event::PointerMoved(position),
+                    egui::Event::PointerGone,
+                ],
+                hovered_files: if hover {
+                    vec![egui::HoveredFile {
+                        path: paths.first().cloned(),
+                        ..Default::default()
+                    }]
+                } else {
+                    Vec::new()
+                },
+                dropped_files: if hover {
+                    Vec::new()
+                } else {
+                    paths
+                        .into_iter()
+                        .map(|path| Arc::new(TestDrop(path)) as egui::DroppedFileHandle)
+                        .collect()
+                },
+                ..Default::default()
+            },
+            |ui| {
+                view.render(ui);
+                view.drag_and_drop(ui, native);
+            },
+        );
+        output.textures_delta.clear();
+        output
+    }
+
     fn fixture() -> MergeView {
         MergeView {
             workspace: Some(MergeWorkspace::new(
@@ -953,9 +1211,9 @@ mod tests {
             set_theme(&ctx, theme);
             let mut view = fixture();
             let output = render(&mut view, &ctx, Vec::new());
-            let incoming = text_center(&output, "LEFT");
+            let incoming = text_center(&output, "LEFT (Incoming)");
             let result = text_center(&output, "BASE");
-            let current = text_center(&output, "RIGHT");
+            let current = text_center(&output, "RIGHT (Current)");
             assert!(incoming.x < result.x && result.x < current.x);
             let workspace = view.workspace.as_ref().unwrap();
             let actions = workspace.actions();
@@ -1072,7 +1330,7 @@ mod tests {
 
     fn settle(view: &mut MergeView, ctx: &egui::Context) {
         let deadline = Instant::now() + Duration::from_secs(3);
-        while view.load.is_some() || view.save.is_some() {
+        while view.load.is_some() || view.save.is_some() || view.drop_job.is_some() {
             assert!(Instant::now() < deadline, "merge worker did not finish");
             view.poll(ctx);
             std::thread::sleep(Duration::from_millis(2));
@@ -1201,6 +1459,18 @@ mod tests {
                         .bottom()
                         < save.y
                 );
+                let zoom = ctx.read_response(egui::Id::new("Zoom in")).unwrap().rect;
+                let previous = ctx
+                    .read_response(egui::Id::new("Previous difference"))
+                    .unwrap()
+                    .rect;
+                let next = ctx
+                    .read_response(egui::Id::new("Next difference"))
+                    .unwrap()
+                    .rect;
+                assert!(controls.last().unwrap().right() < zoom.left());
+                assert!(zoom.right() < previous.left() && previous.right() < next.left());
+                assert!(next.right() <= width && next.right() > width - 15.0);
                 let before = view.workspace.as_ref().unwrap().result().to_owned();
                 click(&mut view, &ctx, controls[0].center());
                 assert_eq!(
@@ -1440,5 +1710,210 @@ mod tests {
                 .result(),
             "unsaved"
         );
+    }
+
+    #[test]
+    fn blank_base_uses_current_file_snapshot_and_auto_merges_incoming() {
+        let directory = temp_directory();
+        let incoming = directory.join("incoming.txt");
+        let current = directory.join("current.txt");
+        std::fs::write(&incoming, "A\nb\n").unwrap();
+        std::fs::write(&current, "a\nb\n").unwrap();
+        let ctx = egui::Context::default();
+        let mut view = MergeView::default();
+        view.set_sources([Some(incoming), Some(current)]);
+        view.open(&ctx);
+        settle(&mut view, &ctx);
+        assert!(view.paths[1].is_empty());
+        assert!(
+            view.workspace
+                .as_ref()
+                .unwrap()
+                .actions()
+                .iter()
+                .all(|action| action.kind == MergeActionKind::Safe)
+        );
+        view.workspace.as_mut().unwrap().auto_merge().unwrap();
+        assert_eq!(view.workspace.as_ref().unwrap().result(), "A\nb\n");
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn navigation_buttons_follow_zoom_and_jump_both_directions_even_when_lines_fit() {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut view = fixture();
+        render(&mut view, &ctx, Vec::new()).drop_without_applying_deltas();
+        let zoom = ctx.read_response(egui::Id::new("Zoom in")).unwrap().rect;
+        let previous = ctx
+            .read_response(egui::Id::new("Previous difference"))
+            .unwrap()
+            .rect;
+        let next = ctx
+            .read_response(egui::Id::new("Next difference"))
+            .unwrap()
+            .rect;
+        assert!(zoom.right() < previous.left() && previous.right() < next.left());
+        assert!(next.right() > 1190.0);
+        click(&mut view, &ctx, next.center());
+        assert_eq!(view.navigation_row, Some(1));
+        click(&mut view, &ctx, next.center());
+        assert_eq!(view.navigation_row, Some(3));
+        click(&mut view, &ctx, previous.center());
+        assert_eq!(view.navigation_row, Some(1));
+        let current: String = (0..250).map(|index| format!("line {index}\n")).collect();
+        let incoming = current
+            .replace("line 120\n", "changed 120\n")
+            .replace("line 240\n", "changed 240\n");
+        view.workspace = Some(MergeWorkspace::new(Some(&current), &incoming, &current));
+        view.navigation_row = None;
+        view.scroll_y = 0.0;
+        render(&mut view, &ctx, Vec::new()).drop_without_applying_deltas();
+        click(&mut view, &ctx, next.center());
+        assert_eq!(view.navigation_row, Some(120));
+        assert!(view.scroll_y > 1000.0);
+        click(&mut view, &ctx, next.center());
+        assert_eq!(view.navigation_row, Some(240));
+        assert!(view.scroll_y > 2000.0);
+        click(&mut view, &ctx, previous.center());
+        assert_eq!(view.navigation_row, Some(120));
+    }
+
+    #[test]
+    fn drops_target_all_merge_panes_and_share_empty_outlines_and_hover_style() {
+        let directory = temp_directory();
+        let file = directory.join("example.txt");
+        std::fs::write(&file, "content\n").unwrap();
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            for side in 0..3 {
+                let ctx = egui::Context::default();
+                set_theme(&ctx, theme);
+                let mut view = MergeView::default();
+                let empty = render(&mut view, &ctx, Vec::new());
+                let palette = Palette::for_context(&ctx);
+                assert!(empty.shapes.iter().filter(|shape| matches!(&shape.shape, egui::Shape::LineSegment { stroke, .. } if stroke.width == 1.0 && stroke.color == palette.border)).count() > 20);
+                let panes = view.pane_rects.unwrap();
+                let position = panes[side].center();
+                let hover = drop_frame(
+                    &mut view,
+                    &ctx,
+                    position,
+                    vec![file.clone()],
+                    true,
+                    Some(panes[(side + 1) % 3].center()),
+                );
+                assert_eq!(view.drop_hover_side, Some(side));
+                let border = hover
+                    .shapes
+                    .iter()
+                    .find_map(|shape| match &shape.shape {
+                        egui::Shape::Rect(rect)
+                            if rect.stroke.width == 3.0 && rect.stroke.color == palette.accent =>
+                        {
+                            Some(rect.rect)
+                        }
+                        _ => None,
+                    })
+                    .unwrap();
+                assert_eq!(border, panes[side].shrink(3.0));
+                drop_frame(&mut view, &ctx, position, vec![file.clone()], false, None)
+                    .drop_without_applying_deltas();
+                settle(&mut view, &ctx);
+                assert_eq!(view.source_path(side), file);
+                assert!(view.native_paths[side].is_some());
+                assert!(view.drop_hover_side.is_none());
+            }
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn invalid_drops_preserve_merge_and_valid_dropped_replacement_keeps_discard_guard() {
+        let directory = temp_directory();
+        let file = directory.join("replacement.txt");
+        std::fs::write(&file, "new contents\n").unwrap();
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut view = fixture();
+        let active = view.paths.clone();
+        view.loaded_paths = Some(active.clone());
+        view.workspace
+            .as_mut()
+            .unwrap()
+            .edit_result("unsaved".into());
+        render(&mut view, &ctx, Vec::new()).drop_without_applying_deltas();
+        let position = view.pane_rects.unwrap()[0].center();
+        for paths in [vec![file.clone(), file.clone()], vec![directory.clone()]] {
+            drop_frame(&mut view, &ctx, position, paths, false, None)
+                .drop_without_applying_deltas();
+            settle(&mut view, &ctx);
+            assert_eq!(view.paths, active);
+            assert_eq!(view.workspace.as_ref().unwrap().result(), "unsaved");
+            assert!(view.error.is_some());
+        }
+        drop_frame(
+            &mut view,
+            &ctx,
+            egui::pos2(5.0, 790.0),
+            vec![file.clone()],
+            false,
+            None,
+        )
+        .drop_without_applying_deltas();
+        assert_eq!(view.paths, active);
+        drop_frame(&mut view, &ctx, position, vec![file], false, None)
+            .drop_without_applying_deltas();
+        settle(&mut view, &ctx);
+        render(&mut view, &ctx, Vec::new()).drop_without_applying_deltas();
+        assert!(view.replace.is_some());
+        assert_eq!(view.workspace.as_ref().unwrap().result(), "unsaved");
+        let output = render(&mut view, &ctx, Vec::new());
+        click(&mut view, &ctx, text_center(&output, "Keep merging"));
+        assert_eq!(view.paths, active);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn app_forwards_native_drop_position_to_each_merge_pane_without_changing_compare_sources() {
+        let directory = temp_directory();
+        let file = directory.join("source.txt");
+        std::fs::write(&file, "contents\n").unwrap();
+        for side in 0..3 {
+            let ctx = egui::Context::default();
+            apply_theme(&ctx);
+            let mut app = VersusApp::default();
+            app.merge_view = Some(MergeView::default());
+            let mut initial = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0))),
+                    ..Default::default()
+                },
+                |ui| app.render(ui),
+            );
+            initial.textures_delta.clear();
+            app.native_drag_position =
+                Some(app.merge_view.as_ref().unwrap().pane_rects.unwrap()[side].center());
+            let mut dropped =
+                ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(
+                            Pos2::ZERO,
+                            egui::vec2(1200.0, 800.0),
+                        )),
+                        events: vec![egui::Event::PointerGone],
+                        dropped_files: vec![
+                            Arc::new(TestDrop(file.clone())) as egui::DroppedFileHandle
+                        ],
+                        ..Default::default()
+                    },
+                    |ui| app.render(ui),
+                );
+            dropped.textures_delta.clear();
+            settle(app.merge_view.as_mut().unwrap(), &ctx);
+            assert_eq!(app.merge_view.as_ref().unwrap().source_path(side), file);
+            assert_eq!(app.source_paths, [None, None]);
+            assert!(app.native_drag_position.is_none());
+        }
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

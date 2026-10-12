@@ -10,8 +10,10 @@ authentication or make outbound network requests at runtime.
 
 **File Merge** is the third option in the centered header, alongside Folder Compare
 and File Compare. It opens **Left** (Incoming), **Base** (the editable merged
-result), and **Right** (Current). Browse or paste the two file paths and,
-optionally, their common ancestor in the Base path field. Selecting sources starts
+result), and **Right** (Current). The outer headers read **LEFT (Incoming)** and
+**RIGHT (Current)**. Browse, paste, or drop a file into any of the three panes.
+The Base path can specify their common ancestor; leaving it blank uses Current.
+Selecting sources starts
 the merge; committing a typed path with Enter or leaving its field reloads it. Opening
 merge from a file comparison preselects its two files. The result starts with
 Current's contents; the input files remain read-only.
@@ -19,10 +21,12 @@ Current's contents; the input files remain read-only.
 The legend row centers four icons with tooltips: **Accept All Left**, **Accept All
 Right**, **Auto Merge Non-Conflicts**, and **Undo**. Accept All replaces the result
 with that source in one undoable operation. The merge legend adds a conflict icon.
-With a base file, **Auto Merge Non-Conflicts** combines the safe changes as one
+Zoom sits immediately left of the up/down difference-navigation icons at the right
+of that row; merge actions stay centered. Use the arrows to jump backward or forward
+through the differences, with shared scrolling across the panes.
+**Auto Merge Non-Conflicts** combines the safe changes as one
 undoable operation. Each consecutive nonconflicting block has one inward arrow
-per side. Conflicting lines have **!** indicators and individual arrows. Without
-a base, differing lines require a manual choice. You can also select, paste, and
+per side. Conflicting lines have **!** indicators and individual arrows. You can also select, paste, and
 type freely in the middle pane. Source panes retain their diff alignment and
 original line numbers; the result has its own live line numbers. Vertical
 scrolling is shared and horizontal scrolling is independent.
@@ -38,6 +42,11 @@ files require explicit overwrite confirmation. Saves preserve the buffer's line
 endings and final newline. Leaving or replacing an unsaved result asks before
 discarding it. Merge contents are never stored in comparison history. This merge
 workflow is currently GUI-only.
+
+Empty merge panes use the same dashed inner drop borders as comparison modes.
+Dragging a file over a pane shows the shared blue foreground border and tint.
+Drop one regular file at a time; invalid drops preserve the existing merge, and
+replacing an unsaved merge still requires a discard choice.
 
 Choose **Folder Compare** or **File Compare** in the center of the header. Each
 button includes a folder or file icon. The active mode is highlighted, with Folder
