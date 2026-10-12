@@ -373,6 +373,13 @@ def main():
                         raise RuntimeError("launcher left private state after outer-window close")
                     if picker_failures:
                         raise RuntimeError("Picker selection failed: " + "; ".join(picker_failures))
+                    log.flush()
+                    log.seek(0)
+                    diagnostics = log.read()
+                    for failure in ("Error in GnuTLS initialization", "FATAL FIPS",
+                                    "libgcrypt selftest:", "Unable to find a valid menu file"):
+                        if failure in diagnostics:
+                            raise RuntimeError("Packaged runtime diagnostic: " + failure)
                     print("Automatic NX compatibility passed: authenticated GUI, resize, Ctrl+wheel, file/folder pickers, cleanup.")
                 except Exception:
                     if "nested" in locals() and not (image.parent / "linux-smoke-failure.png").exists():

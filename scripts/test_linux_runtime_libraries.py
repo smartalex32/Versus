@@ -84,15 +84,72 @@ class LinuxRuntimeLibrariesTests(unittest.TestCase):
             self.assertEqual(staged.read_bytes(), sidecar.read_bytes())
             self.assertEqual(sentinel.read_bytes(), b"host HMAC")
 
+    def test_fipscheck_hmac_is_copied_unchanged_without_following_destination_symlink(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            library = root / "libgmp.so.10"
+            library.write_bytes(b"gmp")
+            source_fipscheck = root / "fipscheck"
+            source_fipscheck.mkdir()
+            sidecar = source_fipscheck / "libgmp.so.10.hmac"
+            sidecar.write_bytes(b"original RPM HMAC")
+            sentinel = root / "host-hmac"
+            sentinel.write_bytes(b"host HMAC")
+            destination = root / "AppDir/usr/lib"
+            destination_fipscheck = destination / "fipscheck"
+            destination_fipscheck.mkdir(parents=True)
+            (destination_fipscheck / sidecar.name).symlink_to(sentinel)
+
+            runtime.copy_library_with_sidecar(
+                library, destination / library.name, {}, {})
+
+            staged = destination_fipscheck / sidecar.name
+            self.assertFalse(staged.is_symlink())
+            self.assertEqual(staged.read_bytes(), sidecar.read_bytes())
+            self.assertEqual(sentinel.read_bytes(), b"host HMAC")
+
+    def test_fipscheck_manifest_round_trip_preserves_nested_destination(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            library = root / "libgmp.so.10"
+            library.write_bytes(b"gmp")
+            source_fipscheck = root / "fipscheck"
+            source_fipscheck.mkdir()
+            sidecar = source_fipscheck / "libgmp.so.10.hmac"
+            sidecar.write_bytes(b"original RPM HMAC")
+            staging = root / "AppDir/usr/lib"
+            libraries = {}
+            sidecars = {}
+            runtime.copy_library_with_sidecar(
+                library, staging / library.name, libraries, sidecars)
+            manifest = root / "runtime.txt"
+            runtime.write_manifest(manifest, libraries, {}, sidecars, {})
+
+            self.assertIn(
+                "usr/lib/fipscheck/libgmp.so.10.hmac <- {}".format(sidecar.resolve()),
+                manifest.read_text())
+            self.assertIn(
+                (runtime.PurePosixPath("usr/lib/fipscheck/libgmp.so.10.hmac"),
+                 sidecar.resolve()),
+                runtime.manifest_entries(manifest))
+
+            payload = root / "payload"
+            for relative, source in runtime.manifest_entries(manifest):
+                target = payload.joinpath(*relative.parts)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(source.read_bytes())
+            runtime.verify_manifest(manifest, payload)
+
     def test_manifest_verification_rejects_modified_payload(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            source = root / "libssl.so.1.1"
-            source.write_bytes(b"original RPM library")
+            source = root / "fipscheck/libgmp.so.10.hmac"
+            source.parent.mkdir()
+            source.write_bytes(b"original RPM HMAC")
             manifest = root / "runtime.txt"
-            manifest.write_text("usr/lib/libssl.so.1.1 <- {}\n".format(source))
+            manifest.write_text("usr/lib/fipscheck/libgmp.so.10.hmac <- {}\n".format(source))
             payload = root / "payload"
-            packaged = payload / "usr/lib/libssl.so.1.1"
+            packaged = payload / "usr/lib/fipscheck/libgmp.so.10.hmac"
             packaged.parent.mkdir(parents=True)
             packaged.write_bytes(b"modified by packaging tool")
 

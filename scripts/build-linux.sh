@@ -24,7 +24,7 @@ case "$baseline" in
       libxkbcommon-x11 wayland-devel xorg-x11-server-Xvfb xorg-x11-utils \
       mesa-dri-drivers xorg-x11-server-Xephyr xorg-x11-xauth \
       xorg-x11-xkb-utils xkeyboard-config mesa-libEGL openbox zenity nxagent \
-      xdotool xorg-x11-apps libgcrypt-devel openssl-devel
+      xdotool xorg-x11-apps libgcrypt-devel openssl-devel gnutls-devel
     bash scripts/build-xephyr-portable.sh
     ;;
   *) echo "Unsupported glibc baseline: $baseline" >&2; exit 1 ;;

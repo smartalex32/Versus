@@ -95,6 +95,7 @@ install -m 644 LICENSE "$appdir/usr/share/licenses/versus/LICENSE"
 printf '[Desktop Entry]\nType=Application\nName=Versus\nExec=versus\nIcon=versus\nCategories=Development;Utility;\nTerminal=false\n' > "$appdir/usr/share/applications/versus.desktop"
 install -m 644 assets/logo-icon.png "$appdir/usr/share/pixmaps/versus.png"
 install -D -m 644 scripts/compat-openbox.xml "$appdir/usr/share/versus/compat-openbox.xml"
+install -D -m 644 scripts/compat-openbox-menu.xml "$appdir/usr/share/versus/openbox/menu.xml"
 cp -a /usr/share/X11/xkb "$appdir/usr/share/X11/"
 mkdir -p "$appdir/usr/share/themes/Onyx-Citrus"
 cp -a /usr/share/themes/Onyx-Citrus/openbox-3 "$appdir/usr/share/themes/Onyx-Citrus/"
@@ -116,6 +117,7 @@ private_libraries=(
   # not name libssl directly. Their RPM-provided HMAC sidecars are copied by the
   # runtime helper and checked again after AppImage creation.
   "$libdir/libssl.so.1.1" "$libdir/libcrypto.so.1.1" "$libdir/libgcrypt.so.20"
+  "$libdir/libgnutls.so.30" "$libdir/libnettle.so.6" "$libdir/libhogweed.so.4" "$libdir/libgmp.so.10"
 )
 for library in "${private_libraries[@]}"; do require_file "$library"; done
 drivers=("$libdir/dri/swrast_dri.so")

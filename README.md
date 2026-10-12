@@ -326,6 +326,13 @@ browsing and zoom. It increases package size and may use more CPU for rendering.
 Clipboard contents and file drops from the surrounding desktop are not bridged
 into the private display; use Browse or command-line paths. Automatic selection
 checks XInput2 support, not every possible graphics-driver incompatibility.
+
+On a shared X11 host, Xephyr may print `server already running` while its
+race-safe display allocator skips occupied display numbers. If the app opens,
+these messages do not indicate a second Versus instance. A warning about the
+owner of `/tmp/.X11-unix` concerns the host's shared socket directory; Versus
+leaves its ownership and permissions unchanged.
+
 The 2.28 artifact also includes `linux-runtime-sources-glibc-2.28.tar.gz` with
 matching runtime sources and the helper rebuild recipe; it is not needed to run.
 
@@ -336,6 +343,9 @@ with Xvfb/software rendering in that same environment. The Rocky job additionall
 tests automatic fallback through real nxagent, with host graphics/picker resources
 hidden to check that the bundle supplies them. It exercises resizing, Ctrl+wheel,
 file/folder pickers, private-display authentication and normal window closing.
+OpenSSL, libgcrypt and GnuTLS self-tests also run with vendor FIPS activation
+enabled, including integrity-failure controls and checks for crypto errors in
+the running GUI’s log.
 This verifies those configurations, not every user's display, kernel or driver.
 
 Tagged releases additionally publish:

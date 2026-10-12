@@ -112,11 +112,10 @@ APIs and must fail cleanly when unavailable.
   resizing, input, browsing, authentication and cleanup with host runtime files
   hidden. Preserve these tests, runtime license/source inventory, and both glibc
   checks when changing Linux packaging. Original Rocky crypto libraries and their
-  vendor HMAC sidecars must remain byte-identical; final package verification and
-  forced vendor FIPS self-tests (including negative controls and the nxagent GUI)
+  vendor HMAC sidecars (including GMP’s `fipscheck/` file) must remain byte-identical.
+  Final package verification and forced vendor FIPS self-tests (including negative controls and the nxagent GUI)
   run in CI. FIPS activation hooks are test-only; runtime host policy is preserved.
-  Clipboard and file drops across the
-  private-display boundary are not bridged.
+  Clipboard and file drops across the private-display boundary are not bridged.
 
 ## Architectural constraints
 

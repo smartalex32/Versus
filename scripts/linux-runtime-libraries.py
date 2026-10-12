@@ -21,11 +21,12 @@ GLIBC_MODULES = {
     "librt.so.1", "libthread_db.so.1", "libutil.so.1",
 }
 
-# These Rocky libraries validate an adjacent vendor-provided HMAC file when
-# FIPS checks are enabled. Preserve the vendor integrity metadata rather than
-# generating replacement tokens for potentially modified binaries.
-REQUIRED_HMAC_SONAMES = {
+# These Rocky libraries validate vendor-provided HMAC files when FIPS checks
+# are enabled. Preserve the vendor integrity metadata rather than generating
+# replacement tokens for potentially modified binaries.
+REQUIRED_INTEGRITY_SONAMES = {
     "libcrypto.so.1.1", "libssl.so.1.1", "libgcrypt.so.20",
+    "libgnutls.so.30", "libnettle.so.6", "libhogweed.so.4", "libgmp.so.10",
 }
 
 
@@ -47,9 +48,9 @@ def dependencies(path):
     return found
 
 
-def copy_resolved(source, destination, copied):
+def copy_resolved(source, destination, copied, record_name=None):
     source = source.resolve(strict=True)
-    name = destination.name
+    name = destination.name if record_name is None else record_name
     previous = copied.get(name)
     if previous is not None:
         if previous != source:
@@ -72,17 +73,33 @@ def hmac_name(soname):
     return ".{}.hmac".format(soname)
 
 
+def integrity_sidecar(source, soname):
+    """Return the original vendor integrity file and its AppDir-relative path."""
+    candidates = (
+        (source.parent / hmac_name(soname), Path(hmac_name(soname))),
+        (source.parent / "fipscheck" / "{}.hmac".format(soname),
+         Path("fipscheck") / "{}.hmac".format(soname)),
+    )
+    for sidecar, relative_destination in candidates:
+        if sidecar.exists():
+            if not sidecar.is_file():
+                raise ValueError("Runtime HMAC is not a regular file: {}".format(sidecar))
+            return sidecar, relative_destination
+    if soname in REQUIRED_INTEGRITY_SONAMES:
+        locations = ", ".join(str(candidate[0]) for candidate in candidates)
+        raise ValueError("Missing required runtime HMAC for {}: {}".format(
+            soname, locations))
+    return None
+
+
 def copy_hmac_sidecar(source, destination, soname, copied):
-    """Preserve an RPM's HMAC beside the bundled library SONAME, if present."""
-    sidecar = source.parent / hmac_name(soname)
-    if not sidecar.exists():
-        if soname in REQUIRED_HMAC_SONAMES:
-            raise ValueError("Missing required runtime HMAC for {}: {}".format(
-                soname, sidecar))
+    """Copy an adjacent or fipscheck vendor HMAC without changing its layout."""
+    integrity = integrity_sidecar(source, soname)
+    if integrity is None:
         return
-    if not sidecar.is_file():
-        raise ValueError("Runtime HMAC is not a regular file: {}".format(sidecar))
-    copy_resolved(sidecar, destination / sidecar.name, copied)
+    sidecar, relative_destination = integrity
+    copy_resolved(sidecar, destination / relative_destination, copied,
+                  relative_destination.as_posix())
 
 
 def copy_library_with_sidecar(source, destination, copied, sidecars):
@@ -130,13 +147,13 @@ def write_manifest(path, runtime, native, runtime_sidecars, native_sidecars):
     lines = ["# Runtime libraries copied as resolved ELF files."]
     lines.extend("usr/lib/{} <- {}".format(name, source)
                  for name, source in sorted(runtime.items()))
-    lines.append("# Vendor HMAC sidecars copied unchanged beside runtime SONAMEs.")
+    lines.append("# Vendor HMAC sidecars copied unchanged in their RPM-provided layout.")
     lines.extend("usr/lib/{} <- {}".format(name, source)
                  for name, source in sorted(runtime_sidecars.items()))
     lines.append("# Native-mode libraries copied as resolved ELF files.")
     lines.extend("usr/lib/native/{} <- {}".format(name, source)
                  for name, source in sorted(native.items()))
-    lines.append("# Vendor HMAC sidecars copied unchanged beside native SONAMEs.")
+    lines.append("# Vendor HMAC sidecars copied unchanged in their RPM-provided layout.")
     lines.extend("usr/lib/native/{} <- {}".format(name, source)
                  for name, source in sorted(native_sidecars.items()))
     path.write_text("\n".join(lines) + "\n")

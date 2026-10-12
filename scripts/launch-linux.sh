@@ -246,6 +246,7 @@ XAUTHORITY="$authority_file" "$xdpyinfo" -display "$nested_display" >/dev/null 2
 
 DISPLAY="$nested_display" XAUTHORITY="$authority_file" \
   XDG_DATA_DIRS="$appdir/usr/share" \
+  XDG_CONFIG_HOME="$appdir/usr/share/versus" XDG_CONFIG_DIRS="$appdir/usr/share/versus" \
   "$openbox" --sm-disable --config-file "$openbox_config" &
 openbox_pid=$!
 

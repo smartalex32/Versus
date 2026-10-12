@@ -17,6 +17,7 @@ def main():
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     environment = os.environ.copy()
     environment['OPENSSL_FORCE_FIPS_MODE'] = '1'
+    environment['GNUTLS_FORCE_FIPS_MODE'] = '1'
     with tempfile.TemporaryDirectory(prefix='versus-fips-') as directory:
         staging = Path(directory)
         subprocess.run([str(image), '--appimage-extract'], cwd=staging,
@@ -24,7 +25,8 @@ def main():
         libraries = staging / 'squashfs-root/usr/lib'
         probes = {}
         for name, flags in [('libgcrypt.so.20', ['-DTEST_GCRYPT', '-lgcrypt']),
-                            ('libcrypto.so.1.1', ['-lcrypto'])]:
+                            ('libcrypto.so.1.1', ['-lcrypto']),
+                            ('libgnutls.so.30', ['-DTEST_GNUTLS', '-lgnutls'])]:
             probe = staging / (name + '-probe')
             subprocess.run(['gcc', '-std=c99', '-Wall', '-Wextra', '-Werror',
                             'scripts/check-linux-fips.c', '-o', str(probe)] +
@@ -48,9 +50,15 @@ def main():
         try:
             for name in probes:
                 run(name, True)
-            for name in ['libgcrypt.so.20', 'libcrypto.so.1.1', 'libssl.so.1.1']:
-                probe_name = name if name in probes else 'libcrypto.so.1.1'
+            checks = [('libgcrypt.so.20', 'libgcrypt.so.20'),
+                      ('libcrypto.so.1.1', 'libcrypto.so.1.1'),
+                      ('libssl.so.1.1', 'libcrypto.so.1.1')]
+            checks.extend((name, 'libgnutls.so.30') for name in
+                          ['libgnutls.so.30', 'libnettle.so.6', 'libhogweed.so.4', 'libgmp.so.10'])
+            for name, probe_name in checks:
                 sidecar = libraries / ('.' + name + '.hmac')
+                if not sidecar.exists():
+                    sidecar = libraries / 'fipscheck' / (name + '.hmac')
                 original = sidecar.read_bytes()
                 try:
                     sidecar.unlink()
