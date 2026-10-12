@@ -43,7 +43,9 @@ exit 0
 printf 'xdpyinfo:%s:%s\\n' "$DISPLAY" "$XAUTHORITY" >> "$TEST_LOG"
 test "${XDPYINFO_FAIL:-0}" != 1
 """)
-        self._write_helper("Xephyr", """#!/bin/sh
+        # Bash supports the >=10 descriptor allocated by AppRun's {display_fd}.
+        # Ubuntu's /bin/sh (dash) only parses single-digit redirections.
+        self._write_helper("Xephyr", """#!/usr/bin/env bash
 fd=''
 while test "$#" -gt 0; do
   if test "$1" = -displayfd; then fd="$2"; shift 2; continue; fi
