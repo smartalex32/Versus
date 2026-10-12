@@ -10,6 +10,7 @@ struct LoadJob {
     receiver: Receiver<Result<Option<MergeWorkspace>, CompareError>>,
     cancellation: Arc<AtomicBool>,
     display_paths: [String; 3],
+    native_paths: [Option<PathBuf>; 3],
 }
 
 impl Drop for LoadJob {
@@ -36,6 +37,7 @@ pub(super) struct MergeView {
     paths: [String; 3],
     native_paths: [Option<PathBuf>; 3],
     loaded_paths: Option<[String; 3]>,
+    loaded_native_paths: Option<[Option<PathBuf>; 3]>,
     workspace: Option<MergeWorkspace>,
     load: Option<LoadJob>,
     save: Option<Receiver<SaveEvent>>,
@@ -46,6 +48,10 @@ pub(super) struct MergeView {
     error: Option<String>,
     generation: u64,
     scroll_y: f32,
+    start_requested: bool,
+    path_edits: [bool; 3],
+    finish_requested: bool,
+    finished: bool,
 }
 
 impl MergeView {
@@ -56,6 +62,11 @@ impl MergeView {
                 self.native_paths[index] = Some(path);
             }
         }
+        self.start_requested = true;
+    }
+
+    pub(super) fn is_finished(&self) -> bool {
+        self.finished
     }
 
     pub(super) fn is_saving(&self) -> bool {
@@ -93,6 +104,7 @@ impl MergeView {
             receiver,
             cancellation,
             display_paths: self.paths.clone(),
+            native_paths: self.native_paths.clone(),
         });
         self.error = None;
         self.message = "Loading merge inputs…".into();
@@ -128,18 +140,26 @@ impl MergeView {
             });
         if let Some(result) = loaded {
             let display_paths = self.load.as_ref().unwrap().display_paths.clone();
+            let native_paths = self.load.as_ref().unwrap().native_paths.clone();
             self.load = None;
             match result {
                 Ok(Some(workspace)) => {
                     self.workspace = Some(workspace);
                     self.loaded_paths = Some(display_paths);
+                    self.loaded_native_paths = Some(native_paths);
                     self.output = None;
                     self.generation += 1;
                     self.scroll_y = 0.0;
                     self.message = "Choose arrows or edit the result, then Save.".into();
                 }
-                Ok(None) => self.message = "Merge loading cancelled.".into(),
-                Err(error) => self.error = Some(error.to_string()),
+                Ok(None) => {
+                    self.restore_loaded_sources();
+                    self.message = "Merge loading cancelled.".into();
+                }
+                Err(error) => {
+                    self.restore_loaded_sources();
+                    self.error = Some(error.to_string());
+                }
             }
         }
         let saved = self
@@ -171,8 +191,22 @@ impl MergeView {
                 self.message = format!("Saved {}", path.display());
                 self.output = Some(path);
                 self.error = None;
+                if self.finish_requested {
+                    self.finished = self
+                        .workspace
+                        .as_ref()
+                        .is_some_and(|workspace| !workspace.is_dirty());
+                    self.finish_requested = false;
+                    if !self.finished {
+                        self.message =
+                            "Saved snapshot. Finish Merge again to save the latest edits.".into();
+                    }
+                }
             }
-            SaveEvent::Failed(error) => self.error = Some(error),
+            SaveEvent::Failed(error) => {
+                self.error = Some(error);
+                self.finish_requested = false;
+            }
         }
     }
 
@@ -234,173 +268,374 @@ impl MergeView {
         self.save = Some(receiver);
     }
 
+    fn ready(&self) -> bool {
+        !self.paths[0].is_empty()
+            && !self.paths[2].is_empty()
+            && self.load.is_none()
+            && !self.is_saving()
+    }
+
+    fn restore_loaded_sources(&mut self) {
+        if let Some(paths) = &self.loaded_paths {
+            self.paths = paths.clone();
+            self.native_paths = self.loaded_native_paths.clone().unwrap_or_default();
+            self.path_edits = [false; 3];
+            self.start_requested = false;
+        }
+    }
+
+    pub(super) fn header_controls(&mut self, ui: &mut egui::Ui) {
+        if icon_button(ui, ToolbarIcon::Refresh, self.ready(), "Refresh merge").clicked() {
+            self.request_replace(ReplaceMerge::Open, ui.ctx());
+        }
+        if self.load.is_some()
+            && icon_button(ui, ToolbarIcon::Cancel, true, "Cancel merge loading").clicked()
+        {
+            self.load = None;
+            self.restore_loaded_sources();
+            self.message = "Merge loading cancelled.".into();
+        }
+    }
+
+    fn finish_merge(&mut self, ctx: &egui::Context) {
+        if self.workspace.is_none() || self.is_saving() || self.load.is_some() {
+            return;
+        }
+        if self.output.is_some() && !self.workspace.as_ref().unwrap().is_dirty() {
+            self.finished = true;
+        } else {
+            self.finish_requested = true;
+            self.save_result(ctx, false);
+            if !self.is_saving() {
+                self.finish_requested = false;
+            }
+        }
+    }
+
     pub(super) fn render(&mut self, ui: &mut egui::Ui) {
         self.poll(ui.ctx());
         let palette = Palette::for_context(ui.ctx());
-        self.inputs(ui);
-        ui.add_space(5.0);
-        ui.horizontal(|ui| {
-            let ready = !self.paths[0].is_empty()
-                && !self.paths[2].is_empty()
-                && self.load.is_none()
-                && !self.is_saving();
-            if ui
-                .add_enabled(ready, egui::Button::new("Open merge"))
-                .clicked()
-            {
-                self.request_replace(ReplaceMerge::Open, ui.ctx());
-            }
-            if ui
-                .add_enabled(!self.is_saving(), egui::Button::new("New merge"))
-                .clicked()
-            {
-                self.request_replace(ReplaceMerge::New, ui.ctx());
-            }
-            if self.load.is_some() {
-                ui.spinner();
-                if ui.button("Cancel loading").clicked() {
-                    self.load = None;
-                    self.message = "Merge loading cancelled.".into();
-                }
-            }
-            let safe = self.workspace.as_ref().is_some_and(|workspace| {
-                workspace.actions().iter().any(|action| {
-                    action.is_pending
-                        && action.kind == MergeActionKind::Safe
-                        && action.target_range.is_some()
-                })
+        let can_edit = self.workspace.is_some() && self.load.is_none();
+        let undo_shortcut = can_edit
+            && ui.memory(|memory| {
+                memory.has_focus(egui::Id::new(("merge-result", self.generation)))
+            })
+            && ui.input_mut(|input| {
+                input.consume_key(egui::Modifiers::COMMAND, egui::Key::Z)
+                    || input.consume_key(egui::Modifiers::CTRL, egui::Key::Z)
             });
-            if ui
-                .add_enabled(
-                    safe && self.load.is_none(),
-                    egui::Button::new("Auto merge nonconflicting"),
-                )
-                .clicked()
-            {
-                if let Some(workspace) = &mut self.workspace {
-                    match workspace.auto_merge() {
+        if undo_shortcut {
+            self.workspace.as_mut().unwrap().undo();
+            self.error = None;
+        }
+        if can_edit
+            && !self.is_saving()
+            && ui.input_mut(|input| {
+                input.consume_key(egui::Modifiers::COMMAND, egui::Key::S)
+                    || input.consume_key(egui::Modifiers::CTRL, egui::Key::S)
+            })
+        {
+            self.save_result(ui.ctx(), false);
+        }
+        self.legend(ui);
+        ui.add_space(5.0);
+        let available = ui.available_rect_before_wrap();
+        let footer_height = control_extent(ui) + 10.0;
+        let footer = Rect::from_min_max(
+            egui::pos2(
+                available.left(),
+                (available.bottom() - footer_height).max(available.top()),
+            ),
+            available.max,
+        );
+        let body = Rect::from_min_max(
+            available.min,
+            egui::pos2(available.right(), (footer.top() - 5.0).max(available.top())),
+        );
+        ui.scope_builder(egui::UiBuilder::new().max_rect(body), |ui| {
+            ui.set_clip_rect(ui.clip_rect().intersect(body));
+            egui::Frame::new()
+                .fill(palette.panel)
+                .stroke(Stroke::new(1.0, palette.border))
+                .show(ui, |ui| {
+                    self.inputs(ui);
+                    ui.separator();
+                    if self.start_requested && self.ready() {
+                        self.start_requested = false;
+                        self.request_replace(ReplaceMerge::Open, ui.ctx());
+                    }
+                    if self.workspace.is_some() {
+                        ui.add_enabled_ui(self.load.is_none(), |ui| self.panes(ui));
+                    } else {
+                        let height = (ui.available_height() - 2.0).max(0.0);
+                        ui.columns(3, |columns| {
+                            for (index, column) in columns.iter_mut().enumerate() {
+                                let (rect, _) = column.allocate_exact_size(
+                                    egui::vec2(column.available_width(), height),
+                                    Sense::hover(),
+                                );
+                                let target = rect.shrink2(egui::vec2(24.0, 40.0));
+                                column.painter().rect_stroke(
+                                    target,
+                                    6,
+                                    Stroke::new(1.0, palette.border),
+                                    egui::StrokeKind::Inside,
+                                );
+                                column.painter().text(
+                                    target.center() - egui::vec2(0.0, 12.0),
+                                    Align2::CENTER_CENTER,
+                                    if index == 1 {
+                                        "Editable merged result"
+                                    } else {
+                                        "Choose a file"
+                                    },
+                                    FontId::proportional(14.0),
+                                    palette.muted,
+                                );
+                                column.painter().text(
+                                    target.center() + egui::vec2(0.0, 12.0),
+                                    Align2::CENTER_CENTER,
+                                    if index == 1 {
+                                        "Base file is optional"
+                                    } else {
+                                        "Browse or paste a path above"
+                                    },
+                                    FontId::proportional(11.0),
+                                    palette.muted,
+                                );
+                            }
+                        });
+                    }
+                });
+        });
+        let gap = ui.spacing().item_spacing.x;
+        let width = (body.width() - gap * 2.0) / 3.0;
+        for x in [
+            body.left() + width + gap / 2.0,
+            body.left() + width * 2.0 + gap * 1.5,
+        ] {
+            ui.painter().line_segment(
+                [egui::pos2(x, body.top()), egui::pos2(x, body.bottom())],
+                Stroke::new(1.0, palette.border),
+            );
+        }
+        ui.scope_builder(egui::UiBuilder::new().max_rect(footer), |ui| {
+            self.footer(ui)
+        });
+        self.dialogs(ui.ctx());
+    }
+
+    fn legend(&mut self, ui: &mut egui::Ui) {
+        let palette = Palette::for_context(ui.ctx());
+        let extent = control_extent(ui);
+        let gap = ui.spacing().item_spacing.x;
+        let (row, _) =
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), extent), Sense::hover());
+        let actions =
+            Rect::from_center_size(row.center(), egui::vec2(4.0 * extent + 3.0 * gap, extent));
+        let left = Rect::from_min_max(row.min, egui::pos2(actions.left() - gap, row.bottom()));
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(left)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            |ui| {
+                ui.set_clip_rect(ui.clip_rect().intersect(left));
+                for icon in [
+                    StatusIcon::Different,
+                    StatusIcon::LeftOnly,
+                    StatusIcon::RightOnly,
+                    StatusIcon::Conflict,
+                ] {
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::hover());
+                    paint_status_icon(ui.painter(), rect.center(), icon);
+                    ui.label(
+                        RichText::new(icon.label())
+                            .size(10.0)
+                            .color(icon.color(palette)),
+                    );
+                    ui.add_space(5.0);
+                }
+                if icon_button(ui, ToolbarIcon::New, !self.is_saving(), "New merge").clicked() {
+                    self.request_replace(ReplaceMerge::New, ui.ctx());
+                }
+            },
+        );
+        let ready = self.workspace.is_some() && self.load.is_none();
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(actions)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            |ui| {
+                for (icon, side, label) in [
+                    (
+                        ToolbarIcon::AcceptAllLeft,
+                        MergeSide::Incoming,
+                        "Accept All Left",
+                    ),
+                    (
+                        ToolbarIcon::AcceptAllRight,
+                        MergeSide::Current,
+                        "Accept All Right",
+                    ),
+                ] {
+                    if icon_button(ui, icon, ready, label).clicked() {
+                        self.workspace.as_mut().unwrap().accept_all(side);
+                        self.error = None;
+                    }
+                }
+                let safe = ready
+                    && self
+                        .workspace
+                        .as_ref()
+                        .unwrap()
+                        .actions()
+                        .iter()
+                        .any(|action| {
+                            action.is_pending
+                                && action.kind == MergeActionKind::Safe
+                                && action.target_range.is_some()
+                        });
+                if icon_button(ui, ToolbarIcon::AutoMerge, safe, "Auto Merge Non-Conflicts")
+                    .clicked()
+                {
+                    match self.workspace.as_mut().unwrap().auto_merge() {
                         Ok(_) => self.error = None,
                         Err(error) => self.error = Some(error.to_string()),
                     }
                 }
-            }
-            let undo = self
-                .workspace
-                .as_ref()
-                .is_some_and(MergeWorkspace::can_undo);
-            let undo_shortcut = self.workspace.is_some()
-                && self.load.is_none()
-                && ui.memory(|memory| {
-                    memory.has_focus(egui::Id::new(("merge-result", self.generation)))
-                })
-                && ui.input_mut(|input| {
-                    input.consume_key(egui::Modifiers::COMMAND, egui::Key::Z)
-                        || input.consume_key(egui::Modifiers::CTRL, egui::Key::Z)
-                });
-            if ui.add_enabled(undo, egui::Button::new("Undo")).clicked() || undo_shortcut {
-                if let Some(workspace) = &mut self.workspace {
-                    workspace.undo();
+                let undo = ready && self.workspace.as_ref().unwrap().can_undo();
+                if icon_button(ui, ToolbarIcon::Undo, undo, "Undo").clicked() {
+                    self.workspace.as_mut().unwrap().undo();
+                    self.error = None;
                 }
-                self.error = None;
-            }
-            let can_save = self.workspace.is_some() && !self.is_saving() && self.load.is_none();
-            let save_shortcut = can_save
-                && ui.input_mut(|input| {
-                    input.consume_key(egui::Modifiers::COMMAND, egui::Key::S)
-                        || input.consume_key(egui::Modifiers::CTRL, egui::Key::S)
-                });
+            },
+        );
+        let right = Rect::from_min_max(egui::pos2(actions.right() + gap, row.top()), row.max);
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(right)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            |ui| {
+                let zoom_width = ui
+                    .painter()
+                    .layout_no_wrap(
+                        format!("Zoom {:.0}%", ui.ctx().zoom_factor() * 100.0),
+                        egui::TextStyle::Button.resolve(ui.style()),
+                        palette.muted,
+                    )
+                    .size()
+                    .x
+                    + 2.0 * ui.spacing().button_padding.x
+                    + 2.0 * (extent + gap);
+                let width = (ui.available_width() - zoom_width - gap).max(0.0);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(width, extent),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.set_clip_rect(ui.clip_rect().intersect(ui.max_rect()));
+                        if let Some(error) = &self.error {
+                            status_label(ui, error, palette.error);
+                        } else if self.load.is_some() {
+                            ui.spinner();
+                            status_label(ui, "Loading merge…", palette.muted);
+                        } else if self.is_saving() {
+                            ui.spinner();
+                            status_label(ui, "Saving merge…", palette.muted);
+                        } else if let Some(workspace) = &self.workspace {
+                            let count = workspace
+                                .actions()
+                                .iter()
+                                .filter(|action| {
+                                    action.kind == MergeActionKind::Conflict && action.is_pending
+                                })
+                                .count();
+                            status_label(
+                                ui,
+                                &format!("{count} conflict lines to review"),
+                                palette.muted,
+                            );
+                        }
+                    },
+                );
+                zoom_controls(ui);
+            },
+        );
+    }
+
+    fn footer(&mut self, ui: &mut egui::Ui) {
+        let palette = Palette::for_context(ui.ctx());
+        let ready = self.workspace.is_some() && self.load.is_none() && !self.is_saving();
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui
-                .add_enabled(can_save, egui::Button::new("Save"))
+                .add_enabled(ready, egui::Button::new("Finish Merge"))
+                .on_hover_text("Save any outstanding edits and finish this merge")
                 .clicked()
-                || save_shortcut
             {
+                self.finish_merge(ui.ctx());
+            }
+            let save = ui
+                .add_enabled(ready, egui::Button::new("Save"))
+                .on_hover_text("Save the merged result. Right-click for Save As.");
+            if save.clicked() {
                 self.save_result(ui.ctx(), false);
             }
-            if ui
-                .add_enabled(can_save, egui::Button::new("Save As…"))
-                .clicked()
-            {
-                self.save_result(ui.ctx(), true);
-            }
-            zoom_controls(ui);
-        });
-        ui.horizontal(|ui| {
-            ui.colored_label(palette.error, "! Conflict");
-            ui.colored_label(palette.changed, "Nonconflicting block");
-            if let Some(workspace) = &self.workspace {
-                let conflicts = workspace
-                    .actions()
-                    .iter()
-                    .filter(|action| action.kind == MergeActionKind::Conflict && action.is_pending)
-                    .count();
-                ui.label(format!("{conflicts} conflict lines to review"));
-                if self.loaded_paths.as_ref().unwrap_or(&self.paths)[1].is_empty() {
-                    ui.label("No base: choose differing lines manually.");
-                }
-            }
-        });
-        if let Some(error) = &self.error {
-            status_label(ui, error, palette.error);
-        } else if self.is_saving() {
-            status_label(ui, "Saving merged result…", palette.muted);
-        } else {
-            status_label(ui, &self.message, palette.muted);
-        }
-        ui.separator();
-        if self.workspace.is_some() {
-            ui.add_enabled_ui(self.load.is_none(), |ui| self.panes(ui));
-        } else {
-            let height = ui.available_height().max(0.0);
-            ui.columns(3, |columns| {
-                for (column, label) in columns.iter_mut().zip(["INCOMING", "RESULT · EDITABLE", "CURRENT"]) {
-                    egui::Frame::new().fill(palette.panel).inner_margin(10).show(column, |ui| {
-                        ui.set_min_height((height - 22.0).max(0.0));
-                        ui.label(RichText::new(label).strong());
-                        ui.add_space(30.0);
-                        ui.label(if label.starts_with("RESULT") { "Choose Incoming and Current, then Open merge. Add their common ancestor as Base to auto merge safe changes." } else { "Browse or paste a file path above." });
-                    });
+            save.context_menu(|ui| {
+                if ui
+                    .add_enabled(ready, egui::Button::new("Save As…"))
+                    .clicked()
+                {
+                    self.save_result(ui.ctx(), true);
+                    ui.close();
                 }
             });
-        }
-        self.dialogs(ui.ctx());
+            let path = self
+                .output
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "Merged result".into());
+            let dirty = self
+                .workspace
+                .as_ref()
+                .is_some_and(MergeWorkspace::is_dirty);
+            status_label(
+                ui,
+                &format!("{}{}", path, if dirty { " · Unsaved changes" } else { "" }),
+                palette.muted,
+            );
+        });
     }
 
     fn inputs(&mut self, ui: &mut egui::Ui) {
+        let mut commit = false;
         ui.columns(3, |columns| {
             for (index, column) in columns.iter_mut().enumerate() {
-                let label = ["Incoming", "Base (optional common ancestor)", "Current"][index];
-                column.label(RichText::new(label).strong());
-                column.horizontal(|ui| {
-                    let width = (ui.available_width() - 58.0).max(20.0);
-                    if ui
-                        .add(
-                            egui::TextEdit::singleline(&mut self.paths[index])
-                                .id_salt(("merge-path", index))
-                                .desired_width(width)
-                                .hint_text("Paste a file path"),
-                        )
-                        .changed()
-                    {
-                        self.native_paths[index] = None;
-                    }
-                    if ui.button("Browse").clicked() {
-                        let mut dialog =
-                            rfd::FileDialog::new().set_title(format!("Choose {label} file"));
-                        if let Some(parent) = self
-                            .source_path(index)
-                            .parent()
-                            .filter(|parent| !parent.as_os_str().is_empty())
-                        {
-                            dialog = dialog.set_directory(parent);
+                egui::Frame::new().inner_margin(7).show(column, |ui| {
+                    ui.horizontal(|ui| {
+                        let palette = Palette::for_context(ui.ctx());
+                        let (label, _) = ui.allocate_exact_size(egui::vec2(40.0, control_extent(ui)), Sense::hover());
+                        ui.painter().text(label.left_center(), Align2::LEFT_CENTER, ["LEFT", "BASE", "RIGHT"][index], FontId::monospace(10.0), [palette.left_only, palette.accent, palette.right_only][index]);
+                        let width = (ui.available_width() - control_extent(ui) - ui.spacing().item_spacing.x).max(20.0);
+                        let response = ui.add(egui::TextEdit::singleline(&mut self.paths[index]).id_salt(("merge-path", index)).font(comparison_font(ui.ctx())).margin(0).frame(egui::Frame::NONE).desired_width(width).hint_text(if index == 1 { "Optional ancestor" } else { "Choose a file" })).on_hover_text(if index == 1 { "Optional common ancestor for conflict detection. The Base pane below is the editable merged result." } else if index == 0 { "Incoming file (Left)" } else { "Current file (Right)" });
+                        if response.changed() { self.native_paths[index] = None; self.path_edits[index] = true; self.load = None; }
+                        if self.path_edits[index] && (response.lost_focus() || (response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)))) {
+                            self.path_edits[index] = false;
+                            commit = true;
                         }
-                        if let Some(path) = dialog.pick_file() {
-                            self.paths[index] = path.to_string_lossy().into_owned();
-                            self.native_paths[index] = Some(path);
+                        let browse = ["Browse left merge file", "Browse base file", "Browse right merge file"][index];
+                        if icon_button(ui, ToolbarIcon::Browse, true, browse).clicked() {
+                            let mut dialog = rfd::FileDialog::new().set_title(browse);
+                            if let Some(parent) = self.source_path(index).parent().filter(|parent| !parent.as_os_str().is_empty()) { dialog = dialog.set_directory(parent); }
+                            if let Some(path) = dialog.pick_file() {
+                                self.paths[index] = path.to_string_lossy().into_owned(); self.native_paths[index] = Some(path); commit = true;
+                            }
                         }
-                    }
+                    });
                 });
             }
         });
+        if commit {
+            self.start_requested = true;
+        }
     }
 
     fn panes(&mut self, ui: &mut egui::Ui) {
@@ -408,35 +643,6 @@ impl MergeView {
         let workspace = self.workspace.as_mut().unwrap();
         let font = comparison_font(ui.ctx());
         let row_height = ui.fonts_mut(|fonts| fonts.row_height(&font));
-        ui.columns(3, |columns| {
-            for (index, column) in columns.iter_mut().enumerate() {
-                let (label, color) = match index {
-                    0 => ("INCOMING", palette.left_only),
-                    1 => (
-                        if workspace.is_dirty() {
-                            "RESULT · EDITABLE · UNSAVED"
-                        } else {
-                            "RESULT · EDITABLE"
-                        },
-                        palette.accent,
-                    ),
-                    _ => ("CURRENT", palette.right_only),
-                };
-                column.colored_label(color, RichText::new(label).strong());
-                let path = if index == 1 {
-                    self.output
-                        .as_ref()
-                        .map(|path| path.display().to_string())
-                        .unwrap_or_else(|| "Choose destination with Save".into())
-                } else {
-                    self.loaded_paths.as_ref().unwrap_or(&self.paths)[index].clone()
-                };
-                column.add(
-                    egui::Label::new(RichText::new(path).monospace().color(palette.muted))
-                        .truncate(),
-                );
-            }
-        });
         let mut choice = None;
         let mut result = workspace.result().to_owned();
         let before = result.clone();
@@ -560,6 +766,9 @@ impl MergeView {
             });
             if cancel {
                 self.replace = None;
+                if matches!(operation, ReplaceMerge::Open) {
+                    self.restore_loaded_sources();
+                }
             }
             if discard {
                 self.replace = None;
@@ -580,6 +789,7 @@ impl MergeView {
             });
             if cancel {
                 self.overwrite = None;
+                self.finish_requested = false;
             }
             if confirm {
                 let (path, contents) = self.overwrite.take().unwrap();
@@ -743,9 +953,9 @@ mod tests {
             set_theme(&ctx, theme);
             let mut view = fixture();
             let output = render(&mut view, &ctx, Vec::new());
-            let incoming = text_center(&output, "INCOMING");
-            let result = text_center(&output, "RESULT · EDITABLE");
-            let current = text_center(&output, "CURRENT");
+            let incoming = text_center(&output, "LEFT");
+            let result = text_center(&output, "BASE");
+            let current = text_center(&output, "RIGHT");
             assert!(incoming.x < result.x && result.x < current.x);
             let workspace = view.workspace.as_ref().unwrap();
             let actions = workspace.actions();
@@ -772,17 +982,27 @@ mod tests {
                 view.workspace.as_ref().unwrap().result(),
                 "heading\nA\nB\nmode=current\nend\n"
             );
-            let output = render(&mut view, &ctx, Vec::new());
-            click(&mut view, &ctx, text_center(&output, "Undo"));
+            render(&mut view, &ctx, Vec::new()).drop_without_applying_deltas();
+            click(
+                &mut view,
+                &ctx,
+                ctx.read_response(egui::Id::new("Undo"))
+                    .unwrap()
+                    .rect
+                    .center(),
+            );
             assert_eq!(
                 view.workspace.as_ref().unwrap().result(),
                 "heading\na\nb\nmode=current\nend\n"
             );
-            let output = render(&mut view, &ctx, Vec::new());
+            render(&mut view, &ctx, Vec::new()).drop_without_applying_deltas();
             click(
                 &mut view,
                 &ctx,
-                text_center(&output, "Auto merge nonconflicting"),
+                ctx.read_response(egui::Id::new("Auto Merge Non-Conflicts"))
+                    .unwrap()
+                    .rect
+                    .center(),
             );
             assert_eq!(
                 view.workspace.as_ref().unwrap().result(),
@@ -930,6 +1150,164 @@ mod tests {
         assert_eq!(display, "α\nβ\r\nγ\n");
         assert_eq!(display.len(), text.len());
         assert_eq!(display.chars().count(), text.chars().count());
+    }
+
+    #[test]
+    fn merge_icons_share_centered_legend_and_save_finish_stay_bottom_right() {
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            for (width, height) in [(900.0, 650.0), (1200.0, 800.0)] {
+                let ctx = egui::Context::default();
+                set_theme(&ctx, theme);
+                let mut view = fixture();
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(
+                            Pos2::ZERO,
+                            egui::vec2(width, height),
+                        )),
+                        ..Default::default()
+                    },
+                    |ui| view.render(ui),
+                );
+                output.textures_delta.clear();
+                let controls: Vec<_> = [
+                    "Accept All Left",
+                    "Accept All Right",
+                    "Auto Merge Non-Conflicts",
+                    "Undo",
+                ]
+                .iter()
+                .map(|label| ctx.read_response(egui::Id::new(label)).unwrap().rect)
+                .collect();
+                for pair in controls.windows(2) {
+                    assert!(pair[0].right() < pair[1].left());
+                    assert!((pair[0].center().y - pair[1].center().y).abs() < 0.5);
+                }
+                assert!(
+                    (controls[0].union(*controls.last().unwrap()).center().x - width / 2.0).abs()
+                        < 1.0
+                );
+                let conflict = text_center(&output, "Conflict");
+                assert!(conflict.x < controls[0].left());
+                assert!((conflict.y - controls[0].center().y).abs() < 1.0);
+                let save = text_center(&output, "Save");
+                let finish = text_center(&output, "Finish Merge");
+                assert!(save.x < finish.x && save.x > width * 0.7);
+                assert!(save.y > height - 35.0 && (save.y - finish.y).abs() < 0.5);
+                assert!(
+                    ctx.read_response(egui::Id::new("Browse base file"))
+                        .unwrap()
+                        .rect
+                        .bottom()
+                        < save.y
+                );
+                let before = view.workspace.as_ref().unwrap().result().to_owned();
+                click(&mut view, &ctx, controls[0].center());
+                assert_eq!(
+                    view.workspace.as_ref().unwrap().result(),
+                    "heading\nA\nB\nmode=incoming\nend\n"
+                );
+                render(&mut view, &ctx, Vec::new()).drop_without_applying_deltas();
+                click(
+                    &mut view,
+                    &ctx,
+                    ctx.read_response(egui::Id::new("Undo"))
+                        .unwrap()
+                        .rect
+                        .center(),
+                );
+                assert_eq!(view.workspace.as_ref().unwrap().result(), before);
+                render(&mut view, &ctx, Vec::new()).drop_without_applying_deltas();
+                click(
+                    &mut view,
+                    &ctx,
+                    ctx.read_response(egui::Id::new("Accept All Right"))
+                        .unwrap()
+                        .rect
+                        .center(),
+                );
+                assert!(
+                    view.workspace
+                        .as_ref()
+                        .unwrap()
+                        .actions()
+                        .iter()
+                        .all(|action| !action.is_pending)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn finishing_requires_successful_current_snapshot_and_keeps_edits_on_failure() {
+        let ctx = egui::Context::default();
+        let mut view = fixture();
+        view.finish_requested = true;
+        view.accept_save_event(SaveEvent::Failed("write failed".into()));
+        assert!(!view.is_finished() && !view.finish_requested);
+        let snapshot = view.workspace.as_ref().unwrap().result().to_owned();
+        view.finish_requested = true;
+        view.workspace
+            .as_mut()
+            .unwrap()
+            .edit_result("newer edits".into());
+        view.accept_save_event(SaveEvent::Complete(PathBuf::from("result.txt"), snapshot));
+        assert!(!view.is_finished());
+        assert!(view.workspace.as_ref().unwrap().is_dirty());
+        view.finish_requested = true;
+        view.accept_save_event(SaveEvent::Complete(
+            PathBuf::from("result.txt"),
+            "newer edits".into(),
+        ));
+        assert!(view.is_finished());
+        let mut view = fixture();
+        view.output = Some(PathBuf::from("already-saved.txt"));
+        view.finish_merge(&ctx);
+        assert!(view.is_finished() && !view.is_saving());
+    }
+
+    #[test]
+    fn rejected_or_failed_source_replacement_restores_active_path_headers() {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut view = fixture();
+        let active = view.paths.clone();
+        let native = active.clone().map(|path| Some(PathBuf::from(path)));
+        view.loaded_paths = Some(active.clone());
+        view.loaded_native_paths = Some(native.clone());
+        view.native_paths = native.clone();
+        view.workspace
+            .as_mut()
+            .unwrap()
+            .edit_result("unsaved result".into());
+        view.paths[0] = "different.txt".into();
+        view.native_paths[0] = Some(PathBuf::from("different.txt"));
+        view.request_replace(ReplaceMerge::Open, &ctx);
+        render(&mut view, &ctx, Vec::new()).drop_without_applying_deltas();
+        let output = render(&mut view, &ctx, Vec::new());
+        click(&mut view, &ctx, text_center(&output, "Keep merging"));
+        assert_eq!(view.paths, active);
+        assert_eq!(view.native_paths, native);
+        view.paths[0] = "different.txt".into();
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(Err(CompareError {
+                path: None,
+                kind: versus::CompareErrorKind::Io,
+                message: "Cannot read replacement source".into(),
+            }))
+            .unwrap();
+        view.load = Some(LoadJob {
+            receiver,
+            cancellation: Arc::new(AtomicBool::new(false)),
+            display_paths: view.paths.clone(),
+            native_paths: view.native_paths.clone(),
+        });
+        view.poll(&ctx);
+        assert_eq!(view.paths, active);
+        assert_eq!(view.native_paths, native);
+        assert_eq!(view.workspace.as_ref().unwrap().result(), "unsaved result");
+        assert!(view.error.is_some());
     }
 
     #[test]

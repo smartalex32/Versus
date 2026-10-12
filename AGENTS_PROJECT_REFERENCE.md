@@ -8,7 +8,8 @@ browse opens the corresponding native picker directly. Matching pairs compare
 automatically and mixed types show an explanation. Linked folder trees
 open read-only, aligned text comparisons on file double-click; Back preserves
 folder-view state and is omitted for directly selected files. File Merge opens
-Incoming / editable Result / Current, with an optional common ancestor input.
+Left (Incoming) / Base (editable result) / Right (Current), with an optional
+common ancestor input. File Merge is the third centered header option.
 Runtime behavior must
 not rely on Internet services, telemetry, automatic updates, a managed runtime, or
 background services. Network-mounted paths are handled through normal filesystem
@@ -24,6 +25,12 @@ APIs and must fail cleanly when unavailable.
 - `src/app/merge_view.rs` owns the GUI-only merge workflow, background input loads
   and saves, source selectors, per-block safe arrows and per-line conflict arrows,
   a full editable result, undo, and discard/overwrite confirmation. Input panes
+  use the shared pane styling. The legend centers icon actions for Accept All Left,
+  Accept All Right, Auto Merge Non-Conflicts, and Undo, with a conflict legend icon.
+  Save and Finish Merge sit at the bottom right; finishing saves outstanding edits
+  before returning to comparison and keeps the merge open on cancellation/failure.
+  Bulk source choices use one undo snapshot, preserving original bytes. Source
+  header paths revert to the loaded inputs after a cancelled or failed reload.
   share diff alignment; the result uses its own live line numbers. All three panes
   share vertical scrolling, with independent horizontal scrolling.
   `src/core/merge_workspace.rs` owns optional-base conflict detection, action

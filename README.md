@@ -8,13 +8,18 @@ authentication or make outbound network requests at runtime.
 
 ## Use
 
-**File Merge**, at the upper right, opens Incoming on the left, an editable Result
-in the middle, and Current on the right. Browse or paste the two file paths and,
-optionally, their common ancestor in **Base**, then click **Open merge**. Opening
+**File Merge** is the third option in the centered header, alongside Folder Compare
+and File Compare. It opens **Left** (Incoming), **Base** (the editable merged
+result), and **Right** (Current). Browse or paste the two file paths and,
+optionally, their common ancestor in the Base path field. Selecting sources starts
+the merge; committing a typed path with Enter or leaving its field reloads it. Opening
 merge from a file comparison preselects its two files. The result starts with
 Current's contents; the input files remain read-only.
 
-With a base file, **Auto merge nonconflicting** combines the safe changes as one
+The legend row centers four icons with tooltips: **Accept All Left**, **Accept All
+Right**, **Auto Merge Non-Conflicts**, and **Undo**. Accept All replaces the result
+with that source in one undoable operation. The merge legend adds a conflict icon.
+With a base file, **Auto Merge Non-Conflicts** combines the safe changes as one
 undoable operation. Each consecutive nonconflicting block has one inward arrow
 per side. Conflicting lines have **!** indicators and individual arrows. Without
 a base, differing lines require a manual choice. You can also select, paste, and
@@ -24,8 +29,11 @@ scrolling is shared and horizontal scrolling is independent.
 
 **Undo** reverses typing, arrows, and automatic merges; Ctrl/Command+Z works while
 editing the result. Manual edits that overlap a pending action disable its arrow
-to protect your text; finish that part by typing, or undo the edit. **Save** chooses
-an output file initially and **Save As…** chooses another destination. Existing
+to protect your text; finish that part by typing, or undo the edit. **Save** and
+**Finish Merge** sit at the bottom right. Save chooses an output file initially;
+right-click Save for **Save As…**. Finish Merge saves outstanding edits and returns
+to the comparison after a successful save. Cancelling or failing a save keeps the
+merge open. Existing
 files require explicit overwrite confirmation. Saves preserve the buffer's line
 endings and final newline. Leaving or replacing an unsaved result asks before
 discarding it. Merge contents are never stored in comparison history. This merge

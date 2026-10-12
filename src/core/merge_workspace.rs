@@ -212,6 +212,21 @@ impl MergeWorkspace {
         }
         Ok(pending.len())
     }
+    /// Replaces the editable result with one original source and resolves every
+    /// pending action as a single undoable operation.
+    pub fn accept_all(&mut self, side: MergeSide) {
+        let source = source_from_rows(&self.rows, side);
+        if self.result == source && self.actions.iter().all(|action| !action.public.is_pending) {
+            return;
+        }
+        self.snapshot();
+        self.result = source;
+        for action in &mut self.actions {
+            action.public.is_pending = false;
+            action.public.target_range = None;
+            action.target = None;
+        }
+    }
     fn action(&self, id: usize) -> Result<&ActionData, MergeWorkspaceError> {
         self.actions
             .iter()
@@ -643,6 +658,26 @@ fn source_lines(text: &str) -> Vec<String> {
     }
     out
 }
+fn source_from_rows(rows: &[MergeDisplayRow], side: MergeSide) -> String {
+    rows.iter()
+        .filter_map(|row| match side {
+            MergeSide::Incoming => row.incoming.as_ref(),
+            MergeSide::Current => row.current.as_ref(),
+        })
+        .map(|line| {
+            format!(
+                "{}{}",
+                line.text,
+                match line.ending {
+                    MergeLineEnding::None => "",
+                    MergeLineEnding::Lf => "\n",
+                    MergeLineEnding::Crlf => "\r\n",
+                    MergeLineEnding::Cr => "\r",
+                }
+            )
+        })
+        .collect()
+}
 fn display_line(number: usize, line: &str) -> MergeDisplayLine {
     let (text, ending) = if let Some(value) = line.strip_suffix("\r\n") {
         (value, MergeLineEnding::Crlf)
@@ -719,30 +754,6 @@ mod tests {
             workspace.result(),
             "title=Workspace\ncolor=green\nsize=large\nmode=current\nnotes=ready\n"
         );
-    }
-
-    fn source_from_rows(rows: &[MergeDisplayRow], side: MergeSide) -> String {
-        rows.iter()
-            .filter_map(|row| {
-                if side == MergeSide::Incoming {
-                    row.incoming.as_ref()
-                } else {
-                    row.current.as_ref()
-                }
-            })
-            .map(|line| {
-                format!(
-                    "{}{}",
-                    line.text,
-                    match line.ending {
-                        MergeLineEnding::None => "",
-                        MergeLineEnding::Lf => "\n",
-                        MergeLineEnding::Crlf => "\r\n",
-                        MergeLineEnding::Cr => "\r",
-                    }
-                )
-            })
-            .collect()
     }
 
     #[test]
@@ -895,6 +906,70 @@ mod tests {
         assert!(!workspace.actions()[0].is_pending);
         assert!(workspace.undo());
         assert!(workspace.actions()[0].is_pending);
+    }
+
+    #[test]
+    fn accept_all_replaces_manual_result_and_undo_restores_actions() {
+        let base = "one\ntwo\nthree\n";
+        let incoming = "ONE\ntwo\nTHREE\n";
+        let current = "one\nTWO\nthree\n";
+        let mut workspace = MergeWorkspace::new(Some(base), incoming, current);
+        workspace.edit_result("typed by hand\n".into());
+        let before_actions = workspace.actions();
+
+        workspace.accept_all(MergeSide::Incoming);
+
+        assert_eq!(workspace.result(), incoming);
+        assert!(
+            workspace
+                .actions()
+                .iter()
+                .all(|action| !action.is_pending && action.target_range.is_none())
+        );
+        assert!(workspace.undo());
+        assert_eq!(workspace.result(), "typed by hand\n");
+        assert_eq!(workspace.actions(), before_actions);
+    }
+
+    #[test]
+    fn accept_all_current_resolves_without_text_change_and_undoes() {
+        let base = "before\n";
+        let mut workspace = MergeWorkspace::new(Some(base), "after\n", base);
+        let before_actions = workspace.actions();
+        assert_eq!(workspace.result(), base);
+
+        workspace.accept_all(MergeSide::Current);
+
+        assert_eq!(workspace.result(), base);
+        assert!(workspace.can_undo());
+        assert!(workspace.actions().iter().all(|action| !action.is_pending));
+        assert!(workspace.undo());
+        assert_eq!(workspace.actions(), before_actions);
+    }
+
+    #[test]
+    fn accept_all_preserves_unicode_bom_endings_and_empty_source() {
+        let incoming = "\u{feff}α\r\nβ\rγ\n";
+        let current = "current\n";
+        let mut workspace = MergeWorkspace::new(None, incoming, current);
+        workspace.accept_all(MergeSide::Incoming);
+        assert_eq!(workspace.result(), incoming);
+
+        workspace.accept_all(MergeSide::Current);
+        assert_eq!(workspace.result(), current);
+
+        let mut empty = MergeWorkspace::new(None, "", "current\r\n");
+        empty.accept_all(MergeSide::Incoming);
+        assert_eq!(empty.result(), "");
+        assert!(empty.undo());
+        assert_eq!(empty.result(), "current\r\n");
+    }
+
+    #[test]
+    fn accept_all_is_a_noop_when_source_is_already_fully_resolved() {
+        let mut workspace = MergeWorkspace::new(Some("same\n"), "same\n", "same\n");
+        workspace.accept_all(MergeSide::Incoming);
+        assert!(!workspace.can_undo());
     }
 
     #[test]

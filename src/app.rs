@@ -1268,6 +1268,11 @@ impl VersusApp {
                 ui.add_space(5.0);
                 if let Some(view) = &mut self.merge_view {
                     view.render(ui);
+                    if view.is_finished() {
+                        self.merge_view = None;
+                        self.pending_merge_exit = None;
+                        ui.ctx().request_repaint();
+                    }
                     return;
                 }
                 self.legend(ui);
@@ -1312,9 +1317,18 @@ impl VersusApp {
     }
 
     fn header(&mut self, ui: &mut egui::Ui) {
-        let modes = [ComparisonMode::Folder, ComparisonMode::File];
+        let modes = [
+            Some(ComparisonMode::Folder),
+            Some(ComparisonMode::File),
+            None,
+        ];
         let labels = modes.map(|mode| {
-            egui::WidgetText::from(RichText::new(mode.label()).size(14.0).strong()).into_galley(
+            egui::WidgetText::from(
+                RichText::new(mode.map_or("File Merge", ComparisonMode::label))
+                    .size(14.0)
+                    .strong(),
+            )
+            .into_galley(
                 ui,
                 Some(egui::TextWrapMode::Extend),
                 f32::INFINITY,
@@ -1326,7 +1340,7 @@ impl VersusApp {
             .each_ref()
             .map(|label| label.size().x + 22.0 + padding.x * 2.0);
         let gap = ui.spacing().item_spacing.x;
-        let group_width = widths.iter().sum::<f32>() + gap;
+        let group_width = widths.iter().sum::<f32>() + 2.0 * gap;
         let (header, _) = ui.allocate_exact_size(
             egui::vec2(ui.available_width(), 32.0_f32.max(control_extent(ui))),
             Sense::hover(),
@@ -1357,11 +1371,21 @@ impl VersusApp {
                 rect,
                 labels[index].clone(),
                 mode,
-                self.merge_view.is_none() && self.comparison_mode == mode,
+                mode.map_or(self.merge_view.is_some(), |mode| {
+                    self.merge_view.is_none() && self.comparison_mode == mode
+                }),
             )
             .clicked()
             {
-                self.switch_comparison_mode(mode);
+                if let Some(mode) = mode {
+                    self.switch_comparison_mode(mode);
+                } else if self.merge_view.is_none() {
+                    let mut view = MergeView::default();
+                    if let Some(file) = &self.file_view {
+                        view.set_sources(file.sources.clone());
+                    }
+                    self.merge_view = Some(view);
+                }
                 ui.ctx().request_repaint();
             }
             x += widths[index] + gap;
@@ -1402,23 +1426,8 @@ impl VersusApp {
             );
             ui.ctx().request_repaint();
         }
-        let merge_button = controls_ui.add(
-            egui::Button::new(RichText::new("File Merge").strong())
-                .selected(self.merge_view.is_some()),
-        );
-        if merge_button
-            .on_hover_text("Merge Incoming and Current into an editable result")
-            .clicked()
-        {
-            if self.merge_view.is_none() {
-                let mut view = MergeView::default();
-                if let Some(file) = &self.file_view {
-                    view.set_sources(file.sources.clone());
-                }
-                self.merge_view = Some(view);
-            }
-        }
-        if self.merge_view.is_some() {
+        if let Some(view) = &mut self.merge_view {
+            view.header_controls(&mut controls_ui);
             return;
         }
         match self.mode() {
@@ -2732,18 +2741,22 @@ fn comparison_mode_button(
     ui: &egui::Ui,
     rect: Rect,
     label: Arc<egui::Galley>,
-    mode: ComparisonMode,
+    mode: Option<ComparisonMode>,
     selected: bool,
 ) -> egui::Response {
     let response = ui
-        .interact(rect, egui::Id::new(mode.label()), Sense::click())
+        .interact(
+            rect,
+            egui::Id::new(mode.map_or("File Merge", ComparisonMode::label)),
+            Sense::click(),
+        )
         .on_hover_cursor(egui::CursorIcon::PointingHand);
     response.widget_info(|| {
         egui::WidgetInfo::selected(
             egui::WidgetType::Button,
             ui.is_enabled(),
             selected,
-            mode.label(),
+            mode.map_or("File Merge", ComparisonMode::label),
         )
     });
     let visuals = ui.style().interact_selectable(&response, selected);
@@ -2764,7 +2777,7 @@ fn comparison_mode_button(
         rect.left() + ui.spacing().button_padding.x + 8.0,
         rect.center().y,
     );
-    if mode == ComparisonMode::Folder {
+    if mode == Some(ComparisonMode::Folder) {
         paint_icon(
             ui.painter(),
             icon_center,
@@ -3095,6 +3108,7 @@ enum StatusIcon {
     RightOnly,
     TypeMismatch,
     Error,
+    Conflict,
 }
 
 impl StatusIcon {
@@ -3105,6 +3119,7 @@ impl StatusIcon {
             Self::RightOnly => "Right only",
             Self::TypeMismatch => "Type mismatch",
             Self::Error => "Read error",
+            Self::Conflict => "Conflict",
         }
     }
     fn color(self, palette: Palette) -> Color32 {
@@ -3112,7 +3127,7 @@ impl StatusIcon {
             Self::Different => palette.changed,
             Self::LeftOnly => palette.left_only,
             Self::RightOnly => palette.right_only,
-            Self::TypeMismatch | Self::Error => palette.error,
+            Self::TypeMismatch | Self::Error | Self::Conflict => palette.error,
         }
     }
 }
@@ -3248,11 +3263,20 @@ fn paint_status_icon(painter: &egui::Painter, center: Pos2, icon: StatusIcon) {
             painter.line_segment([point(0.0, -2.0), point(0.0, 1.0)], stroke);
             painter.circle_filled(point(0.0, 3.0), 0.7, icon.color(palette));
         }
+        StatusIcon::Conflict => {
+            painter.circle_stroke(center, 6.0, stroke);
+            painter.line_segment([point(0.0, -3.0), point(0.0, 1.0)], stroke);
+            painter.circle_filled(point(0.0, 3.0), 0.8, icon.color(palette));
+        }
     }
 }
 
 #[derive(Clone, Copy)]
 enum ToolbarIcon {
+    AcceptAllLeft,
+    AcceptAllRight,
+    AutoMerge,
+    Undo,
     ZoomIn,
     ZoomOut,
     New,
@@ -3325,6 +3349,62 @@ fn icon_button_state(
         let point = |x, y| center + egui::vec2(x, y);
         let stroke = Stroke::new(1.4, color);
         match icon {
+            ToolbarIcon::AcceptAllLeft | ToolbarIcon::AcceptAllRight => {
+                let direction = if matches!(icon, ToolbarIcon::AcceptAllLeft) {
+                    1.0
+                } else {
+                    -1.0
+                };
+                for y in [-3.0, 3.0] {
+                    ui.painter().line_segment(
+                        [point(-6.0 * direction, y), point(5.0 * direction, y)],
+                        stroke,
+                    );
+                    ui.painter().line(
+                        vec![
+                            point(direction, y - 3.0),
+                            point(5.0 * direction, y),
+                            point(direction, y + 3.0),
+                        ],
+                        stroke,
+                    );
+                }
+            }
+            ToolbarIcon::AutoMerge => {
+                ui.painter().line(
+                    vec![
+                        point(-6.0, -6.0),
+                        point(-6.0, -2.0),
+                        point(0.0, 2.0),
+                        point(0.0, 6.0),
+                    ],
+                    stroke,
+                );
+                ui.painter().line(
+                    vec![point(6.0, -6.0), point(6.0, -2.0), point(0.0, 2.0)],
+                    stroke,
+                );
+                ui.painter().line(
+                    vec![point(-3.0, 3.0), point(0.0, 6.0), point(3.0, 3.0)],
+                    stroke,
+                );
+            }
+            ToolbarIcon::Undo => {
+                ui.painter().line(
+                    vec![
+                        point(-6.0, -3.0),
+                        point(1.0, -3.0),
+                        point(5.0, 0.0),
+                        point(5.0, 4.0),
+                        point(0.0, 6.0),
+                    ],
+                    stroke,
+                );
+                ui.painter().line(
+                    vec![point(-2.0, -7.0), point(-6.0, -3.0), point(-2.0, 1.0)],
+                    stroke,
+                );
+            }
             ToolbarIcon::ZoomIn | ToolbarIcon::ZoomOut => {
                 let lens = point(-2.0, -2.0);
                 ui.painter().circle_stroke(lens, 5.5, stroke);
@@ -5239,7 +5319,13 @@ mod tests {
                         .read_response(egui::Id::new("File Compare"))
                         .unwrap()
                         .rect;
-                    assert!((folder.union(file).center().x - screen.center().x).abs() < 0.5);
+                    let merge = ctx.read_response(egui::Id::new("File Merge")).unwrap().rect;
+                    assert!(
+                        (folder.union(file).union(merge).center().x - screen.center().x).abs()
+                            < 0.5
+                    );
+                    assert!(file.right() < merge.left());
+                    assert!(merge.right() < screen.right());
                     assert!(logo.right() < folder.left());
                     let theme_button = ctx
                         .read_response(egui::Id::new(if theme == egui::Theme::Dark {
