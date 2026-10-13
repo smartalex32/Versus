@@ -11,6 +11,7 @@ mod selection;
 fn main() -> std::process::ExitCode {
     let launch = match cli::parse(std::env::args_os().skip(1)) {
         Ok(cli::Command::Open(launch)) => launch,
+        Ok(cli::Command::Merge(request)) => return run_merge(request),
         Ok(cli::Command::Help) => {
             attach_parent_console();
             print!("{}", cli::HELP);
@@ -34,6 +35,45 @@ fn main() -> std::process::ExitCode {
             eprintln!("Versus: {error}");
             std::process::ExitCode::FAILURE
         }
+    }
+}
+
+fn run_merge(request: cli::MergeRequest) -> std::process::ExitCode {
+    use versus::core::{MergeHunkKind, SaveOptions, merge_three_way, save_text_safely};
+
+    let merge = match merge_three_way(&request.base, &request.ours, &request.theirs) {
+        Ok(merge) => merge,
+        Err(error) => {
+            attach_parent_console();
+            eprintln!("Versus: {error}");
+            return std::process::ExitCode::from(2);
+        }
+    };
+    if let Err(error) = save_text_safely(
+        &request.output,
+        &merge.merged,
+        &SaveOptions {
+            overwrite: request.overwrite,
+            line_ending: versus::core::LineEnding::Preserve,
+        },
+    ) {
+        attach_parent_console();
+        eprintln!("Versus: {error}");
+        return std::process::ExitCode::from(2);
+    }
+    if merge
+        .hunks
+        .iter()
+        .any(|hunk| hunk.kind == MergeHunkKind::Conflict)
+    {
+        attach_parent_console();
+        eprintln!(
+            "Versus: merge completed with conflicts; resolve markers in {}",
+            request.output.display()
+        );
+        std::process::ExitCode::from(1)
+    } else {
+        std::process::ExitCode::SUCCESS
     }
 }
 

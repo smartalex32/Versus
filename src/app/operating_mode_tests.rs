@@ -1,0 +1,356 @@
+use super::*;
+use std::{
+    path::PathBuf,
+    sync::Arc,
+    thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
+
+struct SourceFixture {
+    root: PathBuf,
+}
+
+impl SourceFixture {
+    fn new() -> Self {
+        let root = std::env::temp_dir().join(format!(
+            "versus-operating-mode-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("left")).unwrap();
+        std::fs::create_dir_all(root.join("right")).unwrap();
+        std::fs::write(root.join("left/one.txt"), "left one\n").unwrap();
+        std::fs::write(root.join("right/one.txt"), "right one\n").unwrap();
+        std::fs::write(root.join("left/new.txt"), "new left\n").unwrap();
+        std::fs::write(root.join("right/other.txt"), "right other\n").unwrap();
+        Self { root }
+    }
+
+    fn path(&self, relative: &str) -> PathBuf {
+        self.root.join(relative)
+    }
+}
+
+impl Drop for SourceFixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+fn draw(app: &mut VersusApp, ctx: &egui::Context, input: egui::RawInput) -> egui::FullOutput {
+    let mut output = ctx.run_ui(input, |ui| app.render(ui));
+    output.textures_delta.clear();
+    output
+}
+
+fn frame(app: &mut VersusApp, ctx: &egui::Context) -> egui::FullOutput {
+    draw(
+        app,
+        ctx,
+        egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0))),
+            ..Default::default()
+        },
+    )
+}
+
+fn tick(app: &mut VersusApp, ctx: &egui::Context) {
+    app.poll_sources(ctx);
+    app.poll_comparison(ctx);
+    app.poll_file_comparison(ctx);
+    if let Some(view) = &mut app.interactive {
+        view.poll(ctx);
+    }
+    if let Some(browser) = &mut app.merge_folders {
+        browser.poll(ctx);
+    }
+    if let (Some(browser), Some(view)) = (&mut app.merge_folders, &mut app.interactive) {
+        browser.poll_save(view, ctx);
+    }
+    app.sync_folder_merge_diff();
+    frame(app, ctx).drop_without_applying_deltas();
+}
+
+fn settle_sources(app: &mut VersusApp, ctx: &egui::Context) {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while app.source_jobs.iter().any(Option::is_some) {
+        tick(app, ctx);
+        assert!(Instant::now() < deadline, "source classification timed out");
+        thread::sleep(Duration::from_millis(1));
+    }
+    tick(app, ctx);
+}
+
+fn settle_interactive(app: &mut VersusApp, ctx: &egui::Context) {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while app.interactive.as_ref().is_some_and(|view| {
+        view.current_paths().is_none() || view.pair_paths() != view.current_paths()
+    }) {
+        tick(app, ctx);
+        assert!(Instant::now() < deadline, "working-copy load timed out");
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
+fn settle_folder_diff(app: &mut VersusApp, ctx: &egui::Context) {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while app.job.is_some() {
+        tick(app, ctx);
+        assert!(Instant::now() < deadline, "folder comparison timed out");
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
+#[derive(Debug)]
+struct TestDrop(PathBuf);
+
+impl egui::DroppedFile for TestDrop {
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+
+    fn bytes(&self) -> Result<Vec<u8>, String> {
+        panic!("merge drop must be classified from its path, not loaded on the UI thread")
+    }
+}
+
+fn drop_on(app: &mut VersusApp, ctx: &egui::Context, side: usize, path: PathBuf) {
+    frame(app, ctx).drop_without_applying_deltas();
+    let position = app.pane_rects[side].center();
+    draw(
+        app,
+        ctx,
+        egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0))),
+            events: vec![egui::Event::PointerMoved(position)],
+            dropped_files: vec![Arc::new(TestDrop(path)) as egui::DroppedFileHandle],
+            ..Default::default()
+        },
+    )
+    .drop_without_applying_deltas();
+}
+
+#[test]
+fn merge_selected_before_unrelated_files_never_starts_legacy_file_comparison() {
+    let sources = SourceFixture::new();
+    let ctx = egui::Context::default();
+    let mut app = VersusApp::default();
+    app.comparison_mode = ComparisonMode::File;
+    app.set_workspace_merge(true);
+    app.select_path(0, sources.path("left/one.txt"));
+    app.select_path(1, sources.path("right/other.txt"));
+
+    assert!(app.file_view.is_none());
+    assert!(app.job.is_none());
+    assert!(app.source_jobs.iter().any(Option::is_some));
+    settle_sources(&mut app, &ctx);
+    settle_interactive(&mut app, &ctx);
+
+    let view = app.interactive.as_ref().unwrap();
+    assert_eq!(
+        view.current_paths(),
+        Some(&[
+            sources.path("left/one.txt"),
+            sources.path("right/other.txt")
+        ])
+    );
+    assert!(!view.run_diff_enabled());
+    assert_eq!(view.merge_options(), [false; 3]);
+    assert_eq!(
+        [
+            app.show_only_differences,
+            app.ignore_whitespace,
+            app.ignore_line_endings,
+        ],
+        [true; 3]
+    );
+    assert!(app.file_view.is_none() && app.job.is_none() && app.tree.is_none());
+}
+
+#[test]
+fn merge_and_diff_toggles_keep_working_copies_and_mode_specific_preferences() {
+    let sources = SourceFixture::new();
+    let ctx = egui::Context::default();
+    let mut app = VersusApp::default();
+    app.comparison_mode = ComparisonMode::File;
+    app.set_workspace_merge(true);
+    app.select_path(0, sources.path("left/one.txt"));
+    app.select_path(1, sources.path("right/one.txt"));
+    settle_sources(&mut app, &ctx);
+    settle_interactive(&mut app, &ctx);
+
+    let right = sources.path("right/one.txt");
+    let mut edited = app.interactive.as_ref().unwrap().export_working_files();
+    edited.get_mut(&right).unwrap().text = "edited without alignment\n".into();
+    app.interactive
+        .as_mut()
+        .unwrap()
+        .ingest_working_files(&edited);
+    assert!(app.interactive.as_ref().unwrap().any_dirty());
+
+    app.set_workspace_merge(false);
+    assert_eq!(
+        app.interactive.as_ref().unwrap().working_text(1),
+        Some("edited without alignment\n")
+    );
+    assert_eq!(
+        [
+            app.show_only_differences,
+            app.ignore_whitespace,
+            app.ignore_line_endings,
+        ],
+        [true; 3]
+    );
+    app.set_workspace_merge(true);
+    let view = app.interactive.as_ref().unwrap();
+    assert_eq!(view.working_text(1), Some("edited without alignment\n"));
+    assert_eq!(view.merge_options(), [false; 3]);
+    assert!(!view.run_diff_enabled());
+    assert!(view.any_dirty());
+}
+
+#[test]
+fn merge_folder_navigation_is_metadata_only_until_run_diff_is_enabled() {
+    let sources = SourceFixture::new();
+    let ctx = egui::Context::default();
+    let mut app = VersusApp::default();
+    app.set_workspace_merge(true);
+    app.select_path(0, sources.path("left"));
+    app.select_path(1, sources.path("right"));
+    settle_sources(&mut app, &ctx);
+    tick(&mut app, &ctx);
+
+    assert!(app.merge_folders.is_some());
+    assert!(!app.merge_file_open);
+    assert!(app.file_view.is_none());
+    assert!(app.job.is_none());
+    assert!(app.tree.is_none());
+    let view = app.interactive.as_ref().unwrap();
+    assert!(!view.run_diff_enabled());
+    assert!(view.current_paths().is_none());
+}
+
+#[test]
+fn switching_folder_modes_replaces_results_with_the_correct_ignore_preferences() {
+    let sources = SourceFixture::new();
+    std::fs::write(sources.path("left/one.txt"), "let a = 1;\n").unwrap();
+    std::fs::write(sources.path("right/one.txt"), "let a=1;\n").unwrap();
+    let ctx = egui::Context::default();
+    let mut app = VersusApp::default();
+    app.set_workspace_merge(true);
+    app.select_path(0, sources.path("left"));
+    app.select_path(1, sources.path("right"));
+    settle_sources(&mut app, &ctx);
+    app.interactive.as_mut().unwrap().set_run_diff(true);
+    let state = |app: &VersusApp| {
+        app.tree
+            .as_ref()
+            .unwrap()
+            .all_rows()
+            .into_iter()
+            .find(|row| row.node.relative_path == PathBuf::from("one.txt"))
+            .unwrap()
+            .node
+            .state
+            .clone()
+    };
+    tick(&mut app, &ctx);
+    settle_folder_diff(&mut app, &ctx);
+    assert_eq!(state(&app), DirectoryEntryState::Different);
+    app.set_workspace_merge(false);
+    settle_folder_diff(&mut app, &ctx);
+    assert_eq!(state(&app), DirectoryEntryState::Same);
+    app.set_workspace_merge(true);
+    tick(&mut app, &ctx);
+    settle_folder_diff(&mut app, &ctx);
+    assert_eq!(state(&app), DirectoryEntryState::Different);
+    assert!(app.ignore_whitespace);
+    assert_eq!(
+        app.interactive.as_ref().unwrap().merge_options(),
+        [false; 3]
+    );
+}
+
+#[test]
+fn returning_from_a_folder_merge_editor_to_diff_reuses_roots_and_starts_comparison() {
+    let sources = SourceFixture::new();
+    let ctx = egui::Context::default();
+    let mut app = VersusApp::default();
+    app.select_path(0, sources.path("left"));
+    app.select_path(1, sources.path("right"));
+    settle_sources(&mut app, &ctx);
+    settle_folder_diff(&mut app, &ctx);
+    assert!(app.tree.is_some());
+
+    app.open_file(PathBuf::from("one.txt"), [true, true], false);
+    app.set_workspace_merge(true);
+    settle_interactive(&mut app, &ctx);
+    assert!(app.merge_folders.is_some());
+    assert_eq!(
+        app.interactive.as_ref().unwrap().current_paths(),
+        Some(&[sources.path("left/one.txt"), sources.path("right/one.txt")])
+    );
+
+    app.set_workspace_merge(false);
+    let output = frame(&mut app, &ctx);
+    let back = ctx
+        .read_response(egui::Id::new("Back to folders"))
+        .expect("folder merge editor should expose Back")
+        .rect
+        .center();
+    output.drop_without_applying_deltas();
+    for pressed in [true, false] {
+        draw(
+            &mut app,
+            &ctx,
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0))),
+                events: vec![
+                    egui::Event::PointerMoved(back),
+                    egui::Event::PointerButton {
+                        pos: back,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                ..Default::default()
+            },
+        )
+        .drop_without_applying_deltas();
+    }
+
+    assert!(!app.merge_mode);
+    assert!(!app.merge_file_open);
+    assert!(app.merge_folders.is_some());
+    assert!(
+        app.job.is_some(),
+        "Diff resumes a folder comparison after Back"
+    );
+}
+
+#[test]
+fn dropping_a_file_in_a_folder_merge_editor_replaces_only_that_editor_side() {
+    let sources = SourceFixture::new();
+    let ctx = egui::Context::default();
+    let mut app = VersusApp::default();
+    app.set_workspace_merge(true);
+    app.select_path(0, sources.path("left"));
+    app.select_path(1, sources.path("right"));
+    settle_sources(&mut app, &ctx);
+    let pair = [sources.path("left/one.txt"), sources.path("right/one.txt")];
+    app.interactive.as_mut().unwrap().open_pair(pair.clone());
+    app.merge_file_open = true;
+    settle_interactive(&mut app, &ctx);
+
+    drop_on(&mut app, &ctx, 0, sources.path("left/new.txt"));
+    settle_interactive(&mut app, &ctx);
+    assert_eq!(
+        app.interactive.as_ref().unwrap().current_paths(),
+        Some(&[sources.path("left/new.txt"), pair[1].clone()])
+    );
+    assert!(app.merge_folders.is_some());
+    assert_eq!(app.source_paths[1], Some(sources.path("right")));
+}

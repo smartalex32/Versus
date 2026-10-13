@@ -1,8 +1,12 @@
 use crate::recent::{RecentComparison, RecentComparisons};
 use crate::selection::{self, ComparisonMode, SelectionMode, SourceKind};
-mod merge_view;
+mod folder_browser;
+mod interactive_view;
+#[cfg(test)]
+mod operating_mode_tests;
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, Vec2};
-use merge_view::MergeView;
+use folder_browser::FolderBrowser;
+use interactive_view::InteractiveView;
 use std::{
     path::PathBuf,
     sync::{
@@ -194,7 +198,11 @@ impl Drop for FileView {
 }
 
 pub struct VersusApp {
-    merge_view: Option<MergeView>,
+    interactive: Option<InteractiveView>,
+    merge_mode: bool,
+    merge_folders: Option<FolderBrowser>,
+    merge_file_open: bool,
+    folder_diff_settings: Option<[bool; 3]>,
     pending_merge_exit: Option<MergeExit>,
     comparison_mode: ComparisonMode,
     file_view: Option<FileView>,
@@ -235,16 +243,22 @@ pub struct VersusApp {
     recent_message: Option<String>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum MergeExit {
-    Mode(ComparisonMode),
     Close,
+    New,
+    Mode(ComparisonMode),
+    Recent(RecentComparison),
 }
 
 impl Default for VersusApp {
     fn default() -> Self {
         Self {
-            merge_view: None,
+            interactive: None,
+            merge_mode: false,
+            merge_folders: None,
+            merge_file_open: false,
+            folder_diff_settings: None,
             pending_merge_exit: None,
             comparison_mode: ComparisonMode::Folder,
             file_view: None,
@@ -341,6 +355,18 @@ impl VersusApp {
     }
 
     fn open_recent(&mut self, entry: RecentComparison) {
+        if self
+            .interactive
+            .as_ref()
+            .is_some_and(|view| view.any_dirty() || view.is_saving())
+            || self
+                .merge_folders
+                .as_ref()
+                .is_some_and(|browser| browser.any_dirty() || browser.is_saving())
+        {
+            self.pending_merge_exit = Some(MergeExit::Recent(entry));
+            return;
+        }
         self.new_comparison();
         self.comparison_mode = entry.mode;
         for (side, path) in entry.paths.into_iter().enumerate() {
@@ -461,12 +487,23 @@ impl VersusApp {
     }
 
     fn switch_comparison_mode(&mut self, mode: ComparisonMode) {
-        if let Some(view) = &self.merge_view {
-            if view.needs_guard() {
-                self.pending_merge_exit = Some(MergeExit::Mode(mode));
-                return;
-            }
-            self.merge_view = None;
+        if self.comparison_mode != mode
+            && (self
+                .interactive
+                .as_ref()
+                .is_some_and(|view| view.any_dirty() || view.is_saving())
+                || self
+                    .merge_folders
+                    .as_ref()
+                    .is_some_and(|browser| browser.any_dirty() || browser.is_saving()))
+        {
+            self.pending_merge_exit = Some(MergeExit::Mode(mode));
+            return;
+        }
+        if self.merge_file_open && mode == ComparisonMode::Folder && self.merge_folders.is_some() {
+            self.merge_file_open = false;
+            self.comparison_mode = mode;
+            return;
         }
         if self.comparison_mode == mode {
             if mode == ComparisonMode::Folder
@@ -484,6 +521,30 @@ impl VersusApp {
     }
 
     fn new_comparison(&mut self) {
+        if self
+            .interactive
+            .as_ref()
+            .is_some_and(InteractiveView::is_saving)
+            || self
+                .merge_folders
+                .as_ref()
+                .is_some_and(FolderBrowser::is_saving)
+            || self
+                .interactive
+                .as_ref()
+                .is_some_and(InteractiveView::any_dirty)
+            || self
+                .merge_folders
+                .as_ref()
+                .is_some_and(FolderBrowser::any_dirty)
+        {
+            self.pending_merge_exit = Some(MergeExit::New);
+            return;
+        }
+        self.interactive = self.merge_mode.then(InteractiveView::default);
+        self.merge_folders = None;
+        self.merge_file_open = false;
+        self.folder_diff_settings = None;
         self.invalidate();
         self.paths = Default::default();
         self.source_paths = [None, None];
@@ -531,6 +592,32 @@ impl VersusApp {
                     _ => ComparisonMode::File,
                 };
             }
+        }
+        if self.merge_mode {
+            let recent_mode = match selection::selection_mode(self.source_kinds) {
+                SelectionMode::File
+                    if self
+                        .source_kinds
+                        .iter()
+                        .all(|kind| *kind == Some(SourceKind::File)) =>
+                {
+                    Some(ComparisonMode::File)
+                }
+                SelectionMode::Folder
+                    if self
+                        .source_kinds
+                        .iter()
+                        .all(|kind| *kind == Some(SourceKind::Folder)) =>
+                {
+                    Some(ComparisonMode::Folder)
+                }
+                _ => None,
+            };
+            if let Some(mode) = recent_mode {
+                self.record_recent(mode, self.comparison_paths());
+            }
+            self.open_interactive_sources();
+            return;
         }
         match selection::selection_mode(self.source_kinds) {
             SelectionMode::File => {
@@ -1128,6 +1215,17 @@ impl VersusApp {
             if dropped.len() == 1 && !dropped[0].path().as_os_str().is_empty() && target.is_some() {
                 let side = target.unwrap();
                 let path = dropped[0].path().to_path_buf();
+                if self.merge_file_open {
+                    if let Some(view) = &mut self.interactive {
+                        if let Some(paths) = view.pair_paths() {
+                            let mut paths = paths.clone();
+                            paths[side] = absolute_native_path(path);
+                            view.open_pair(paths);
+                            ui.ctx().request_repaint();
+                            return;
+                        }
+                    }
+                }
                 // A drop in a drilled-down file view retains the other displayed
                 // file, rather than accidentally pairing it with the folder root.
                 if let Some(view) = self.file_view.as_ref().filter(|view| view.from_folders) {
@@ -1222,13 +1320,9 @@ impl VersusApp {
             .show(ui, |ui| {
                 self.header(ui);
                 ui.add_space(5.0);
-                if let Some(view) = &mut self.merge_view {
-                    view.render(ui);
-                    if view.is_finished() {
-                        self.merge_view = None;
-                        self.pending_merge_exit = None;
-                        ui.ctx().request_repaint();
-                    }
+                self.workspace_mode_toggle(ui);
+                if self.interactive.is_some() && (self.merge_mode || self.merge_file_open) {
+                    self.interactive_area(ui);
                     return;
                 }
                 self.legend(ui);
@@ -1266,27 +1360,268 @@ impl VersusApp {
                     self.footer(ui);
                 });
             });
-        if let Some(view) = &mut self.merge_view {
-            view.drag_and_drop(ui, self.native_drag_position.take());
-        } else {
-            self.drag_and_drop(ui);
-        }
+        self.sync_folder_merge_diff();
+        self.sync_working_folder_diff(ui.ctx());
+        self.drag_and_drop(ui);
         self.merge_exit_dialog(ui.ctx());
     }
 
-    fn header(&mut self, ui: &mut egui::Ui) {
-        let modes = [
-            Some(ComparisonMode::Folder),
-            Some(ComparisonMode::File),
-            None,
+    fn workspace_mode_toggle(&mut self, ui: &mut egui::Ui) {
+        let mut merge = self.merge_mode;
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut merge, false, "Diff")
+                .on_hover_text("Inspect differences using comparison preferences");
+            ui.selectable_value(&mut merge, true, "Merge")
+                .on_hover_text("Edit and transfer content; comparison is optional");
+        });
+        if merge != self.merge_mode {
+            self.set_workspace_merge(merge);
+        }
+    }
+
+    fn set_workspace_merge(&mut self, merge: bool) {
+        if self.merge_mode == merge {
+            return;
+        }
+        self.merge_mode = merge;
+        // A folder result produced in the other mode has different comparison
+        // preferences. Force its replacement when Merge is entered again.
+        self.folder_diff_settings = None;
+        if merge {
+            if self.merge_folders.is_some() {
+                self.tree = None;
+            }
+            if let Some(job) = self.job.take() {
+                job.cancellation.store(true, Ordering::Relaxed);
+            }
+            if let Some(view) = &mut self.file_view {
+                if let Some(job) = view.job.take() {
+                    job.cancellation.store(true, Ordering::Relaxed);
+                }
+            }
+            self.interactive
+                .get_or_insert_with(InteractiveView::default);
+            if !self.merge_file_open && self.merge_folders.is_none() {
+                if let Some(file) = &self.file_view {
+                    if file.from_folders {
+                        if let Some(roots) = &self.roots {
+                            self.merge_folders = Some(FolderBrowser::new(roots.clone()));
+                        }
+                    }
+                    let paths = file.paths.clone();
+                    self.interactive.as_mut().unwrap().open_pair(paths);
+                    self.merge_file_open = true;
+                } else {
+                    self.open_interactive_sources();
+                }
+            }
+        } else if !self.merge_file_open && self.merge_folders.is_some() {
+            self.start_comparison();
+        }
+        let prefs = [
+            self.show_only_differences,
+            self.ignore_whitespace,
+            self.ignore_line_endings,
         ];
+        if let Some(view) = &mut self.interactive {
+            view.set_editing(merge, prefs);
+        }
+    }
+
+    fn open_interactive_sources(&mut self) {
+        let paths = self.comparison_paths();
+        self.interactive
+            .get_or_insert_with(InteractiveView::default)
+            .set_editing(
+                true,
+                [
+                    self.show_only_differences,
+                    self.ignore_whitespace,
+                    self.ignore_line_endings,
+                ],
+            );
+        match selection::selection_mode(self.source_kinds) {
+            SelectionMode::Folder
+                if self
+                    .source_kinds
+                    .iter()
+                    .all(|kind| *kind == Some(SourceKind::Folder)) =>
+            {
+                if self
+                    .merge_folders
+                    .as_ref()
+                    .is_none_or(|browser| browser.roots != paths)
+                {
+                    self.merge_folders = Some(FolderBrowser::new(paths.clone()));
+                }
+                self.roots = Some(paths);
+                self.merge_file_open = false;
+                self.folder_diff_settings = None;
+            }
+            SelectionMode::File
+                if self
+                    .source_kinds
+                    .iter()
+                    .all(|kind| *kind == Some(SourceKind::File)) =>
+            {
+                self.interactive
+                    .get_or_insert_with(InteractiveView::default)
+                    .open_pair(paths);
+                self.merge_file_open = true;
+            }
+            _ => {
+                self.message = "Choose matching files or folders on both sides.".into();
+            }
+        }
+    }
+
+    fn interactive_area(&mut self, ui: &mut egui::Ui) {
+        let saving = self
+            .merge_folders
+            .as_ref()
+            .is_some_and(FolderBrowser::is_saving);
+        let prefs = [
+            self.show_only_differences,
+            self.ignore_whitespace,
+            self.ignore_line_endings,
+        ];
+        if let Some(view) = &mut self.interactive {
+            view.set_external_save_busy(saving);
+            view.set_editing(self.merge_mode, prefs);
+        }
+        if self.merge_file_open {
+            if self.merge_folders.is_none() {
+                self.folder_inputs(ui);
+            }
+            self.pane_rects = split_rect(ui.available_rect_before_wrap());
+            if let Some(view) = &mut self.interactive {
+                view.set_from_folders(self.merge_folders.is_some());
+                view.render(ui);
+                if self.merge_folders.is_none() {
+                    if let Some(paths) = view.take_loaded_paths() {
+                        self.paths = paths
+                            .clone()
+                            .map(|path| path.to_string_lossy().into_owned());
+                        self.source_paths = paths.clone().map(Some);
+                        self.source_kinds = [Some(SourceKind::File); 2];
+                    }
+                }
+                if !self.merge_mode {
+                    let options = view.diff_preferences();
+                    self.show_only_differences = options[0];
+                    self.ignore_whitespace = options[1];
+                    self.ignore_line_endings = options[2];
+                }
+                if view.take_back_requested() {
+                    self.merge_file_open = false;
+                    if !self.merge_mode && self.merge_folders.is_some() {
+                        self.start_comparison();
+                    }
+                }
+            }
+            if self
+                .interactive
+                .as_mut()
+                .is_some_and(InteractiveView::take_new_requested)
+            {
+                self.new_comparison();
+            }
+        } else {
+            if let Some(view) = &mut self.interactive {
+                view.set_from_folders(false);
+                let differences = match (&self.tree, &self.merge_folders) {
+                    (Some(tree), Some(browser)) => browser.difference_paths(tree, view),
+                    _ => Vec::new(),
+                };
+                view.set_folder_differences(differences);
+                view.render_toolbar(ui);
+                if let (Some(path), Some(browser)) =
+                    (view.take_folder_jump(), &mut self.merge_folders)
+                {
+                    browser.reveal_difference(path);
+                }
+            }
+            if self.job.is_some() {
+                ui.horizontal(|ui| {
+                    self.progress_indicator(ui);
+                    if icon_button(ui, ToolbarIcon::Cancel, true, "Cancel folder comparison")
+                        .clicked()
+                    {
+                        if let Some(job) = self.job.take() {
+                            job.cancellation.store(true, Ordering::Relaxed);
+                        }
+                    }
+                });
+            }
+            self.folder_inputs(ui);
+            self.pane_rects = split_rect(ui.available_rect_before_wrap());
+            if let (Some(browser), Some(view)) = (&mut self.merge_folders, &mut self.interactive) {
+                if let Some(paths) = browser.render(ui, view, self.tree.as_ref()) {
+                    view.open_pair(paths);
+                    self.merge_file_open = true;
+                }
+            } else {
+                empty_display(
+                    ui,
+                    ui.available_height().max(60.0),
+                    "Choose files or folders",
+                    "Use Browse or drop a source into each pane.",
+                );
+            }
+            if self
+                .interactive
+                .as_mut()
+                .is_some_and(InteractiveView::take_new_requested)
+            {
+                self.new_comparison();
+            }
+        }
+    }
+
+    fn sync_folder_merge_diff(&mut self) {
+        if !self.merge_mode || self.merge_folders.is_none() {
+            return;
+        }
+        let Some(view) = &self.interactive else {
+            return;
+        };
+        if !view.run_diff_enabled() {
+            if let Some(job) = self.job.take() {
+                job.cancellation.store(true, Ordering::Relaxed);
+            }
+            self.folder_diff_settings = None;
+            self.tree = None;
+            return;
+        }
+        let settings = view.merge_options();
+        let compare_changed = self
+            .folder_diff_settings
+            .is_none_or(|previous| previous[1..] != settings[1..]);
+        self.folder_diff_settings = Some(settings);
+        if compare_changed {
+            let old = [
+                self.show_only_differences,
+                self.ignore_whitespace,
+                self.ignore_line_endings,
+            ];
+            self.ignore_whitespace = settings[1];
+            self.ignore_line_endings = settings[2];
+            self.start_comparison();
+            self.show_only_differences = old[0];
+            self.ignore_whitespace = old[1];
+            self.ignore_line_endings = old[2];
+        }
+    }
+    fn sync_working_folder_diff(&mut self, ctx: &egui::Context) {
+        if let (Some(browser), Some(view)) = (&mut self.merge_folders, &self.interactive) {
+            browser.poll_comparisons(view, ctx, self.merge_mode);
+        }
+    }
+
+    fn header(&mut self, ui: &mut egui::Ui) {
+        let modes = [ComparisonMode::Folder, ComparisonMode::File];
         let labels = modes.map(|mode| {
-            egui::WidgetText::from(
-                RichText::new(mode.map_or("File Merge", ComparisonMode::label))
-                    .size(14.0)
-                    .strong(),
-            )
-            .into_galley(
+            egui::WidgetText::from(RichText::new(mode.label()).size(14.0).strong()).into_galley(
                 ui,
                 Some(egui::TextWrapMode::Extend),
                 f32::INFINITY,
@@ -1298,7 +1633,7 @@ impl VersusApp {
             .each_ref()
             .map(|label| label.size().x + 22.0 + padding.x * 2.0);
         let gap = ui.spacing().item_spacing.x;
-        let group_width = widths.iter().sum::<f32>() + 2.0 * gap;
+        let group_width = widths.iter().sum::<f32>() + gap;
         let (header, _) = ui.allocate_exact_size(
             egui::vec2(ui.available_width(), 32.0_f32.max(control_extent(ui))),
             Sense::hover(),
@@ -1329,21 +1664,11 @@ impl VersusApp {
                 rect,
                 labels[index].clone(),
                 mode,
-                mode.map_or(self.merge_view.is_some(), |mode| {
-                    self.merge_view.is_none() && self.comparison_mode == mode
-                }),
+                self.comparison_mode == mode,
             )
             .clicked()
             {
-                if let Some(mode) = mode {
-                    self.switch_comparison_mode(mode);
-                } else if self.merge_view.is_none() {
-                    let mut view = MergeView::default();
-                    if let Some(file) = &self.file_view {
-                        view.set_sources(file.sources.clone());
-                    }
-                    self.merge_view = Some(view);
-                }
+                self.switch_comparison_mode(mode);
                 ui.ctx().request_repaint();
             }
             x += widths[index] + gap;
@@ -1384,8 +1709,7 @@ impl VersusApp {
             );
             ui.ctx().request_repaint();
         }
-        if let Some(view) = &mut self.merge_view {
-            view.header_controls(&mut controls_ui);
+        if self.interactive.is_some() && (self.merge_mode || self.merge_file_open) {
             return;
         }
         match self.mode() {
@@ -2433,15 +2757,37 @@ impl VersusApp {
 
     fn merge_exit_dialog(&mut self, ctx: &egui::Context) {
         if ctx.input(|input| input.viewport().close_requested())
-            && self.merge_view.as_ref().is_some_and(MergeView::needs_guard)
+            && (self
+                .interactive
+                .as_ref()
+                .is_some_and(InteractiveView::any_dirty)
+                || self
+                    .merge_folders
+                    .as_ref()
+                    .is_some_and(FolderBrowser::any_dirty)
+                || self
+                    .interactive
+                    .as_ref()
+                    .is_some_and(InteractiveView::is_saving)
+                || self
+                    .merge_folders
+                    .as_ref()
+                    .is_some_and(FolderBrowser::is_saving))
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.pending_merge_exit = Some(MergeExit::Close);
         }
-        let Some(destination) = self.pending_merge_exit else {
+        let Some(destination) = self.pending_merge_exit.clone() else {
             return;
         };
-        let saving = self.merge_view.as_ref().is_some_and(MergeView::is_saving);
+        let saving = self
+            .interactive
+            .as_ref()
+            .is_some_and(InteractiveView::is_saving)
+            || self
+                .merge_folders
+                .as_ref()
+                .is_some_and(FolderBrowser::is_saving);
         let mut discard = false;
         let mut cancel = false;
         egui::Modal::new(egui::Id::new("leave-merge")).show(ctx, |ui| {
@@ -2462,10 +2808,14 @@ impl VersusApp {
             self.pending_merge_exit = None;
         } else if discard {
             self.pending_merge_exit = None;
-            self.merge_view = None;
+            self.interactive = None;
+            self.merge_folders = None;
+            self.merge_file_open = false;
             match destination {
-                MergeExit::Mode(mode) => self.switch_comparison_mode(mode),
                 MergeExit::Close => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                MergeExit::New => self.new_comparison(),
+                MergeExit::Mode(mode) => self.switch_comparison_mode(mode),
+                MergeExit::Recent(entry) => self.open_recent(entry),
             }
         }
     }
@@ -2500,9 +2850,18 @@ impl eframe::App for VersusApp {
         self.poll_sources(ctx);
         self.poll_comparison(ctx);
         self.poll_file_comparison(ctx);
-        if let Some(view) = &mut self.merge_view {
+        if let Some(view) = &mut self.interactive {
             view.poll(ctx);
         }
+        if let Some(browser) = &mut self.merge_folders {
+            browser.poll(ctx);
+        }
+        if let (Some(browser), Some(view)) = (&mut self.merge_folders, &mut self.interactive) {
+            browser.poll_save(view, ctx);
+            view.set_external_save_busy(browser.is_saving());
+        }
+        self.sync_folder_merge_diff();
+        self.sync_working_folder_diff(ctx);
     }
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         #[cfg(windows)]
@@ -2699,22 +3058,18 @@ fn comparison_mode_button(
     ui: &egui::Ui,
     rect: Rect,
     label: Arc<egui::Galley>,
-    mode: Option<ComparisonMode>,
+    mode: ComparisonMode,
     selected: bool,
 ) -> egui::Response {
     let response = ui
-        .interact(
-            rect,
-            egui::Id::new(mode.map_or("File Merge", ComparisonMode::label)),
-            Sense::click(),
-        )
+        .interact(rect, egui::Id::new(mode.label()), Sense::click())
         .on_hover_cursor(egui::CursorIcon::PointingHand);
     response.widget_info(|| {
         egui::WidgetInfo::selected(
             egui::WidgetType::Button,
             ui.is_enabled(),
             selected,
-            mode.map_or("File Merge", ComparisonMode::label),
+            mode.label(),
         )
     });
     let visuals = ui.style().interact_selectable(&response, selected);
@@ -2735,7 +3090,7 @@ fn comparison_mode_button(
         rect.left() + ui.spacing().button_padding.x + 8.0,
         rect.center().y,
     );
-    if mode == Some(ComparisonMode::Folder) {
+    if mode == ComparisonMode::Folder {
         paint_icon(
             ui.painter(),
             icon_center,
@@ -3066,7 +3421,6 @@ enum StatusIcon {
     RightOnly,
     TypeMismatch,
     Error,
-    Conflict,
 }
 
 impl StatusIcon {
@@ -3077,7 +3431,6 @@ impl StatusIcon {
             Self::RightOnly => "Right only",
             Self::TypeMismatch => "Type mismatch",
             Self::Error => "Read error",
-            Self::Conflict => "Conflict",
         }
     }
     fn color(self, palette: Palette) -> Color32 {
@@ -3085,7 +3438,7 @@ impl StatusIcon {
             Self::Different => palette.changed,
             Self::LeftOnly => palette.left_only,
             Self::RightOnly => palette.right_only,
-            Self::TypeMismatch | Self::Error | Self::Conflict => palette.error,
+            Self::TypeMismatch | Self::Error => palette.error,
         }
     }
 }
@@ -3221,11 +3574,6 @@ fn paint_status_icon(painter: &egui::Painter, center: Pos2, icon: StatusIcon) {
             painter.line_segment([point(0.0, -2.0), point(0.0, 1.0)], stroke);
             painter.circle_filled(point(0.0, 3.0), 0.7, icon.color(palette));
         }
-        StatusIcon::Conflict => {
-            painter.circle_stroke(center, 6.0, stroke);
-            painter.line_segment([point(0.0, -3.0), point(0.0, 1.0)], stroke);
-            painter.circle_filled(point(0.0, 3.0), 0.8, icon.color(palette));
-        }
     }
 }
 
@@ -3233,8 +3581,9 @@ fn paint_status_icon(painter: &egui::Painter, center: Pos2, icon: StatusIcon) {
 enum ToolbarIcon {
     AcceptAllLeft,
     AcceptAllRight,
-    AutoMerge,
     Undo,
+    Redo,
+    AutoMerge,
     ZoomIn,
     ZoomOut,
     New,
@@ -3344,6 +3693,22 @@ fn icon_button_state(
                 );
                 ui.painter().line(
                     vec![point(-3.0, 3.0), point(0.0, 6.0), point(3.0, 3.0)],
+                    stroke,
+                );
+            }
+            ToolbarIcon::Redo => {
+                ui.painter().line(
+                    vec![
+                        point(6.0, -3.0),
+                        point(-1.0, -3.0),
+                        point(-5.0, 0.0),
+                        point(-5.0, 4.0),
+                        point(0.0, 6.0),
+                    ],
+                    stroke,
+                );
+                ui.painter().line(
+                    vec![point(2.0, -7.0), point(6.0, -3.0), point(2.0, 1.0)],
                     stroke,
                 );
             }
@@ -5331,13 +5696,10 @@ mod tests {
                         .read_response(egui::Id::new("File Compare"))
                         .unwrap()
                         .rect;
-                    let merge = ctx.read_response(egui::Id::new("File Merge")).unwrap().rect;
-                    assert!(
-                        (folder.union(file).union(merge).center().x - screen.center().x).abs()
-                            < 0.5
-                    );
-                    assert!(file.right() < merge.left());
-                    assert!(merge.right() < screen.right());
+                    assert!(ctx.read_response(egui::Id::new("File Merge")).is_none());
+                    assert!((folder.union(file).center().x - screen.center().x).abs() < 0.5);
+                    assert!(folder.right() < file.left());
+                    assert!(file.right() < screen.right());
                     assert!(logo.right() < folder.left());
                     let theme_button = ctx
                         .read_response(egui::Id::new(if theme == egui::Theme::Dark {

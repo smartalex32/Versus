@@ -10,6 +10,7 @@ license = "MIT"
 eframe = { version = "=0.36.2", default-features = false, features = ["accesskit", "default_fonts", "glow", "persistence", "x11", "wayland"] }
 rfd = "=0.17.2"
 similar = "=3.2.0"
+regex = "=1.12.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Reuse eframe's windowing crate to choose its file-drop-capable X11 backend.

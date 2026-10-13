@@ -8,57 +8,69 @@ authentication or make outbound network requests at runtime.
 
 ## Use
 
-**File Merge** is the third option in the centered header, alongside Folder Compare
-and File Compare. It opens **Left** (Incoming), **Base** (the editable merged
-result), and **Right** (Current). The outer headers read **LEFT (Incoming)** and
-**RIGHT (Current)**. Browse, paste, or drop a file into any of the three panes.
-The Base path can specify their common ancestor; leaving it blank uses Current.
-Selecting sources starts
-the merge; committing a typed path with Enter or leaving its field reloads it. Opening
-merge from a file comparison preselects its two files. The result starts with
-Current's contents. The source panes remain read-only; typing and merge actions
-change only the in-memory result.
+Choose **Folder Compare** or **File Compare** in the centered header to start a
+fresh workspace. Within that workspace, switch between **Diff** and **Merge** in
+the comparison toolbar without reopening sources. Diff is the default. Merge turns
+the existing two panes into independent editable working copies; there is no third
+Base file. Changes remain in memory until you explicitly save. Switching between
+Diff and Merge preserves the open files and edits.
 
-The legend row centers four icons with tooltips: **Accept All Left**, **Accept All
-Right**, **Auto Merge Non-Conflicts**, and **Undo**. Accept All replaces the result
-with that source in one undoable operation. The merge legend adds a conflict icon.
-Zoom sits immediately left of the up/down difference-navigation icons at the right
-of that row; merge actions stay centered. Use the arrows to jump backward or forward
-through the differences, with shared scrolling across the panes.
-**Auto Merge Non-Conflicts** combines the safe changes as one
-undoable operation. Each consecutive nonconflicting block has one inward arrow
-per side. Conflicting lines have **!** indicators and individual arrows. You can also select, paste, and
-type freely in the middle pane. Source panes retain their diff alignment and
-original line numbers; the result has its own live line numbers. Vertical
-scrolling is shared and horizontal scrolling is independent.
+Merge does not need the diff engine. **Run Diff** is available in Merge mode and
+starts off. While it is off, Versus does not compare the open files; edits,
+selection transfers, chunks, and ignored ranges remain available. Turn it on for
+an optional comparison-alignment panel, difference navigation, and destination
+suggestions. The alignment panel is separate from the editors, so filtering it
+never hides or changes editor text. Diff work is debounced for the open pair and
+can be cancelled. Turning Run Diff off cancels pending work and clears alignment.
+The three comparison options (Show only differences, Ignore whitespace, Ignore
+line endings) have separate settings in Diff and Merge; their Merge settings start
+off and do not change Diff preferences.
 
-**Undo** reverses typing, arrows, and automatic merges; Ctrl/Command+Z works while
-editing the result. Manual edits that overlap a pending action disable its arrow
-to protect your text; finish that part by typing, or undo the edit. **Save** and
-**Finish Merge** sit at the bottom right. **Save** writes the middle pane to the
-selected common ancestor file, or to **Current** when the Base path is blank;
-it does not open a destination picker. Existing files require explicit overwrite
-confirmation. **Unsaved Changes** appears at the bottom left in bold highlight
-color until the middle buffer matches the saved destination. **Finish Merge**
-returns to comparison only when there are no unsaved changes and never writes
-files itself. Right-click Save for **Save As…** to export a copy; exporting does
-not change the regular Save destination or mark its outstanding changes saved.
-Cancelling or failing a save keeps the merge open. Saves preserve the buffer's line
-endings and final newline. Leaving or replacing an unsaved result asks before
-discarding it. Merge contents are never stored in comparison history. This merge
-workflow is currently GUI-only.
+Both panes show editable text, line numbers, and separate unsaved status. Select a
+contiguous line range in either pane, choose an insertion point or explicitly
+select a replacement range in the other pane, then use the transfer control to
+copy it across. Transfers preserve the source text and are undoable. Versus groups
+recognized code blocks and blank-line-separated paragraphs into chunks; these are
+heuristics rather than a full language parser. You can create, split, combine, and
+adjust manual chunks. Ignored line ranges are managed independently on each side.
+They stay in the file and block transfers or replacement targets that would
+overwrite protected lines; you can still type directly in an ignored range. The
+automatic transfer and search replacement paths respect those protections.
+The centered toolbar has **Accept All Left**, **Accept All Right**, **Auto Merge
+Non-Conflicts**, **Undo**, and **Redo** icons with tooltips. Accept All copies that
+side into the other as one undoable operation, subject to protection. Auto Merge
+opens a preview of incoming-only insertions with matching boundary context; it
+does not guess replacements. Undo and Redo cover edits, transfers, chunk changes,
+and ignored-range changes. They are also available in the toolbar;
+Ctrl/Command+Z and Ctrl+Y or Command+Shift+Z work while editing.
 
-Empty merge panes use the same dashed inner drop borders as comparison modes.
-Dragging a file over a pane shows the shared blue foreground border and tint.
-Drop one regular file at a time; invalid drops preserve the existing merge, and
-replacing an unsaved merge still requires a discard choice.
+Use **Save Left**, **Save Right**, or **Save Both** to review a preview and write
+the selected working copies. Versus checks that the files have not changed on disk
+since they were opened before replacing them. Interactive text files are limited
+to 32 MiB. UTF-8 with or without a BOM and UTF-16 little- and big-endian text retain
+their encoding; original line endings are preserved where possible. Cancelled or
+failed saves leave the working copies intact. Unsaved changes are marked
+independently for each pane.
 
-Choose **Folder Compare** or **File Compare** in the center of the header. Each
-button includes a folder or file icon. The active mode is highlighted, with Folder
-Compare selected initially. Clicking a path
-area or browse icon in either pane opens that mode's native folder or file picker
-directly. Selecting the second source starts comparison automatically. File
-Compare opens the line comparison without a Back button.
+For folder pairs, Merge opens a lazy browser that enumerates directory entries and
+basic metadata as folders are expanded. It does not compare file contents unless
+Run Diff is enabled; files load when opened. Select files by relative path or choose
+files from different paths on each side and open that pair. Each file pair keeps
+its own undo history as you navigate or pair files again. Folder-wide **Find and
+Replace** searches the left tree, right tree, or both, with plain text or regular
+expressions, case and whole-word options. Results include file and line, and
+replacement previews can be applied as undoable batches to the working copies.
+Batch undo is atomic across participating files; undo newer edits or ignored-range
+changes in those files first. Binary, non-text, and files over 32 MiB are skipped.
+Saving those changes remains explicit and uses the external-change check.
+With Run Diff enabled, folder statuses include staged working copies and ignored
+ranges. The up/down controls jump to changed files and reveal their parent folders.
+
+Each comparison mode has a folder or file icon and the active mode is highlighted,
+with Folder Compare selected initially. Clicking a path area or browse icon in
+either pane opens that mode's native folder or file picker directly. Selecting the
+second source starts comparison automatically in Diff mode. File Compare opens
+the line comparison without a Back button.
 
 The **Recently compared** list appears when Versus opens and after **New
 comparison**. Click a file or folder pair to recompare it without browsing again.
@@ -68,11 +80,12 @@ The 20 most recent pairs are saved locally per user, newest first; reopening a
 pair moves it to the top. Paths and comparison type are saved, never file contents.
 Unavailable or changed sources show an error and can be selected again.
 
-Changing modes starts a fresh comparison and cancels pending work. Clicking the
-active mode preserves the current comparison; clicking Folder Compare while
-viewing a file from its tree returns to that tree. The **+** button at the right
-of the legend has the tooltip **New comparison** and clears both selections,
-results, and pending work while keeping the selected mode and theme.
+Choosing another Folder/File header option starts a fresh comparison and cancels
+pending work. Clicking the active mode preserves the current comparison; clicking
+Folder Compare while viewing a file from its tree returns to that tree. The **+**
+button at the right of the legend has the tooltip **New comparison** and clears both selections,
+results, and pending work while keeping the selected Folder/File comparison mode
+and theme. Switching between Diff and Merge preserves the current session.
 
 Both pane headers remain available for browsing in directly selected file views.
 Folder paths wrap to show the full path; file paths use a leading ellipsis with
@@ -183,13 +196,13 @@ lines. The **back arrow**, at the left of the legend, returns to the folder view
 with its selection, expansion, and scroll position preserved. Enter or Space on a
 focused file also opens it.
 
-File contents load in the background. Missing files show an empty side; binary or
-non-UTF-8 files, files above the 32 MiB text limit, and comparisons exceeding the
-two-second diff processing limit show an explanation. Type mismatches do not open
-folders or symlink targets. Read errors are shown in the file view; Back remains
-available for files opened from a folder comparison. Line endings are normalized
-when **Ignore line endings** is selected. Merge, editing, saving, and other workflows remain
-deferred. Compared files and folders are never modified.
+Diff file contents load in the background. Missing files show an empty side;
+binary or non-UTF-8 files, files above the 32 MiB text limit, and comparisons
+exceeding the two-second diff processing limit show an explanation. Type mismatches
+do not open folders or symlink targets. Read errors are shown in the file view;
+Back remains available for files opened from a folder comparison. Line endings are
+normalized when **Ignore line endings** is selected. Diff mode remains read-only;
+only explicit Merge saves write working copies.
 
 The sun/moon icon at the upper right switches between light and dark themes in
 either view. The logo and window icon preserve the blue half and use a white half
@@ -275,7 +288,18 @@ git -c difftool.versus.cmd='versus --folder -- "$LOCAL" "$REMOTE"' difftool --to
 
 The command receives Git's pre-image on the left and post-image on the right.
 See the [Git difftool reference](https://git-scm.com/docs/git-difftool) for revision
-and path options. Versus currently provides read-only two-way comparison.
+and path options. These commands open the read-only Diff view.
+
+For a conventional three-way merge, run `--merge` with the common base, ours,
+theirs, and an output path. The command writes a merged text file with conflict
+markers where both sides changed the same base section. Exit status is 0 when no
+conflicts were found, 1 when conflict markers were written, and 2 when parsing,
+reading, or writing failed. Existing output is rejected unless `--overwrite` is
+passed:
+
+```sh
+versus --merge base.txt ours.txt theirs.txt --output merged.txt
+```
 
 ### VS Code and other IDEs
 
