@@ -40,6 +40,10 @@ impl Drop for DiffJob {
 struct SaveJob {
     receiver: Receiver<Vec<Result<WorkingFile, String>>>,
 }
+struct SideLoad {
+    receiver: Receiver<Result<WorkingFile, String>>,
+    path: PathBuf,
+}
 
 #[derive(Default)]
 pub(super) struct InteractiveView {
@@ -55,6 +59,10 @@ pub(super) struct InteractiveView {
     batch_redo: Vec<u64>,
     loaded_paths: Option<[PathBuf; 2]>,
     loading: Option<(Receiver<Result<[WorkingFile; 2], String>>, [PathBuf; 2])>,
+    side_sources: [Option<PathBuf>; 2],
+    side_files: [Option<WorkingFile>; 2],
+    side_loading: [Option<SideLoad>; 2],
+    loaded_sources: Option<[Option<PathBuf>; 2]>,
     diff_job: Option<DiffJob>,
     retired_diffs: Vec<DiffJob>,
     diff_not_before: Option<Instant>,
@@ -76,8 +84,8 @@ pub(super) struct InteractiveView {
     destination: [usize; 2],
     replace: bool,
     scroll: [f32; 2],
-    sync_scroll: bool,
     generation: u64,
+    side_generation: [u64; 2],
     selected_side: usize,
     back: bool,
     new_requested: bool,
@@ -98,6 +106,7 @@ impl InteractiveView {
         self.publish_active();
         self.cache_active();
         self.invalidate_diff();
+        self.side_sources = [Some(paths[0].clone()), Some(paths[1].clone())];
         self.loading = None;
         if paths.iter().all(|path| {
             self.aliases.contains_key(path) && self.documents.contains_key(&self.key_for(path))
@@ -133,6 +142,73 @@ impl InteractiveView {
         });
         self.loading = Some((receiver, paths));
         self.status = "Loading selected working copies…".into();
+        self.error = None;
+    }
+    /// Opens either editor independently. An absent side is deliberately not
+    /// represented by a synthetic path or working file.
+    pub(super) fn open_sources(&mut self, sources: [Option<PathBuf>; 2]) {
+        for (side, source) in sources.into_iter().enumerate() {
+            self.open_side(side, source);
+        }
+    }
+    pub(super) fn open_side(&mut self, side: usize, path: Option<PathBuf>) {
+        debug_assert!(side < 2);
+        if self.side_sources[side] == path {
+            return;
+        }
+        self.publish_active();
+        self.invalidate_diff();
+        if let Some(files) = self.files.take() {
+            for (index, file) in files.into_iter().enumerate() {
+                if self.side_sources[index].is_some() {
+                    self.side_files[index] = Some(file);
+                }
+            }
+        }
+        self.paths = None;
+        self.loading = None;
+        self.side_loading[side] = None;
+        self.side_sources[side] = path.clone();
+        self.side_files[side] = None;
+        self.side_generation[side] = self.side_generation[side].wrapping_add(1);
+        self.scroll[side] = 0.0;
+        self.selected[side] = 0..0;
+        self.destination[side] = 0;
+        self.expanded[side].clear();
+        self.activate_side_workspace();
+        let Some(path) = path else {
+            self.loaded_sources = Some(self.side_sources.clone());
+            return;
+        };
+        if self.aliases.contains_key(&path) && self.documents.contains_key(&self.key_for(&path)) {
+            self.side_files[side] = Some(self.documents[&self.key_for(&path)].file.clone());
+            self.activate_side_workspace();
+            self.loaded_sources = Some(self.side_sources.clone());
+            return;
+        }
+        let retained = self.export_working_files();
+        let requested = path.clone();
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            let retained_by_identity: BTreeMap<_, _> = retained
+                .values()
+                .map(|file| (file.identity_key(), file.clone()))
+                .collect();
+            let result = if let Some(file) = retained.get(&requested) {
+                Ok(file.clone())
+            } else {
+                versus::resolve_working_file_identity(&requested).and_then(|identity| {
+                    retained_by_identity
+                        .get(&identity)
+                        .cloned()
+                        .map(Ok)
+                        .unwrap_or_else(|| load_working_file(Some(&requested)))
+                })
+            };
+            let _ = sender.send(result.map_err(|error| error.to_string()));
+        });
+        self.side_loading[side] = Some(SideLoad { receiver, path });
+        self.status = "Loading selected file…".into();
         self.error = None;
     }
     pub(super) fn set_editing(&mut self, editing: bool, diff_preferences: [bool; 3]) {
@@ -178,13 +254,38 @@ impl InteractiveView {
                         self.register_file(paths[side].clone(), file);
                     }
                     self.activate_pair(paths);
-                    self.status =
-                        "Working copies are ready. Changes stay in memory until saved.".into();
+                    self.status.clear();
                 }
                 Err(error) => self.error = Some(error),
             }
         }
-        if self.loading.is_some() {
+        for side in 0..2 {
+            let result =
+                self.side_loading[side]
+                    .as_ref()
+                    .and_then(|load| match load.receiver.try_recv() {
+                        Ok(result) => Some(result),
+                        Err(TryRecvError::Disconnected) => Some(Err("File loader stopped".into())),
+                        Err(TryRecvError::Empty) => None,
+                    });
+            let Some(result) = result else { continue };
+            let load = self.side_loading[side].take().unwrap();
+            if self.side_sources[side].as_ref() != Some(&load.path) {
+                continue;
+            }
+            match result {
+                Ok(file) => {
+                    self.register_file(load.path, file.clone());
+                    self.side_files[side] = Some(file);
+                    self.activate_side_workspace();
+                    self.loaded_sources = Some(self.side_sources.clone());
+                    self.error = None;
+                    self.status.clear();
+                }
+                Err(error) => self.error = Some(error),
+            }
+        }
+        if self.loading.is_some() || self.side_loading.iter().any(Option::is_some) {
             ctx.request_repaint_after(std::time::Duration::from_millis(25));
         }
         self.poll_diff(ctx);
@@ -218,11 +319,20 @@ impl InteractiveView {
     pub(super) fn take_loaded_paths(&mut self) -> Option<[PathBuf; 2]> {
         self.loaded_paths.take()
     }
+    pub(super) fn take_loaded_sources(&mut self) -> Option<[Option<PathBuf>; 2]> {
+        self.loaded_sources.take()
+    }
+    pub(super) fn current_sources(&self) -> [Option<PathBuf>; 2] {
+        self.side_sources.clone()
+    }
     pub(super) fn pair_paths(&self) -> Option<&[PathBuf; 2]> {
         self.loading
             .as_ref()
             .map(|(_, paths)| paths)
             .or(self.paths.as_ref())
+    }
+    pub(super) fn selected_source(&self, side: usize) -> Option<&PathBuf> {
+        self.side_sources[side].as_ref()
     }
     pub(super) fn take_new_requested(&mut self) -> bool {
         std::mem::take(&mut self.new_requested)
@@ -336,6 +446,20 @@ impl InteractiveView {
         })
     }
     fn publish_active(&mut self) {
+        if let Some(workspace) = &self.workspace {
+            for side in 0..2 {
+                let Some(path) = &self.side_sources[side] else {
+                    continue;
+                };
+                let key = self.key_for(path);
+                if let Some(retained) = self.documents.get_mut(&key) {
+                    let document = workspace.document(side_of(side));
+                    if document.revision() > retained.document.revision() {
+                        retained.document = document.clone();
+                    }
+                }
+            }
+        }
         let (Some(paths), Some(files), Some(workspace)) =
             (&self.paths, &self.files, &self.workspace)
         else {
@@ -375,6 +499,7 @@ impl InteractiveView {
     }
     fn refresh_active(&mut self) {
         let Some(paths) = &self.paths else {
+            self.refresh_partial_active();
             return;
         };
         if !paths.iter().all(|path| {
@@ -396,9 +521,34 @@ impl InteractiveView {
                 self.selected[side].start.min(count)..self.selected[side].end.min(count);
         }
     }
+    fn refresh_partial_active(&mut self) {
+        let Some(workspace) = &self.workspace else {
+            return;
+        };
+        let documents = std::array::from_fn(|side| {
+            self.side_sources[side]
+                .as_ref()
+                .and_then(|path| self.documents.get(&self.key_for(path)))
+                .map(|retained| retained.document.clone())
+                .unwrap_or_else(|| workspace.document(side_of(side)).clone())
+        });
+        self.workspace = Some(TwoWayWorkspace::from_documents(documents));
+        for side in 0..2 {
+            let count = self.workspace.as_ref().unwrap().line_count(side_of(side));
+            self.destination[side] = self.destination[side].min(count);
+            self.selected[side] =
+                self.selected[side].start.min(count)..self.selected[side].end.min(count);
+        }
+    }
     fn activate_pair(&mut self, paths: [PathBuf; 2]) {
         self.paths = Some(paths.clone());
         self.refresh_active();
+        self.side_sources = [Some(paths[0].clone()), Some(paths[1].clone())];
+        self.side_files = self
+            .files
+            .clone()
+            .map(|files| [Some(files[0].clone()), Some(files[1].clone())])
+            .unwrap_or([None, None]);
         if let Some(presentation) = self.cache.get(&paths) {
             self.scroll = presentation.scroll;
             self.selected = presentation.selected.clone();
@@ -411,10 +561,43 @@ impl InteractiveView {
             self.expanded = [Vec::new(), Vec::new()];
         }
         self.generation = self.generation.wrapping_add(1);
+        for side in 0..2 {
+            self.side_generation[side] = self.side_generation[side].wrapping_add(1);
+        }
         self.loaded_paths = Some(paths);
         self.invalidate_diff();
         self.sync_editor_cursor(0);
         self.sync_editor_cursor(1);
+    }
+    fn activate_side_workspace(&mut self) {
+        if let ([Some(left_path), Some(right_path)], [Some(left_file), Some(right_file)]) =
+            (&self.side_sources, &self.side_files)
+        {
+            self.paths = Some([left_path.clone(), right_path.clone()]);
+            self.files = Some([left_file.clone(), right_file.clone()]);
+            self.refresh_active();
+            return;
+        }
+        let documents = std::array::from_fn(|side| {
+            self.side_sources[side]
+                .as_ref()
+                .and_then(|path| self.documents.get(&self.key_for(path)))
+                .map(|retained| retained.document.clone())
+                .unwrap_or_else(|| InteractiveDocument::new(""))
+        });
+        if self.side_sources.iter().any(Option::is_some) {
+            self.paths = None;
+            self.files = None;
+            self.workspace = Some(TwoWayWorkspace::from_documents(documents));
+            for side in 0..2 {
+                let count = self.workspace.as_ref().unwrap().line_count(side_of(side));
+                self.destination[side] = self.destination[side].min(count);
+                self.selected[side] =
+                    self.selected[side].start.min(count)..self.selected[side].end.min(count);
+            }
+        } else {
+            self.workspace = None;
+        }
     }
     #[cfg(test)]
     pub(super) fn ingest_working_files(&mut self, files: &BTreeMap<PathBuf, WorkingFile>) {
@@ -454,6 +637,14 @@ impl InteractiveView {
                 retained.document.mark_saved_text(saved.text.clone());
             } else {
                 self.documents.insert(key, retained_file(saved.clone()));
+            }
+            for side in 0..2 {
+                if self.side_sources[side]
+                    .as_ref()
+                    .is_some_and(|source| self.key_for(source) == self.key_for(path))
+                {
+                    self.side_files[side] = Some(saved.clone());
+                }
             }
         }
         self.refresh_active();
@@ -566,10 +757,20 @@ impl InteractiveView {
     }
     fn move_history(&mut self, redo: bool) {
         self.publish_active();
-        let Some(paths) = &self.paths else {
+        let active_paths: Vec<PathBuf> = self
+            .paths
+            .as_ref()
+            .map(|paths| paths.to_vec())
+            .unwrap_or_else(|| self.side_sources.iter().flatten().cloned().collect());
+        let preferred_path = self
+            .paths
+            .as_ref()
+            .map(|paths| paths[self.selected_side].clone())
+            .or_else(|| self.side_sources[self.selected_side].clone());
+        let Some(preferred_path) = preferred_path else {
             return;
         };
-        let preferred = self.key_for(&paths[self.selected_side]);
+        let preferred = self.key_for(&preferred_path);
         let own = self.documents.get(&preferred).and_then(|retained| {
             if redo {
                 retained.document.next_redo_tag()
@@ -595,7 +796,7 @@ impl InteractiveView {
             let key = if own.is_some() {
                 preferred
             } else {
-                paths.iter().map(|p|self.key_for(p)).find(|key|self.documents.get(key).is_some_and(|retained|if redo{retained.document.next_redo_tag()}else{retained.document.next_undo_tag()}==Some(tag))).unwrap()
+                active_paths.iter().map(|p|self.key_for(p)).find(|key|self.documents.get(key).is_some_and(|retained|if redo{retained.document.next_redo_tag()}else{retained.document.next_undo_tag()}==Some(tag))).unwrap()
             };
             let document = &mut self.documents.get_mut(&key).unwrap().document;
             let moved = if redo {
@@ -707,6 +908,12 @@ impl InteractiveView {
             self.diff = None;
             return;
         }
+        if self.files.is_none() && !self.side_files.iter().all(Option::is_some) {
+            self.diff_job = None;
+            self.diff = None;
+            self.diff_rows.clear();
+            return;
+        }
         if self.diff_dirty && self.diff_job.is_none() && self.retired_diffs.is_empty() {
             if let Some(deadline) = self.diff_not_before {
                 if Instant::now() < deadline {
@@ -783,9 +990,20 @@ impl InteractiveView {
     }
     /// Folder mode has no open editor, but retains the same merge controls.
     pub(super) fn render_toolbar(&mut self, ui: &mut egui::Ui) {
-        self.folder_overview = true;
+        self.render_workspace_toolbar(ui, true);
+    }
+    pub(super) fn render_workspace_toolbar(&mut self, ui: &mut egui::Ui, folder_overview: bool) {
+        self.folder_overview = folder_overview;
         self.poll(ui.ctx());
+        self.shortcuts(ui);
         self.toolbar(ui);
+    }
+    pub(super) fn render_footer(&mut self, ui: &mut egui::Ui) {
+        self.footer(ui);
+    }
+    pub(super) fn render_previews(&mut self, ctx: &egui::Context) {
+        self.save_preview(ctx);
+        self.auto_preview(ctx);
     }
     pub(super) fn set_folder_differences(&mut self, differences: Vec<PathBuf>) {
         if self.folder_differences != differences {
@@ -806,9 +1024,7 @@ impl InteractiveView {
         sources: impl FnOnce(&mut egui::Ui),
     ) -> [Rect; 2] {
         self.folder_overview = false;
-        self.poll(ui.ctx());
-        self.shortcuts(ui);
-        self.toolbar(ui);
+        self.render_workspace_toolbar(ui, false);
         ui.add_space(5.);
         let area = ui.available_rect_before_wrap();
         let foot = control_extent(ui) + 8.;
@@ -827,35 +1043,21 @@ impl InteractiveView {
             });
         });
         ui.scope_builder(egui::UiBuilder::new().max_rect(footer), |ui| {
-            self.footer(ui)
+            self.render_footer(ui)
         });
-        self.save_preview(ui.ctx());
-        self.auto_preview(ui.ctx());
+        self.render_previews(ui.ctx());
         panes
     }
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         let palette = Palette::for_context(ui.ctx());
-        let has_pair = self.workspace.is_some();
+        let has_pair = self.has_actual_pair();
         let extent = control_extent(ui);
         let width = ui.available_width();
         let gap = ui.spacing().item_spacing.x;
-        let checkbox_width = |label: &str| {
-            extent
-                + gap
-                + ui.painter()
-                    .layout_no_wrap(
-                        label.into(),
-                        egui::TextStyle::Button.resolve(ui.style()),
-                        palette.text,
-                    )
-                    .size()
-                    .x
-        };
         let left_controls_width = extent
             + gap
-            + checkbox_width("Sync scroll")
             + if self.editing {
-                legend_width(ui, &[StatusIcon::Conflict]) + checkbox_width("Run Diff") + gap
+                legend_width(ui, &[StatusIcon::Conflict]) + gap
             } else {
                 0.0
             }
@@ -874,8 +1076,8 @@ impl InteractiveView {
         } else {
             (width / 2.0 - (5.0 * extent + 4.0 * gap) / 2.0 - gap).max(110.0)
         };
-        let normal_legend_inline = self.engine_enabled()
-            && legend_width(ui, &DIFF_LEGEND_ICONS) + left_controls_width <= side_width;
+        let compact_legend = self.engine_enabled()
+            && legend_width(ui, &DIFF_LEGEND_ICONS) + left_controls_width > side_width;
         ui.scope_builder(
             egui::UiBuilder::new()
                 .max_rect(Rect::from_min_max(
@@ -889,9 +1091,13 @@ impl InteractiveView {
                 {
                     self.back = true;
                 }
-                if normal_legend_inline {
+                if self.engine_enabled() {
                     for icon in DIFF_LEGEND_ICONS {
-                        legend_item(ui, icon, icon.label());
+                        if compact_legend {
+                            compact_legend_item(ui, icon, icon.label());
+                        } else {
+                            legend_item(ui, icon, icon.label());
+                        }
                     }
                 }
                 if self.editing {
@@ -900,15 +1106,6 @@ impl InteractiveView {
                 if icon_button(ui, ToolbarIcon::New, true, "New comparison").clicked() {
                     self.new_requested = true;
                 }
-                if self.editing {
-                    let mut enabled = self.run_diff;
-                    if ui.checkbox(&mut enabled, "Run Diff").changed() {
-                        self.set_run_diff(enabled);
-                    }
-                }
-                ui.push_id("merge-sync-scroll", |ui| {
-                    ui.checkbox(&mut self.sync_scroll, "Sync scroll");
-                });
             },
         );
         let actions_width = 5.0 * extent + 4.0 * gap;
@@ -1074,13 +1271,6 @@ impl InteractiveView {
                 }
             },
         );
-        if self.engine_enabled() && !normal_legend_inline {
-            ui.horizontal_wrapped(|ui| {
-                for icon in DIFF_LEGEND_ICONS {
-                    legend_item(ui, icon, icon.label());
-                }
-            });
-        }
         ui.horizontal(|ui| {
             if self.diff_job.is_some() && self.engine_enabled() {
                 ui.spinner();
@@ -1103,52 +1293,6 @@ impl InteractiveView {
                 );
             }
         });
-        if let Some(diff) = &self.diff {
-            let only = if self.editing {
-                self.merge_options[0]
-            } else {
-                self.diff_options[0]
-            };
-            egui::CollapsingHeader::new("Comparison alignment")
-                .id_salt("interactive-alignment")
-                .show(ui, |ui| {
-                    if let Some(message) = &diff.message {
-                        ui.label(message);
-                    }
-                    egui::ScrollArea::vertical()
-                        .id_salt("alignment-rows")
-                        .max_height(130.0)
-                        .show(ui, |ui| {
-                            for row in diff
-                                .rows
-                                .iter()
-                                .filter(|r| !only || r.state != DirectoryEntryState::Same)
-                            {
-                                ui.columns(2, |cols| {
-                                    for (side, line) in
-                                        [&row.left, &row.right].into_iter().enumerate()
-                                    {
-                                        if let Some((number, text)) = line {
-                                            cols[side].label(
-                                                RichText::new(format!("{number:>4}  {text}"))
-                                                    .font(comparison_font(cols[side].ctx()))
-                                                    .color(
-                                                        if row.state == DirectoryEntryState::Same {
-                                                            palette.muted
-                                                        } else {
-                                                            palette.changed
-                                                        },
-                                                    ),
-                                            );
-                                        } else {
-                                            cols[side].label(" ");
-                                        }
-                                    }
-                                });
-                            }
-                        });
-                });
-        }
     }
     fn jump_diff(&mut self, forward: bool, ctx: &egui::Context) {
         if self.folder_overview {
@@ -1229,29 +1373,39 @@ impl InteractiveView {
         let clip = ui.clip_rect().intersect(ui.available_rect_before_wrap());
         ui.scope(|ui| {
             ui.set_clip_rect(clip);
-            if self.workspace.is_none() {
-                empty_display(
-                    ui,
-                    height,
-                    "Choose a pair",
-                    "Open a file pair from the comparison workspace.",
-                );
-                return;
-            }
             ui.columns(2, |columns| {
                 for side in 0..2 {
-                    egui::ScrollArea::vertical()
-                        .id_salt(("merge-pane-controls", self.generation, side))
-                        .max_height(height)
-                        .auto_shrink([false, false])
-                        .show(&mut columns[side], |ui| {
-                            self.header(ui, side);
-                            ui.separator();
-                            self.editor(ui, side, height - 35.);
-                        });
+                    self.render_side(&mut columns[side], side, height);
                 }
             });
         });
+    }
+    pub(super) fn render_side(&mut self, ui: &mut egui::Ui, side: usize, height: f32) {
+        debug_assert!(side < 2);
+        if self.side_sources[side].is_none() && self.paths.is_none() {
+            let rect = ui.available_rect_before_wrap();
+            paint_empty_drop_target(ui, rect, side, true);
+            return;
+        }
+        if self.side_loading[side].is_some() {
+            let rect = ui.available_rect_before_wrap();
+            paint_empty_drop_target(ui, rect, side, true);
+            return;
+        }
+        if self.workspace.is_none() || !self.side_has_file(side) {
+            let rect = ui.available_rect_before_wrap();
+            paint_empty_drop_target(ui, rect, side, true);
+            return;
+        }
+        egui::ScrollArea::vertical()
+            .id_salt(("merge-pane-controls", self.side_generation[side], side))
+            .max_height(height)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                self.header(ui, side);
+                ui.separator();
+                self.editor(ui, side, height - 35.);
+            });
     }
     fn header(&self, ui: &mut egui::Ui, side: usize) {
         let p = Palette::for_context(ui.ctx());
@@ -1266,16 +1420,19 @@ impl InteractiveView {
             } else {
                 p.right_only
             }));
-            if let Some(paths) = &self.paths {
+            if let Some(path) = self.side_sources[side]
+                .as_ref()
+                .or_else(|| self.paths.as_ref().map(|paths| &paths[side]))
+            {
                 ui.add(
                     egui::Label::new(
-                        RichText::new(paths[side].display().to_string())
+                        RichText::new(path.display().to_string())
                             .small()
                             .color(p.muted),
                     )
                     .truncate(),
                 )
-                .on_hover_text(paths[side].display().to_string());
+                .on_hover_text(path.display().to_string());
             }
             if self
                 .workspace
@@ -1292,7 +1449,7 @@ impl InteractiveView {
         let current = self.workspace.as_ref().unwrap().text(source).to_owned();
         let displayed = current.replace("\r\n", "\n").replace('\r', "\n");
         let mut next = displayed.clone();
-        let editor_id = egui::Id::new(("two-way-edit", self.generation, side));
+        let editor_id = egui::Id::new(("two-way-edit", self.side_generation[side], side));
         let previous_cursor = egui::TextEdit::load_state(ui.ctx(), editor_id)
             .and_then(|state| state.cursor.char_range())
             .map(|cursor| {
@@ -1323,10 +1480,10 @@ impl InteractiveView {
                     .collect()
             })
             .unwrap_or_default();
-        let syntax = self
-            .paths
+        let syntax = self.side_sources[side]
             .as_ref()
-            .and_then(|paths| paths[side].extension())
+            .or_else(|| self.paths.as_ref().map(|paths| &paths[side]))
+            .and_then(|path| path.extension())
             .is_some_and(|ext| {
                 matches!(
                     ext.to_str(),
@@ -1347,17 +1504,18 @@ impl InteractiveView {
                     )
                 )
             });
-        let text_height = (height - if self.editing { 150.0 } else { 5.0 }).max(60.0);
+        let merge_controls = self.editing && self.has_actual_pair();
+        let text_height = (height - if merge_controls { 150.0 } else { 5.0 }).max(60.0);
         let mut pending_transfer = None;
         let mut pending_context = None;
         let output = egui::ScrollArea::vertical()
-            .id_salt(("two-way-scroll", self.generation, side))
+            .id_salt(("two-way-scroll", self.side_generation[side], side))
             .auto_shrink([false, false])
             .max_height(text_height)
             .vertical_scroll_offset(self.scroll[side])
             .show(ui, |ui| {
                 let number_width = 45.0;
-                let gutter_width = if self.editing { 50.0 } else { 0.0 };
+                let gutter_width = if merge_controls { 50.0 } else { 0.0 };
                 let width = ui.available_width().max(180.0);
                 let text_width = (width - number_width - gutter_width - 12.0).max(80.0);
                 let origin = ui.cursor().min;
@@ -1422,7 +1580,7 @@ impl InteractiveView {
                         }
                         ui.fonts_mut(|fonts| fonts.layout_job(job))
                     };
-                    let edit = egui::ScrollArea::horizontal().id_salt(("interactive-horizontal",self.generation,side)).auto_shrink([false,true]).max_width(text_width).show(ui,|ui|egui::TextEdit::multiline(&mut next)
+                    let edit = egui::ScrollArea::horizontal().id_salt(("interactive-horizontal",self.side_generation[side],side)).auto_shrink([false,true]).max_width(text_width).show(ui,|ui|egui::TextEdit::multiline(&mut next)
                         .id(editor_id)
                         .font(font.clone())
                         .code_editor()
@@ -1479,7 +1637,7 @@ impl InteractiveView {
                         );
                     }
                 }
-                if self.editing {
+                if merge_controls {
                     for chunk in &chunks {
                         let expanded = self.expanded[side].contains(&chunk.id);
                         let lines: Vec<_> = if expanded {
@@ -1550,28 +1708,7 @@ impl InteractiveView {
                     Sense::hover(),
                 );
             });
-        let old_scroll = self.scroll[side];
         self.scroll[side] = output.state.offset.y;
-        if self.sync_scroll && (old_scroll - self.scroll[side]).abs() > 0.1 {
-            let line = (self.scroll[side] / row_height) as usize;
-            let mapped = self
-                .diff
-                .as_ref()
-                .and_then(|diff| {
-                    diff.rows.iter().find_map(|row| {
-                        let (from, to) = if side == 0 {
-                            (&row.left, &row.right)
-                        } else {
-                            (&row.right, &row.left)
-                        };
-                        from.as_ref()
-                            .filter(|(n, _)| n.saturating_sub(1) >= line)
-                            .and_then(|_| to.as_ref().map(|(n, _)| n.saturating_sub(1)))
-                    })
-                })
-                .unwrap_or(line);
-            self.scroll[1 - side] = mapped as f32 * row_height;
-        }
         if next != displayed {
             let (range, replacement) = editor_byte_edit(&current, &next, previous_cursor);
             if let Err(error) =
@@ -1607,7 +1744,7 @@ impl InteractiveView {
                 self.error = Some(error.to_string());
             }
         }
-        if self.editing {
+        if merge_controls {
             self.chunk_controls(ui, side);
         }
     }
@@ -1761,7 +1898,11 @@ impl InteractiveView {
                     .is_some_and(|w| w.is_dirty(TwoWaySide::Right));
                 if ui
                     .add_enabled(
-                        self.editing && self.workspace.is_some() && !self.is_saving(),
+                        self.editing
+                            && self.workspace.is_some()
+                            && self.side_has_file(0)
+                            && self.side_has_file(1)
+                            && !self.is_saving(),
                         egui::Button::new("Save Both"),
                     )
                     .clicked()
@@ -1772,9 +1913,10 @@ impl InteractiveView {
                     .add_enabled(
                         self.editing
                             && !self.is_saving()
+                            && self.side_has_file(1)
                             && (r
-                                || self.files.as_ref().is_some_and(|files| {
-                                    matches!(files[1].fingerprint, versus::FileFingerprint::Missing)
+                                || self.active_file(1).is_some_and(|file| {
+                                    matches!(file.fingerprint, versus::FileFingerprint::Missing)
                                 })),
                         egui::Button::new("Save Right"),
                     )
@@ -1786,9 +1928,10 @@ impl InteractiveView {
                     .add_enabled(
                         self.editing
                             && !self.is_saving()
+                            && self.side_has_file(0)
                             && (l
-                                || self.files.as_ref().is_some_and(|files| {
-                                    matches!(files[0].fingerprint, versus::FileFingerprint::Missing)
+                                || self.active_file(0).is_some_and(|file| {
+                                    matches!(file.fingerprint, versus::FileFingerprint::Missing)
                                 })),
                         egui::Button::new("Save Left"),
                     )
@@ -1799,7 +1942,29 @@ impl InteractiveView {
             });
         });
     }
+    fn active_file(&self, side: usize) -> Option<&WorkingFile> {
+        self.side_sources[side]
+            .as_ref()
+            .and_then(|path| self.documents.get(&self.key_for(path)))
+            .map(|retained| &retained.file)
+            .or_else(|| {
+                self.side_files[side]
+                    .as_ref()
+                    .or_else(|| self.files.as_ref().map(|files| &files[side]))
+            })
+    }
+    fn side_has_file(&self, side: usize) -> bool {
+        self.active_file(side).is_some()
+    }
+    fn has_actual_pair(&self) -> bool {
+        self.files.is_some()
+            || (self.side_sources.iter().all(Option::is_some)
+                && self.side_files.iter().all(Option::is_some))
+    }
     fn transfer(&mut self, source: TwoWaySide, range: Range<usize>) {
+        if !self.has_actual_pair() {
+            return;
+        }
         let dest = source.other();
         let side = side_index(dest);
         let target = if self.replace {
@@ -1881,6 +2046,9 @@ impl InteractiveView {
             "Suggested destination selected. Choose insertion or explicit replacement.".into();
     }
     fn copy_all(&mut self, source: TwoWaySide) {
+        if !self.has_actual_pair() {
+            return;
+        }
         let dest = source.other();
         let source_count = self.workspace.as_ref().unwrap().line_count(source);
         let dest_count = self.workspace.as_ref().unwrap().line_count(dest);
@@ -2029,7 +2197,7 @@ impl InteractiveView {
         } else {
             offset(range.end)
         };
-        let id = egui::Id::new(("two-way-edit", self.generation, side));
+        let id = egui::Id::new(("two-way-edit", self.side_generation[side], side));
         let mut state = egui::TextEdit::load_state(ctx, id).unwrap_or_default();
         state
             .cursor
@@ -2045,7 +2213,11 @@ impl InteractiveView {
         self.sync_editor_cursor(side);
         if let Some(ctx) = &self.editor_context {
             ctx.memory_mut(|memory| {
-                memory.request_focus(egui::Id::new(("two-way-edit", self.generation, side)))
+                memory.request_focus(egui::Id::new((
+                    "two-way-edit",
+                    self.side_generation[side],
+                    side,
+                )))
             });
         }
     }
@@ -2054,15 +2226,15 @@ impl InteractiveView {
             return;
         }
         self.publish_active();
-        let (Some(files), Some(workspace)) = (&self.files, &self.workspace) else {
+        let Some(workspace) = &self.workspace else {
             return;
         };
         let copies: BTreeMap<_, _> = sides
             .into_iter()
-            .map(|side| {
-                let mut file = files[side].clone();
+            .filter_map(|side| {
+                let mut file = self.active_file(side)?.clone();
                 file.text = workspace.text(side_of(side)).into();
-                (file.identity_key(), file)
+                Some((file.identity_key(), file))
             })
             .collect();
         let (sender, receiver) = mpsc::channel();
@@ -2121,20 +2293,24 @@ impl InteractiveView {
         let Some(sides) = self.pending_save.clone() else {
             return;
         };
-        let Some(paths) = &self.paths else {
-            self.pending_save = None;
-            return;
-        };
         let mut confirm = false;
         let mut cancel = false;
         egui::Modal::new(egui::Id::new("interactive-save-preview")).show(ctx, |ui| {
             ui.heading("Save pending changes?");
             ui.label("These working copies will replace their original files after the external-change check.");
-            for side in &sides { ui.label(paths[*side].display().to_string()); }
-            if let(Some(files),Some(workspace))=(&self.files,&self.workspace){
+            for side in &sides {
+                if let Some(path) = self.selected_source(*side)
+                    .or_else(|| self.paths.as_ref().map(|paths| &paths[*side]))
+                {
+                    ui.label(path.display().to_string());
+                }
+            }
+            if let Some(workspace)=&self.workspace{
                 egui::ScrollArea::vertical().max_height(300.0).show(ui,|ui|{for side in &sides{
                     ui.label(if *side==0{"Left working copy"}else{"Right working copy"});
-                    ui.columns(2,|cols|{cols[0].label("Loaded file");cols[0].label(RichText::new(files[*side].baseline_text().unwrap_or_default()).monospace());cols[1].label("Pending content");cols[1].label(RichText::new(workspace.text(side_of(*side))).monospace());});
+                    if let Some(file) = self.active_file(*side) {
+                        ui.columns(2,|cols|{cols[0].label("Loaded file");cols[0].label(RichText::new(file.baseline_text().unwrap_or_default()).monospace());cols[1].label("Pending content");cols[1].label(RichText::new(workspace.text(side_of(*side))).monospace());});
+                    }
                 }});
             }
             ui.horizontal(|ui| { cancel = ui.button("Cancel").clicked(); confirm = ui.button("Save").clicked(); });
@@ -2221,6 +2397,12 @@ fn inline_action(
         },
     );
     response.on_hover_text(label)
+}
+fn compact_legend_item(ui: &mut egui::Ui, icon: StatusIcon, label: &str) {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), Sense::hover());
+    paint_status_icon(ui.painter(), rect.center(), icon);
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, label));
+    response.on_hover_text(label);
 }
 fn append_code_line(
     job: &mut egui::text::LayoutJob,
@@ -2418,7 +2600,7 @@ mod tests {
         frame(&mut view, &ctx, vec![]).drop_without_applying_deltas();
         view.destination[0] = 0;
         view.sync_editor_cursor(0);
-        let id = egui::Id::new(("two-way-edit", view.generation, 0usize));
+        let id = egui::Id::new(("two-way-edit", view.side_generation[0], 0usize));
         ctx.memory_mut(|memory| memory.request_focus(id));
         frame(&mut view, &ctx, vec![egui::Event::Text("x\n".into())])
             .drop_without_applying_deltas();
@@ -2552,6 +2734,150 @@ mod tests {
             editing: true,
             ..Default::default()
         }
+    }
+    fn partial_view(path: PathBuf, text: &str) -> InteractiveView {
+        let file = WorkingFile {
+            identity: None,
+            path: Some(path.clone()),
+            text: text.into(),
+            encoding: versus::TextEncoding::Utf8 { bom: false },
+            fingerprint: versus::FileFingerprint::Bytes(text.as_bytes().to_vec()),
+        };
+        let mut view = InteractiveView {
+            editing: true,
+            ..Default::default()
+        };
+        view.register_file(path.clone(), file.clone());
+        view.side_sources[0] = Some(path);
+        view.side_files[0] = Some(file);
+        view.activate_side_workspace();
+        view
+    }
+    fn settle_save(view: &mut InteractiveView, ctx: &egui::Context) {
+        for _ in 0..100 {
+            view.poll_save(ctx);
+            if !view.is_saving() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("save did not finish");
+    }
+    #[test]
+    fn single_side_edits_undo_redo_and_repeated_saves_use_fresh_fingerprints() {
+        let root = std::env::temp_dir().join(format!("versus-single-save-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("only.txt");
+        std::fs::write(&path, "old\n").unwrap();
+        let mut view = partial_view(path.clone(), "old\n");
+        view.workspace
+            .as_mut()
+            .unwrap()
+            .edit_bytes(TwoWaySide::Left, 0..0, "first ".into())
+            .unwrap();
+        view.selected_side = 0;
+        view.move_history(false);
+        assert_eq!(view.working_text(0), Some("old\n"));
+        view.move_history(true);
+        assert_eq!(view.working_text(0), Some("first old\n"));
+        let ctx = egui::Context::default();
+        view.save_sides(vec![0]);
+        settle_save(&mut view, &ctx);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "first old\n");
+        assert!(!view.workspace.as_ref().unwrap().is_dirty(TwoWaySide::Left));
+        view.workspace
+            .as_mut()
+            .unwrap()
+            .set_text(TwoWaySide::Left, "second\n");
+        view.save_sides(vec![0]);
+        settle_save(&mut view, &ctx);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "second\n");
+        assert!(!view.workspace.as_ref().unwrap().is_dirty(TwoWaySide::Left));
+        let _ = std::fs::remove_dir_all(root);
+    }
+    #[test]
+    fn pending_or_failed_peer_load_preserves_healthy_side_editor_and_history() {
+        let mut view = partial_view(PathBuf::from("left.txt"), "left\n");
+        view.workspace
+            .as_mut()
+            .unwrap()
+            .edit_bytes(TwoWaySide::Left, 0..0, "edited ".into())
+            .unwrap();
+        view.publish_active();
+        view.selected_side = 0;
+        view.scroll[0] = 37.0;
+        let editor = egui::Id::new(("two-way-edit", view.side_generation[0], 0usize));
+        let (sender, receiver) = mpsc::channel();
+        view.side_sources[1] = Some(PathBuf::from("missing.txt"));
+        view.side_generation[1] = view.side_generation[1].wrapping_add(1);
+        view.activate_side_workspace();
+        view.side_loading[1] = Some(SideLoad {
+            receiver,
+            path: PathBuf::from("missing.txt"),
+        });
+        assert_eq!(view.working_text(0), Some("edited left\n"));
+        assert_eq!(view.scroll[0], 37.0);
+        assert_eq!(
+            editor,
+            egui::Id::new(("two-way-edit", view.side_generation[0], 0usize))
+        );
+        view.move_history(false);
+        assert_eq!(view.working_text(0), Some("left\n"));
+        view.move_history(true);
+        assert_eq!(view.working_text(0), Some("edited left\n"));
+        sender.send(Err("unavailable".into())).unwrap();
+        view.poll(&egui::Context::default());
+        assert!(
+            view.error
+                .as_deref()
+                .is_some_and(|error| error.contains("unavailable"))
+        );
+        assert_eq!(view.working_text(0), Some("edited left\n"));
+        assert!(!view.has_actual_pair());
+        let ctx = egui::Context::default();
+        frame(&mut view, &ctx, vec![]).drop_without_applying_deltas();
+        assert!(ctx.read_response(editor).is_some());
+        assert!(
+            ctx.read_response(egui::Id::new((
+                "two-way-edit",
+                view.side_generation[1],
+                1usize,
+            )))
+            .is_none()
+        );
+    }
+    #[test]
+    fn cached_side_reopen_promotes_to_a_canonical_pair() {
+        let mut view = InteractiveView {
+            editing: true,
+            ..Default::default()
+        };
+        for (side, text) in ["left\n", "right\n"].into_iter().enumerate() {
+            let path = PathBuf::from(if side == 0 { "left.txt" } else { "right.txt" });
+            view.register_file(
+                path.clone(),
+                WorkingFile {
+                    identity: None,
+                    path: Some(path),
+                    text: text.into(),
+                    encoding: versus::TextEncoding::Utf8 { bom: false },
+                    fingerprint: versus::FileFingerprint::Bytes(text.as_bytes().to_vec()),
+                },
+            );
+        }
+        view.open_sources([None, None]);
+        view.open_sources([
+            Some(PathBuf::from("left.txt")),
+            Some(PathBuf::from("right.txt")),
+        ]);
+        assert_eq!(
+            view.pair_paths().unwrap(),
+            &[PathBuf::from("left.txt"), PathBuf::from("right.txt")]
+        );
+        assert!(view.files.is_some() && view.workspace.is_some());
+        view.set_run_diff(true);
+        assert!(view.loaded_pair_comparison().is_none());
     }
     fn frame(
         view: &mut InteractiveView,
@@ -2724,24 +3050,6 @@ mod tests {
             })
             .unwrap_or_else(|| panic!("Missing {label}"))
     }
-    fn click_position(view: &mut InteractiveView, ctx: &egui::Context, position: Pos2) {
-        for pressed in [true, false] {
-            frame(
-                view,
-                ctx,
-                vec![
-                    egui::Event::PointerMoved(position),
-                    egui::Event::PointerButton {
-                        pos: position,
-                        button: egui::PointerButton::Primary,
-                        pressed,
-                        modifiers: egui::Modifiers::NONE,
-                    },
-                ],
-            )
-            .drop_without_applying_deltas();
-        }
-    }
     #[test]
     fn merge_toolbar_toggles_diff_controls_and_legends_without_resetting_edits() {
         let diff_buttons = [
@@ -2761,6 +3069,7 @@ mod tests {
                 let mut view = view("left\n", "right\n");
                 view.merge_options = [false, true, true];
                 view.diff_options = [true, false, true];
+                view.set_run_diff(true);
                 view.workspace
                     .as_mut()
                     .unwrap()
@@ -2771,63 +3080,19 @@ mod tests {
                 let undo = view.workspace.as_ref().unwrap().next_undo_tag();
                 let mut output = frame(&mut view, &ctx, vec![]);
                 output.textures_delta.clear();
-                let run = text_rect(&output, "Run Diff");
-                let sync = text_rect(&output, "Sync scroll");
-                let conflict = text_rect(&output, "Conflict");
-                let new = ctx
-                    .read_response(egui::Id::new("New comparison"))
-                    .unwrap()
-                    .rect;
-                assert!(
-                    conflict.right() < new.left()
-                        && new.right() < run.left()
-                        && run.right() < sync.left()
-                );
-                assert!((run.center().y - sync.center().y).abs() < 1.0);
+                text_rect(&output, "Conflict");
                 for label in diff_buttons {
                     assert!(
-                        ctx.read_response(egui::Id::new(label)).is_none(),
-                        "{label} is visible with Run Diff off"
+                        ctx.read_response(egui::Id::new(label)).is_some(),
+                        "{label} missing"
                     );
-                }
-                for icon in DIFF_LEGEND_ICONS {
-                    assert!(!output.shapes.iter().any(|shape|matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text()==icon.label())));
-                }
-                click_position(&mut view, &ctx, sync.center());
-                assert!(view.sync_scroll);
-                click_position(&mut view, &ctx, run.center());
-                assert!(view.run_diff_enabled());
-                let mut output = frame(&mut view, &ctx, vec![]);
-                output.textures_delta.clear();
-                let controls: Vec<_> = ["Zoom out", "Zoom in"]
-                    .into_iter()
-                    .chain(diff_buttons)
-                    .map(|label| ctx.read_response(egui::Id::new(label)).unwrap().rect)
-                    .collect();
-                assert!(
-                    controls
-                        .windows(2)
-                        .all(|pair| pair[0].right() < pair[1].left())
-                );
-                assert!(controls.last().unwrap().right() <= ctx.viewport_rect().right() + 1.0);
-                for icon in DIFF_LEGEND_ICONS {
-                    text_rect(&output, icon.label());
-                }
-                text_rect(&output, "Conflict");
-                let run = text_rect(&output, "Run Diff");
-                click_position(&mut view, &ctx, run.center());
-                assert!(!view.run_diff_enabled());
-                let mut output = frame(&mut view, &ctx, vec![]);
-                output.textures_delta.clear();
-                for label in diff_buttons {
-                    assert!(ctx.read_response(egui::Id::new(label)).is_none());
                 }
                 assert_eq!(view.working_text(0), Some("edited\nleft\n"));
                 assert_eq!(view.workspace.as_ref().unwrap().next_undo_tag(), undo);
                 assert_eq!(view.selected, [0..1, 0..1]);
                 assert_eq!(view.merge_options, [false, true, true]);
                 assert_eq!(view.diff_options, [true, false, true]);
-                assert!(view.sync_scroll && view.diff_job.is_none());
+                assert!(view.diff_job.is_none());
             }
         }
     }

@@ -498,6 +498,39 @@ pub struct LazyDirectoryEntry {
     pub right: Option<LazyDirectorySide>,
 }
 
+/// Metadata for one child in a single directory tree.  This is deliberately
+/// separate from paired directory entries so a merge workspace can browse one
+/// selected source without inventing a second root or reading its contents.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LazyDirectoryItem {
+    pub relative_path: PathBuf,
+    pub side: LazyDirectorySide,
+}
+
+/// Lists one directory level below a single root. This reads names and file
+/// metadata only; it does not hash or open file contents and rejects symlink
+/// roots or ancestors.
+pub fn directory_entries_for_root(
+    root: &Path,
+    relative: &Path,
+) -> Result<Vec<LazyDirectoryItem>, CompareError> {
+    validate_relative_directory_path(relative)?;
+    validate_directory_root(root)?;
+    let mut entries: Vec<_> = list_child_directory(root, relative)?
+        .into_iter()
+        .map(|(name, side)| LazyDirectoryItem {
+            relative_path: relative.join(name),
+            side,
+        })
+        .collect();
+    entries.sort_by(|left, right| {
+        (right.side.kind == DirectoryEntryKind::Directory)
+            .cmp(&(left.side.kind == DirectoryEntryKind::Directory))
+            .then_with(|| left.relative_path.cmp(&right.relative_path))
+    });
+    Ok(entries)
+}
+
 /// Lists just one directory level.  It reads metadata only and never hashes or
 /// opens file contents; symlinks are returned as non-navigable entries.
 pub fn directory_entries_at(
@@ -505,22 +538,7 @@ pub fn directory_entries_at(
     right_root: &Path,
     relative: &Path,
 ) -> Result<Vec<LazyDirectoryEntry>, CompareError> {
-    if relative.is_absolute()
-        || relative.components().any(|part| {
-            matches!(
-                part,
-                std::path::Component::ParentDir
-                    | std::path::Component::RootDir
-                    | std::path::Component::Prefix(_)
-            )
-        })
-    {
-        return Err(CompareError {
-            path: Some(relative.to_path_buf()),
-            kind: CompareErrorKind::InvalidPath,
-            message: "directory relative path must stay below its root".into(),
-        });
-    }
+    validate_relative_directory_path(relative)?;
     validate_directory_root(left_root)?;
     validate_directory_root(right_root)?;
     let left = list_child_directory(left_root, relative)?;
@@ -565,6 +583,26 @@ pub fn directory_entries_at(
             .then_with(|| left.relative_path.cmp(&right.relative_path))
     });
     Ok(entries)
+}
+
+fn validate_relative_directory_path(relative: &Path) -> Result<(), CompareError> {
+    if relative.is_absolute()
+        || relative.components().any(|part| {
+            matches!(
+                part,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return Err(CompareError {
+            path: Some(relative.to_path_buf()),
+            kind: CompareErrorKind::InvalidPath,
+            message: "directory relative path must stay below its root".into(),
+        });
+    }
+    Ok(())
 }
 
 fn validate_directory_root(path: &Path) -> Result<(), CompareError> {
@@ -667,6 +705,21 @@ mod tests {
             entries
                 .iter()
                 .all(|entry| entry.relative_path.components().count() == 1)
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+    #[test]
+    fn single_root_listing_does_not_need_or_invent_a_peer() {
+        let root = temp("single-listing");
+        fs::create_dir_all(root.join("directory")).unwrap();
+        fs::write(root.join("file.txt"), b"metadata only").unwrap();
+        let entries = directory_entries_for_root(&root, Path::new("")).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].side.kind, DirectoryEntryKind::Directory);
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry.relative_path.parent() == Some(Path::new("")))
         );
         let _ = fs::remove_dir_all(root);
     }

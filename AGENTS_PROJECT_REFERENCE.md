@@ -26,9 +26,9 @@ APIs and must fail cleanly when unavailable.
   file/folder navigation, and mode-specific comparison options. Diff preferences
   are kept separately from Merge preferences; the three Merge options start off.
   Enabling Run Diff schedules a debounced comparison for the open pair on a
-  cancellable worker; disabling it drops pending diff work and removes alignment
-  rows/highlights without resetting working copies or history. The alignment panel
-  is separate from the editors, so its differences-only filter does not filter text.
+  cancellable worker; disabling it drops pending diff work and removes diff
+  highlights without resetting working copies or history. Diff assistance appears
+  within the editors; there is no separate comparison-alignment panel.
 - `src/app/interactive_view.rs` renders the two-way editing workspace. Each side
   has its own text buffer, line numbers, dirty state, scroll position, and explicit
   Save Left/Save Right/Save Both action with a pending-content preview. Selection
@@ -44,14 +44,18 @@ APIs and must fail cleanly when unavailable.
   ignored-range state. Diff rows only assist with alignment and target suggestions
   when enabled; manual transfers work without them. File-pair history uses
   canonical tagged snapshots and survives navigation and alternate pairing.
-  The toolbar keeps Conflict, New comparison, Run Diff, and Sync scroll on the left.
+  Run Diff is in the header immediately left of the theme button. The toolbar
+  keeps Conflict and New comparison on the left, with the normal diff legend
+  preceding Conflict on the same line when enabled (compact icons when needed).
   Zoom stays on the right; comparison options and difference navigation follow it
-  only while Run Diff is enabled. The normal diff legend follows the same visibility
-  rule and wraps when needed; hidden Merge option states are retained.
+  only while Run Diff is enabled. Hidden Merge option states are retained. Each
+  side loads and scrolls independently; transfers require two loaded files.
 - `src/app/folder_browser.rs` enumerates one directory level at a time through
-  `directory_entries_at`, which reads entry metadata and relative paths without
-  comparing file contents. Expanding a directory requests that listing; opening a
-  file loads its working copy. The recursive Find and Replace window supports left,
+  `directory_entries_for_root`, which reads entry metadata and relative paths
+  without comparing file contents. Each Merge side enumerates, expands, and scrolls
+  its own tree, including when only one root is selected. Expanding a directory
+  requests that side’s listing; opening a file loads its working copy independently
+  of the other pane. The recursive Find and Replace window supports left,
   right, or both roots; plain text/regex, case, and whole-word matching; match
   selection; previews; staged working-copy application; and batch undo/redo. Batch
   undo is atomic across participating files; newer edits or ignored-range changes
@@ -196,8 +200,9 @@ APIs and must fail cleanly when unavailable.
 - Keep slow filesystem work off the UI thread and support cancellation where the UI
   exposes it.
 - Support direct entry and paste of Windows drive and UNC paths alongside native
-  dialogs. Tree rows align by relative path, with placeholders for missing entries;
-  expanding or collapsing either pane updates the shared expansion state.
+  dialogs. Diff tree rows align by relative path, with placeholders for missing
+  entries; expanding or collapsing either Diff pane updates shared expansion. Merge trees
+  browse independently and load only their own expanded directories.
 - Keep dependencies small, locked, vendorable, and compatible with offline builds.
 
 ## Commands

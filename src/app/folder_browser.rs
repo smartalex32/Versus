@@ -7,12 +7,12 @@ use std::{
     ops::Range,
 };
 use versus::{
-    DirectoryEntryState, FileViewOptions, LazyDirectoryEntry, SearchPreview, SearchQuery,
+    DirectoryEntryState, FileViewOptions, LazyDirectoryItem, SearchPreview, SearchQuery,
     SearchResults, SearchScope, WorkingFile, compare_loaded_text, load_working_file,
 };
 
 struct ListingJob {
-    receiver: Receiver<Result<Vec<LazyDirectoryEntry>, String>>,
+    receiver: Receiver<Result<Vec<LazyDirectoryItem>, String>>,
 }
 struct SearchJob {
     receiver: Receiver<Result<SearchResults, String>>,
@@ -52,9 +52,9 @@ struct SaveJob {
 }
 
 pub(super) struct FolderBrowser {
-    pub(super) roots: [PathBuf; 2],
-    listings: BTreeMap<PathBuf, Vec<LazyDirectoryEntry>>,
-    jobs: BTreeMap<PathBuf, ListingJob>,
+    pub(super) sources: [Option<PathBuf>; 2],
+    listings: [BTreeMap<PathBuf, Vec<LazyDirectoryItem>>; 2],
+    jobs: [BTreeMap<PathBuf, ListingJob>; 2],
     overlays: BTreeMap<PathBuf, DirectoryEntryState>,
     /// Every path that has had a working-copy overlay.  Retaining it lets a
     /// save or ignored-range removal restore the disk-backed folder state.
@@ -65,8 +65,9 @@ pub(super) struct FolderBrowser {
     overlay_job: Option<OverlayJob>,
     retired_overlay_jobs: Vec<OverlayJob>,
     overlay_generation: u64,
-    expanded: BTreeSet<PathBuf>,
-    pending_reveal: Option<PathBuf>,
+    expanded: [BTreeSet<PathBuf>; 2],
+    pending_reveal: [Option<PathBuf>; 2],
+    source_generation: [u64; 2],
     selected: [Option<PathBuf>; 2],
     error: Option<String>,
     search_open: bool,
@@ -81,14 +82,18 @@ pub(super) struct FolderBrowser {
     working: BTreeMap<PathBuf, WorkingFile>,
     pending_save: bool,
     save: Option<SaveJob>,
+    pair_open_requested: bool,
 }
 
 impl FolderBrowser {
     pub(super) fn new(roots: [PathBuf; 2]) -> Self {
+        Self::new_with_sources(roots.map(Some))
+    }
+    pub(super) fn new_with_sources(sources: [Option<PathBuf>; 2]) -> Self {
         let mut view = Self {
-            roots,
-            listings: BTreeMap::new(),
-            jobs: BTreeMap::new(),
+            sources,
+            listings: std::array::from_fn(|_| BTreeMap::new()),
+            jobs: std::array::from_fn(|_| BTreeMap::new()),
             overlays: BTreeMap::new(),
             overlay_paths: BTreeSet::new(),
             overlay_cache: BTreeMap::new(),
@@ -97,8 +102,9 @@ impl FolderBrowser {
             overlay_job: None,
             retired_overlay_jobs: Vec::new(),
             overlay_generation: 0,
-            expanded: BTreeSet::new(),
-            pending_reveal: None,
+            expanded: std::array::from_fn(|_| BTreeSet::new()),
+            pending_reveal: std::array::from_fn(|_| None),
+            source_generation: [0, 0],
             selected: [None, None],
             error: None,
             search_open: false,
@@ -113,9 +119,64 @@ impl FolderBrowser {
             working: BTreeMap::new(),
             pending_save: false,
             save: None,
+            pair_open_requested: false,
         };
-        view.load(PathBuf::new());
+        for side in 0..2 {
+            view.load_side(side, PathBuf::new());
+        }
         view
+    }
+    pub(super) fn set_sources(&mut self, sources: [Option<PathBuf>; 2]) {
+        let changed = self.sources != sources;
+        if !changed {
+            return;
+        }
+        for side in 0..2 {
+            if self.sources[side] != sources[side] {
+                self.sources[side] = sources[side].clone();
+                self.listings[side].clear();
+                self.jobs[side].clear();
+                self.expanded[side].clear();
+                self.pending_reveal[side] = None;
+                self.source_generation[side] = self.source_generation[side].wrapping_add(1);
+                self.selected[side] = None;
+                if self.sources[side].is_some() {
+                    self.load_side(side, PathBuf::new());
+                }
+            }
+        }
+        // Results are rooted in the old workspace. Drop their receivers so
+        // cancellation reaches workers and stale paths cannot be applied.
+        self.overlay_job = None;
+        self.retired_overlay_jobs.clear();
+        self.overlay_generation = self.overlay_generation.wrapping_add(1);
+        self.overlay_token = None;
+        self.overlay_not_before = None;
+        self.overlays.clear();
+        self.overlay_paths.clear();
+        self.overlay_cache.clear();
+        self.search = None;
+        self.results = None;
+        self.preview = None;
+        self.selected_hits.clear();
+        self.searched_query = None;
+        self.pair_open_requested = false;
+    }
+    pub(super) fn source_roots(&self) -> [Option<PathBuf>; 2] {
+        self.sources.clone()
+    }
+    pub(super) fn take_selected_pair(&mut self) -> Option<[PathBuf; 2]> {
+        if !std::mem::take(&mut self.pair_open_requested) {
+            return None;
+        }
+        let roots = self.paired_roots()?;
+        let [Some(left), Some(right)] = self.selected.clone() else {
+            return None;
+        };
+        Some([roots[0].join(left), roots[1].join(right)])
+    }
+    fn paired_roots(&self) -> Option<[PathBuf; 2]> {
+        Some([self.sources[0].clone()?, self.sources[1].clone()?])
     }
     pub(super) fn any_dirty(&self) -> bool {
         self.working.values().any(WorkingFile::is_dirty)
@@ -126,7 +187,7 @@ impl FolderBrowser {
     /// Reveals one relative path by loading only its ancestor directories.
     /// No file contents or unrelated tree levels are read.
     pub(super) fn reveal_difference(&mut self, relative: PathBuf) {
-        self.pending_reveal = Some(relative.clone());
+        self.pending_reveal = [Some(relative.clone()), Some(relative.clone())];
         self.selected = [Some(relative.clone()), Some(relative.clone())];
         let mut ancestors = Vec::new();
         let mut cursor = relative.parent();
@@ -138,43 +199,48 @@ impl FolderBrowser {
             cursor = parent.parent();
         }
         for ancestor in ancestors.into_iter().rev() {
-            self.expanded.insert(ancestor.clone());
-            self.load(ancestor);
+            for side in 0..2 {
+                self.expanded[side].insert(ancestor.clone());
+                self.load_side(side, ancestor.clone());
+            }
         }
     }
-    fn load(&mut self, relative: PathBuf) {
-        if self.jobs.contains_key(&relative) || self.listings.contains_key(&relative) {
+    fn load_side(&mut self, side: usize, relative: PathBuf) {
+        if self.sources[side].is_none()
+            || self.jobs[side].contains_key(&relative)
+            || self.listings[side].contains_key(&relative)
+        {
             return;
         }
-        let roots = self.roots.clone();
+        let root = self.sources[side].clone().expect("checked root");
         let rel = relative.clone();
         let (sender, receiver) = mpsc::channel();
         std::thread::spawn(move || {
-            let result =
-                versus::directory_entries_at(&roots[0], &roots[1], &rel).map_err(|e| e.to_string());
+            let result = versus::directory_entries_for_root(&root, &rel).map_err(|e| e.to_string());
             let _ = sender.send(result);
         });
-        self.jobs.insert(relative, ListingJob { receiver });
+        self.jobs[side].insert(relative, ListingJob { receiver });
     }
     pub(super) fn poll(&mut self, ctx: &egui::Context) {
-        let ready: Vec<_> = self
-            .jobs
-            .iter()
-            .filter_map(|(path, job)| match job.receiver.try_recv() {
-                Ok(result) => Some((path.clone(), result)),
-                Err(TryRecvError::Disconnected) => {
-                    Some((path.clone(), Err("Directory worker stopped".into())))
+        for side in 0..2 {
+            let ready: Vec<_> = self.jobs[side]
+                .iter()
+                .filter_map(|(path, job)| match job.receiver.try_recv() {
+                    Ok(result) => Some((path.clone(), result)),
+                    Err(TryRecvError::Disconnected) => {
+                        Some((path.clone(), Err("Directory worker stopped".into())))
+                    }
+                    _ => None,
+                })
+                .collect();
+            for (path, result) in ready {
+                self.jobs[side].remove(&path);
+                match result {
+                    Ok(entries) => {
+                        self.listings[side].insert(path, entries);
+                    }
+                    Err(e) => self.error = Some(e),
                 }
-                _ => None,
-            })
-            .collect();
-        for (path, result) in ready {
-            self.jobs.remove(&path);
-            match result {
-                Ok(entries) => {
-                    self.listings.insert(path, entries);
-                }
-                Err(e) => self.error = Some(e),
             }
         }
         if let Some(job) = &self.search {
@@ -200,7 +266,7 @@ impl FolderBrowser {
                 _ => {}
             }
         }
-        if !self.jobs.is_empty()
+        if self.jobs.iter().any(|jobs| !jobs.is_empty())
             || self.search.is_some()
             || self.save.is_some()
             || self.overlay_job.is_some()
@@ -242,6 +308,14 @@ impl FolderBrowser {
             self.overlays.clear();
             return;
         }
+        // A folder diff has meaning only with two real directory sources.
+        // Single-source navigation remains fully available without it.
+        let Some(roots) = self.paired_roots() else {
+            self.overlays.clear();
+            self.overlay_paths.clear();
+            self.overlay_cache.clear();
+            return;
+        };
         // Show-only is a presentation filter, not a comparison input.
         let preferences = view.merge_options();
         let token = (
@@ -309,7 +383,7 @@ impl FolderBrowser {
                 continue;
             };
             for side in 0..2 {
-                if let Ok(relative) = path.strip_prefix(&self.roots[side]) {
+                if let Ok(relative) = path.strip_prefix(&roots[side]) {
                     let entry = loaded
                         .entry(relative.to_path_buf())
                         .or_insert_with(|| [None, None]);
@@ -334,8 +408,8 @@ impl FolderBrowser {
         self.overlay_paths = affected.clone();
         if let Some((paths, state)) = view.loaded_pair_comparison() {
             if let (Ok(left), Ok(right)) = (
-                paths[0].strip_prefix(&self.roots[0]),
-                paths[1].strip_prefix(&self.roots[1]),
+                paths[0].strip_prefix(&roots[0]),
+                paths[1].strip_prefix(&roots[1]),
             ) {
                 if left == right && affected.remove(left) {
                     self.overlays.insert(left.to_path_buf(), state);
@@ -370,7 +444,6 @@ impl FolderBrowser {
         if requested.is_empty() {
             return;
         }
-        let roots = self.roots.clone();
         let options = view.merge_options();
         let generation = self.overlay_generation;
         let cancel = Arc::new(AtomicBool::new(false));
@@ -413,53 +486,33 @@ impl FolderBrowser {
             })
             .collect()
     }
-    fn rows(
-        &self,
-        parent: &std::path::Path,
-        depth: usize,
-        output: &mut Vec<(LazyDirectoryEntry, usize)>,
-    ) {
-        if let Some(entries) = self.listings.get(parent) {
-            for entry in entries {
-                output.push((entry.clone(), depth));
-                if self.expanded.contains(&entry.relative_path) {
-                    self.rows(&entry.relative_path, depth + 1, output);
-                }
-            }
-        }
-    }
-    pub(super) fn render(
-        &mut self,
-        ui: &mut egui::Ui,
-        view: &mut InteractiveView,
-        compared: Option<&FolderTree>,
-    ) -> Option<[PathBuf; 2]> {
+    pub(super) fn render_controls(&mut self, ui: &mut egui::Ui, view: &mut InteractiveView) {
         self.poll(ui.ctx());
         self.poll_save(view, ui.ctx());
         self.update_overlays(view, ui.ctx());
         let palette = Palette::for_context(ui.ctx());
-        let mut open = None;
         ui.horizontal(|ui| {
             if ui.button("Find and Replace…").clicked() {
                 self.search_open = true;
             }
             if ui.button("Refresh listing").clicked() {
-                self.listings.clear();
-                self.load(PathBuf::new());
+                for side in 0..2 {
+                    self.listings[side].clear();
+                    self.load_side(side, PathBuf::new());
+                }
             }
-            if ui
-                .add_enabled(
-                    self.selected.iter().all(Option::is_some),
-                    egui::Button::new("Open selected pair"),
-                )
-                .on_hover_text("Pair files with different names or paths")
-                .clicked()
+            if self.paired_roots().is_some()
+                && ui
+                    .add_enabled(
+                        self.selected.iter().all(Option::is_some),
+                        egui::Button::new("Open selected pair"),
+                    )
+                    .on_hover_text("Pair files with different names or paths")
+                    .clicked()
             {
-                open = Some(std::array::from_fn(|side| {
-                    self.roots[side].join(self.selected[side].as_ref().unwrap())
-                }));
+                self.pair_open_requested = true;
             }
-            if !self.jobs.is_empty() {
+            if self.jobs.iter().any(|jobs| !jobs.is_empty()) {
                 ui.spinner();
                 ui.label("Loading directory metadata…");
             }
@@ -471,141 +524,198 @@ impl FolderBrowser {
                 ui.colored_label(palette.error, error);
             }
         });
-        let states = if view.run_diff_enabled() {
+        self.search_window(ui.ctx(), view);
+    }
+    /// Renders one independently navigable source tree and returns a file
+    /// opened from that side. Missing sources intentionally render nothing.
+    pub(super) fn render_side(
+        &mut self,
+        ui: &mut egui::Ui,
+        view: &mut InteractiveView,
+        compared: Option<&FolderTree>,
+        side: usize,
+    ) -> Option<PathBuf> {
+        let root = self.sources[side].clone()?;
+        let palette = Palette::for_context(ui.ctx());
+        let states = if view.run_diff_enabled() && self.paired_roots().is_some() {
             merged_folder_states(compared, &self.overlays)
         } else {
-            merged_folder_states(compared, &BTreeMap::new())
+            BTreeMap::new()
         };
         let mut rows = Vec::new();
-        self.rows(std::path::Path::new(""), 0, &mut rows);
-        if view.run_diff_enabled() && view.merge_options()[0] {
+        self.rows_for_side(side, std::path::Path::new(""), 0, &mut rows);
+        if view.run_diff_enabled() && view.merge_options()[0] && self.paired_roots().is_some() {
             rows.retain(|(entry, _)| {
                 states.get(&entry.relative_path) != Some(&DirectoryEntryState::Same)
             });
         }
-        let reveal_index = self.pending_reveal.as_ref().and_then(|target| {
+        let reveal_index = self.pending_reveal[side].as_ref().and_then(|target| {
             rows.iter()
                 .position(|(entry, _)| &entry.relative_path == target)
         });
         if let Some(index) = reveal_index {
-            let entry = &rows[index].0;
-            let target = entry.relative_path.clone();
-            self.selected = [
-                entry.left.is_some().then_some(target.clone()),
-                entry.right.is_some().then_some(target),
-            ];
-            self.pending_reveal = None;
+            self.selected[side] = Some(rows[index].0.relative_path.clone());
+            self.pending_reveal[side] = None;
         }
         let available = ui.available_height().max(80.0);
         let row_height = comparison_row_height(ui);
-        ui.scope(|ui| {
-            let mut scroll = egui::ScrollArea::vertical()
-                .id_salt("merge-folder-tree")
-                .max_height(available - 5.0);
-            if let Some(index) = reveal_index {
-                scroll = scroll.vertical_scroll_offset(index as f32 * row_height);
-            }
-            scroll.show_rows(ui, row_height, rows.len(), |ui, range| {
-                for index in range {
-                    let (entry, depth) = &rows[index];
-                    let (rect, _) = ui.allocate_exact_size(
-                        egui::vec2(ui.available_width(), row_height),
-                        Sense::hover(),
+        let mut opened = None;
+        let mut scroll = egui::ScrollArea::vertical()
+            .id_salt(("merge-folder-tree", side, self.source_generation[side]))
+            .max_height(available - 5.0);
+        if let Some(index) = reveal_index {
+            scroll = scroll.vertical_scroll_offset(index as f32 * row_height);
+        }
+        scroll.show_rows(ui, row_height, rows.len(), |ui, range| {
+            for index in range {
+                let (entry, depth) = &rows[index];
+                let (rect, _) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), row_height),
+                    Sense::click(),
+                );
+                let directory = entry.side.kind == DirectoryEntryKind::Directory;
+                let file = entry.side.kind == DirectoryEntryKind::File;
+                let response = ui.interact(
+                    rect,
+                    ui.id().with(("merge-entry", side, &entry.relative_path)),
+                    Sense::click(),
+                );
+                let state = states
+                    .get(&entry.relative_path)
+                    .cloned()
+                    .unwrap_or(DirectoryEntryState::Same);
+                let selected = self.selected[side].as_ref() == Some(&entry.relative_path);
+                let fill = if selected {
+                    palette.accent.gamma_multiply(0.16)
+                } else if response.hovered() {
+                    palette.hover
+                } else if index % 2 == 1 {
+                    palette.alternate
+                } else {
+                    palette.panel
+                };
+                let painter = ui.painter().with_clip_rect(rect);
+                painter.rect_filled(rect, 0, fill);
+                let color = state_color(&state, palette);
+                if state != DirectoryEntryState::Same {
+                    painter.rect_filled(
+                        Rect::from_min_size(rect.min, egui::vec2(3.0, rect.height())),
+                        0,
+                        color,
                     );
-                    let mut toggle = false;
-                    for (side, half) in split_rect(rect).into_iter().enumerate() {
-                        let meta = if side == 0 { &entry.left } else { &entry.right };
-                        let present = meta.is_some();
-                        let directory = meta
-                            .as_ref()
-                            .is_some_and(|m| m.kind == DirectoryEntryKind::Directory);
-                        let file = meta
-                            .as_ref()
-                            .is_some_and(|m| m.kind == DirectoryEntryKind::File);
-                        let response = ui.interact(
-                            half,
-                            ui.id().with(("merge-entry", &entry.relative_path, side)),
-                            Sense::click(),
-                        );
-                        if self.selected[side].as_ref() == Some(&entry.relative_path)
-                            || response.hovered()
-                        {
-                            ui.painter().rect_filled(half, 0.0, palette.hover);
-                        }
-                        let icon = if directory {
-                            if self.expanded.contains(&entry.relative_path) {
-                                "▾"
-                            } else {
-                                "▸"
-                            }
-                        } else if file {
-                            "·"
+                }
+                let x = rect.left() + 8.0 + *depth as f32 * 14.0;
+                let y = rect.center().y;
+                let name_right = rect.right() - 98.0;
+                let name_painter = painter.with_clip_rect(Rect::from_min_max(
+                    rect.min,
+                    egui::pos2(name_right.max(rect.left()), rect.bottom()),
+                ));
+                if directory {
+                    name_painter.text(
+                        egui::pos2(x, y),
+                        Align2::LEFT_CENTER,
+                        if self.expanded[side].contains(&entry.relative_path) {
+                            "▾"
                         } else {
-                            ""
-                        };
-                        let name = if present {
-                            entry
-                                .relative_path
-                                .file_name()
-                                .unwrap_or_default()
-                                .to_string_lossy()
-                                .to_string()
-                        } else {
-                            "—".into()
-                        };
-                        let text = format!("{icon} {name}");
-                        let pos = half.left_center()
-                            + egui::vec2(
-                                9.0 + *depth as f32 * 16.0,
-                                -comparison_font(ui.ctx()).size / 2.0,
-                            );
-                        ui.painter().text(
-                            pos,
-                            Align2::LEFT_TOP,
-                            text,
-                            comparison_font(ui.ctx()),
-                            if present { palette.text } else { palette.muted },
-                        );
-                        if let Some(state) = states.get(&entry.relative_path) {
-                            if let Some(icon) = status_icon(state) {
-                                paint_status_icon(
-                                    ui.painter(),
-                                    half.right_center() - egui::vec2(16.0, 0.0),
-                                    icon,
-                                );
-                            }
-                        }
-                        if response.clicked() {
-                            if file {
-                                self.selected[side] = Some(entry.relative_path.clone());
-                            } else if directory {
-                                toggle = true;
-                            }
-                        }
-                        if response.double_clicked() && file {
-                            open = Some(
-                                self.roots
-                                    .clone()
-                                    .map(|root| root.join(&entry.relative_path)),
-                            );
-                        }
-                    }
-                    ui.painter().line_segment(
-                        [rect.center_top(), rect.center_bottom()],
-                        Stroke::new(1.0, palette.border),
+                            "▸"
+                        },
+                        FontId::monospace(15.0),
+                        palette.muted,
                     );
-                    if toggle {
-                        if !self.expanded.insert(entry.relative_path.clone()) {
-                            self.expanded.remove(&entry.relative_path);
+                }
+                paint_icon(
+                    &name_painter,
+                    egui::pos2(x + 19.0, y),
+                    Some(&entry.side.kind),
+                    color,
+                );
+                name_painter.text(
+                    egui::pos2(x + 40.0, y),
+                    Align2::LEFT_CENTER,
+                    entry
+                        .relative_path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy(),
+                    comparison_font(ui.ctx()),
+                    color,
+                );
+                painter.text(
+                    egui::pos2(rect.right() - 32.0, y),
+                    Align2::RIGHT_CENTER,
+                    format_size(entry.side.size),
+                    FontId::monospace(10.0),
+                    palette.muted,
+                );
+                if let Some(icon) = status_icon(&state) {
+                    paint_status_icon(&painter, egui::pos2(rect.right() - 15.0, y), icon);
+                }
+                if response.clicked() {
+                    if file {
+                        self.selected[side] = Some(entry.relative_path.clone());
+                    } else if directory {
+                        if !self.expanded[side].insert(entry.relative_path.clone()) {
+                            self.expanded[side].remove(&entry.relative_path);
                         } else {
-                            self.load(entry.relative_path.clone());
+                            self.load_side(side, entry.relative_path.clone());
                         }
                     }
                 }
-            });
+                if response.double_clicked() && file {
+                    opened = Some(root.join(&entry.relative_path));
+                }
+            }
         });
-        self.search_window(ui.ctx(), view);
-        open
+        opened
+    }
+    fn rows_for_side(
+        &self,
+        side: usize,
+        parent: &std::path::Path,
+        depth: usize,
+        output: &mut Vec<(LazyDirectoryItem, usize)>,
+    ) {
+        if let Some(entries) = self.listings[side].get(parent) {
+            for entry in entries {
+                output.push((entry.clone(), depth));
+                if self.expanded[side].contains(&entry.relative_path) {
+                    self.rows_for_side(side, &entry.relative_path, depth + 1, output);
+                }
+            }
+        }
+    }
+    pub(super) fn render(
+        &mut self,
+        ui: &mut egui::Ui,
+        view: &mut InteractiveView,
+        compared: Option<&FolderTree>,
+    ) -> Option<[PathBuf; 2]> {
+        self.render_controls(ui, view);
+        let mut opened = [None, None];
+        ui.columns(2, |columns| {
+            for side in 0..2 {
+                opened[side] = self.render_side(&mut columns[side], view, compared, side);
+            }
+        });
+        if let Some(pair) = self.take_selected_pair() {
+            return Some(pair);
+        }
+        match opened {
+            [Some(left), Some(right)] => Some([left, right]),
+            [Some(left), None] => self.paired_roots().map(|roots| {
+                let relative = left.strip_prefix(&roots[0]).unwrap_or(&left).to_path_buf();
+                [left, roots[1].join(relative)]
+            }),
+            [None, Some(right)] => self.paired_roots().map(|roots| {
+                let relative = right
+                    .strip_prefix(&roots[1])
+                    .unwrap_or(&right)
+                    .to_path_buf();
+                [roots[0].join(relative), right]
+            }),
+            _ => None,
+        }
     }
     fn begin_save(&mut self, view: &InteractiveView) {
         if self.save.is_some() || view.is_saving() {
@@ -747,7 +857,7 @@ impl FolderBrowser {
                         .clicked()
                     {
                         self.working = view.export_working_files();
-                        let roots = self.roots.clone().map(Some);
+                        let roots = self.sources.clone();
                         let scope = self.scope;
                         let query = self.query.clone();
                         let working = self.working.clone();
@@ -1238,18 +1348,19 @@ mod tests {
         let roots = [PathBuf::from("left-root"), PathBuf::from("right-root")];
         let mut browser = FolderBrowser::new(roots);
         browser.reveal_difference(PathBuf::from("one/two/changed.txt"));
-        assert!(browser.expanded.contains(&PathBuf::from("one")));
-        assert!(browser.expanded.contains(&PathBuf::from("one/two")));
-        assert!(browser.jobs.contains_key(&PathBuf::from("one")));
-        assert!(browser.jobs.contains_key(&PathBuf::from("one/two")));
-        assert!(
-            !browser
-                .jobs
-                .contains_key(&PathBuf::from("one/two/changed.txt"))
-        );
+        for side in 0..2 {
+            assert!(browser.expanded[side].contains(&PathBuf::from("one")));
+            assert!(browser.expanded[side].contains(&PathBuf::from("one/two")));
+            assert!(browser.jobs[side].contains_key(&PathBuf::from("one")));
+            assert!(browser.jobs[side].contains_key(&PathBuf::from("one/two")));
+            assert!(!browser.jobs[side].contains_key(&PathBuf::from("one/two/changed.txt")));
+        }
         assert_eq!(
             browser.pending_reveal,
-            Some(PathBuf::from("one/two/changed.txt"))
+            [
+                Some(PathBuf::from("one/two/changed.txt")),
+                Some(PathBuf::from("one/two/changed.txt"))
+            ]
         );
         assert_eq!(
             browser.selected,
@@ -1257,6 +1368,92 @@ mod tests {
                 Some(PathBuf::from("one/two/changed.txt")),
                 Some(PathBuf::from("one/two/changed.txt"))
             ]
+        );
+    }
+
+    #[test]
+    fn single_source_enumerates_only_its_own_root() {
+        let root =
+            std::env::temp_dir().join(format!("versus-single-source-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("only-left.txt"), "content").unwrap();
+        let mut browser = FolderBrowser::new_with_sources([Some(root.clone()), None]);
+        for _ in 0..50 {
+            browser.poll(&egui::Context::default());
+            if browser.listings[0].contains_key(std::path::Path::new("")) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(
+            browser.listings[0]
+                .get(std::path::Path::new(""))
+                .is_some_and(|items| items
+                    .iter()
+                    .any(|item| item.relative_path == PathBuf::from("only-left.txt")))
+        );
+        assert!(browser.listings[1].is_empty());
+        assert!(browser.jobs[1].is_empty());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn changing_one_source_preserves_the_other_tree_state() {
+        let mut browser = FolderBrowser::new_with_sources([
+            Some(PathBuf::from("left")),
+            Some(PathBuf::from("right")),
+        ]);
+        browser.expanded[0].insert(PathBuf::from("kept"));
+        browser.expanded[1].insert(PathBuf::from("replaced"));
+        browser.set_sources([
+            Some(PathBuf::from("left")),
+            Some(PathBuf::from("new-right")),
+        ]);
+        assert!(browser.expanded[0].contains(&PathBuf::from("kept")));
+        assert!(browser.expanded[1].is_empty());
+        assert_eq!(browser.source_roots()[0], Some(PathBuf::from("left")));
+        assert_eq!(browser.source_roots()[1], Some(PathBuf::from("new-right")));
+    }
+
+    #[test]
+    fn changing_sources_discards_old_overlay_and_search_results() {
+        let mut browser = FolderBrowser::new_with_sources([
+            Some(PathBuf::from("left")),
+            Some(PathBuf::from("right")),
+        ]);
+        browser
+            .overlays
+            .insert(PathBuf::from("old.txt"), DirectoryEntryState::Different);
+        browser.overlay_paths.insert(PathBuf::from("old.txt"));
+        let (sender, receiver) = mpsc::channel();
+        browser.overlay_job = Some(OverlayJob {
+            receiver,
+            cancel: Arc::new(AtomicBool::new(false)),
+            signatures: BTreeMap::new(),
+        });
+        browser.set_sources([
+            Some(PathBuf::from("new-left")),
+            Some(PathBuf::from("right")),
+        ]);
+        assert!(browser.overlay_job.is_none());
+        assert!(browser.retired_overlay_jobs.is_empty());
+        assert!(browser.overlays.is_empty());
+        assert!(browser.overlay_paths.is_empty());
+        drop(sender);
+    }
+
+    #[test]
+    fn setting_identical_sources_preserves_overlay_state() {
+        let sources = [Some(PathBuf::from("left")), Some(PathBuf::from("right"))];
+        let mut browser = FolderBrowser::new_with_sources(sources.clone());
+        browser
+            .overlays
+            .insert(PathBuf::from("kept.txt"), DirectoryEntryState::Different);
+        browser.set_sources(sources);
+        assert_eq!(
+            browser.overlays.get(std::path::Path::new("kept.txt")),
+            Some(&DirectoryEntryState::Different)
         );
     }
 

@@ -19,20 +19,22 @@ Diff and Merge preserves the open files and edits.
 Merge does not need the diff engine. **Run Diff** is available in Merge mode and
 starts off. While it is off, Versus does not compare the open files; edits,
 selection transfers, chunks, and ignored ranges remain available. Turn it on for
-an optional comparison-alignment panel, difference navigation, and destination
-suggestions. The alignment panel is separate from the editors, so filtering it
-never hides or changes editor text. Diff work is debounced for the open pair and
-can be cancelled. Turning Run Diff off cancels pending work and clears alignment.
+difference highlighting, navigation, and destination suggestions within the
+editors. Diff work is debounced for the open pair and can be cancelled. Turning
+Run Diff off cancels pending work and clears highlighting.
 The three comparison options (Show only differences, Ignore whitespace, Ignore
 line endings) have separate settings in Diff and Merge; their Merge settings start
 off and do not change Diff preferences.
 
-Merge keeps Conflict, New comparison (+), Run Diff, and Sync scroll on the left of
-the button line. Zoom remains on the right. With Run Diff enabled, the comparison
-options appear immediately to the right of zoom, followed by difference navigation,
-and the usual diff legend becomes visible. Turning it off hides those diff controls
-and legend entries while retaining the Merge settings. The legend wraps below the
-button line when needed to keep the centered merge actions clear.
+Run Diff sits in the header immediately left of the theme button. Merge keeps
+Conflict and New comparison (+) on the left of the button line. Zoom remains on
+the right. With Run Diff enabled, the comparison options appear immediately to
+the right of zoom, followed by difference navigation. The usual diff legend
+appears before Conflict on that same line, using compact icons with tooltips when
+space is limited. Turning Run Diff off hides those controls and legend entries
+while retaining the Merge settings. Each file and folder pane loads, expands, and
+scrolls independently; a single selected source opens immediately. Transfer
+controls and file comparison assistance become available once both files are open.
 
 Both panes show editable text, line numbers, and separate unsaved status. Select a
 contiguous line range in either pane, choose an insertion point or explicitly
@@ -62,7 +64,9 @@ independently for each pane.
 
 For folder pairs, Merge opens a lazy browser that enumerates directory entries and
 basic metadata as folders are expanded. It does not compare file contents unless
-Run Diff is enabled; files load when opened. Select files by relative path or choose
+Run Diff is enabled; files load when opened. Double-clicking a file opens only
+that pane; the other pane can keep browsing a folder or editing a file. Each
+file pane has a back arrow to its own tree. Select files by relative path or choose
 files from different paths on each side and open that pair. Each file pair keeps
 its own undo history as you navigate or pair files again. Folder-wide **Find and
 Replace** searches the left tree, right tree, or both, with plain text or regular
@@ -177,9 +181,10 @@ dashed outlines and drop hints. A blue border and drop label
 identify LEFT or RIGHT above the pane contents, including the empty chooser view.
 Windows follows the live cursor during native drags even when ordinary pointer
 events are unavailable. The source type
-selects the corresponding view automatically; mixed file/folder pairs show why
-they cannot compare. A drop in a file opened from the folder tree keeps the other
-displayed file and starts a direct comparison. Multiple-item drops are rejected
+selects the corresponding view automatically. Diff explains why mixed file/folder
+pairs cannot compare; Merge opens each source independently. A drop in a file
+opened from the folder tree keeps the other displayed side. In Diff, it starts
+a direct comparison. Multiple-item drops are rejected
 without replacing the current selection.
 On Linux, Versus uses X11 or XWayland when `DISPLAY` is available so native
 file drops work. Pure Wayland sessions retain browse selection; the windowing
@@ -199,8 +204,8 @@ opposite an empty placeholder, and following code aligns with its commented-out
 version on the right while the comment text remains highlighted as a change.
 Similarity alignment uses bounded extra work; very large changed blocks or an
 exhausted processing budget retain positional pairing.
-Vertical scrolling stays linked, and each pane can scroll horizontally for long
-lines. The **back arrow**, at the left of the legend, returns to the folder view
+In Diff, vertical scrolling stays linked, and each pane can scroll horizontally
+for long lines. Merge panes scroll independently. The **back arrow**, at the left of the legend, returns to the folder view
 with its selection, expansion, and scroll position preserved. Enter or Space on a
 focused file also opens it.
 

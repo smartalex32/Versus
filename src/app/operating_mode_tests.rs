@@ -181,6 +181,7 @@ fn picker_selection_is_not_overwritten_by_an_older_loaded_pair_event() {
     app.source_paths = old.clone().map(Some);
     app.source_kinds = [Some(SourceKind::File); 2];
     app.merge_file_open = true;
+    app.merge_file_sides = [true; 2];
     app.interactive.as_mut().unwrap().open_pair(old);
     let deadline = Instant::now() + Duration::from_secs(3);
     while app.interactive.as_ref().unwrap().current_paths().is_none() {
@@ -375,6 +376,7 @@ fn dropping_a_file_in_a_folder_merge_editor_replaces_only_that_editor_side() {
     let pair = [sources.path("left/one.txt"), sources.path("right/one.txt")];
     app.interactive.as_mut().unwrap().open_pair(pair.clone());
     app.merge_file_open = true;
+    app.merge_file_sides = [true; 2];
     settle_interactive(&mut app, &ctx);
 
     drop_on(&mut app, &ctx, 0, sources.path("left/new.txt"));
