@@ -2078,15 +2078,11 @@ impl VersusApp {
                         .into_iter()
                         .enumerate()
                         {
-                            let (rect, _) =
-                                ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::hover());
-                            paint_status_icon(ui.painter(), rect.center(), icon);
                             let label = counts.map_or_else(
                                 || icon.label().into(),
                                 |counts| format!("{}  {}", icon.label(), counts[index + 1]),
                             );
-                            ui.label(RichText::new(label).size(10.0).color(icon.color(palette)));
-                            ui.add_space(5.0);
+                            legend_item(ui, icon, &label);
                         }
                         if icon_button(ui, ToolbarIcon::New, true, "New comparison").clicked() {
                             self.new_comparison();
@@ -3501,6 +3497,7 @@ enum StatusIcon {
     RightOnly,
     TypeMismatch,
     Error,
+    Conflict,
 }
 
 impl StatusIcon {
@@ -3511,6 +3508,7 @@ impl StatusIcon {
             Self::RightOnly => "Right only",
             Self::TypeMismatch => "Type mismatch",
             Self::Error => "Read error",
+            Self::Conflict => "Conflict",
         }
     }
     fn color(self, palette: Palette) -> Color32 {
@@ -3518,7 +3516,7 @@ impl StatusIcon {
             Self::Different => palette.changed,
             Self::LeftOnly => palette.left_only,
             Self::RightOnly => palette.right_only,
-            Self::TypeMismatch | Self::Error => palette.error,
+            Self::TypeMismatch | Self::Error | Self::Conflict => palette.error,
         }
     }
 }
@@ -3654,7 +3652,52 @@ fn paint_status_icon(painter: &egui::Painter, center: Pos2, icon: StatusIcon) {
             painter.line_segment([point(0.0, -2.0), point(0.0, 1.0)], stroke);
             painter.circle_filled(point(0.0, 3.0), 0.7, icon.color(palette));
         }
+        StatusIcon::Conflict => {
+            painter.rect_stroke(
+                Rect::from_center_size(center, egui::vec2(12.0, 12.0)),
+                2,
+                stroke,
+                egui::StrokeKind::Inside,
+            );
+            painter.line_segment([point(0.0, -3.0), point(0.0, 1.0)], stroke);
+            painter.circle_filled(point(0.0, 3.0), 0.7, icon.color(palette));
+        }
     }
+}
+
+const DIFF_LEGEND_ICONS: [StatusIcon; 5] = [
+    StatusIcon::Different,
+    StatusIcon::LeftOnly,
+    StatusIcon::RightOnly,
+    StatusIcon::TypeMismatch,
+    StatusIcon::Error,
+];
+
+fn legend_item(ui: &mut egui::Ui, icon: StatusIcon, label: &str) {
+    let palette = Palette::for_context(ui.ctx());
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::hover());
+    paint_status_icon(ui.painter(), rect.center(), icon);
+    ui.label(RichText::new(label).size(10.0).color(icon.color(palette)))
+        .on_hover_text(label);
+    ui.add_space(5.0);
+}
+
+fn legend_width(ui: &egui::Ui, icons: &[StatusIcon]) -> f32 {
+    icons
+        .iter()
+        .map(|icon| {
+            14.0 + 2.0 * ui.spacing().item_spacing.x
+                + 5.0
+                + ui.painter()
+                    .layout_no_wrap(
+                        icon.label().into(),
+                        FontId::proportional(10.0),
+                        icon.color(Palette::for_context(ui.ctx())),
+                    )
+                    .size()
+                    .x
+        })
+        .sum()
 }
 
 #[derive(Clone, Copy)]
@@ -5950,6 +5993,40 @@ mod tests {
                 }
                 assert_eq!(selectors[0].size(), selectors[1].size());
                 assert!((selectors[0].left() - selectors[1].left()).abs() < 0.01);
+            }
+        }
+    }
+
+    #[test]
+    fn merge_diff_buttons_align_with_the_diff_toolbar() {
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            let ctx = egui::Context::default();
+            set_theme(&ctx, theme);
+            let mut app = VersusApp::default();
+            render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+            let labels = [
+                "Zoom out",
+                "Zoom in",
+                "Show only differences",
+                "Ignore whitespace",
+                "Ignore line endings",
+                "Previous difference",
+                "Next difference",
+            ];
+            let before: Vec<_> = labels
+                .iter()
+                .map(|label| ctx.read_response(egui::Id::new(*label)).unwrap().rect)
+                .collect();
+            app.set_workspace_merge(true);
+            app.interactive.as_mut().unwrap().set_run_diff(true);
+            render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+            for (label, expected) in labels.into_iter().zip(before) {
+                let actual = ctx.read_response(egui::Id::new(label)).unwrap().rect;
+                assert!(
+                    (actual.left() - expected.left()).abs() < 0.5
+                        && (actual.top() - expected.top()).abs() < 0.5,
+                    "{label}: Diff={expected:?}, Merge={actual:?}"
+                );
             }
         }
     }

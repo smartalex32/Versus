@@ -44,6 +44,10 @@ APIs and must fail cleanly when unavailable.
   ignored-range state. Diff rows only assist with alignment and target suggestions
   when enabled; manual transfers work without them. File-pair history uses
   canonical tagged snapshots and survives navigation and alternate pairing.
+  The toolbar keeps Conflict, New comparison, Run Diff, and Sync scroll on the left.
+  Zoom stays on the right; comparison options and difference navigation follow it
+  only while Run Diff is enabled. The normal diff legend follows the same visibility
+  rule and wraps when needed; hidden Merge option states are retained.
 - `src/app/folder_browser.rs` enumerates one directory level at a time through
   `directory_entries_at`, which reads entry metadata and relative paths without
   comparing file contents. Expanding a directory requests that listing; opening a

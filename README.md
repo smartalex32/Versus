@@ -27,6 +27,13 @@ The three comparison options (Show only differences, Ignore whitespace, Ignore
 line endings) have separate settings in Diff and Merge; their Merge settings start
 off and do not change Diff preferences.
 
+Merge keeps Conflict, New comparison (+), Run Diff, and Sync scroll on the left of
+the button line. Zoom remains on the right. With Run Diff enabled, the comparison
+options appear immediately to the right of zoom, followed by difference navigation,
+and the usual diff legend becomes visible. Turning it off hides those diff controls
+and legend entries while retaining the Merge settings. The legend wraps below the
+button line when needed to keep the centered merge actions clear.
+
 Both panes show editable text, line numbers, and separate unsaved status. Select a
 contiguous line range in either pane, choose an insertion point or explicitly
 select a replacement range in the other pane, then use the transfer control to

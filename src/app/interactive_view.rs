@@ -838,8 +838,30 @@ impl InteractiveView {
         let has_pair = self.workspace.is_some();
         let extent = control_extent(ui);
         let width = ui.available_width();
-        let compact = width < 700.0;
         let gap = ui.spacing().item_spacing.x;
+        let checkbox_width = |label: &str| {
+            extent
+                + gap
+                + ui.painter()
+                    .layout_no_wrap(
+                        label.into(),
+                        egui::TextStyle::Button.resolve(ui.style()),
+                        palette.text,
+                    )
+                    .size()
+                    .x
+        };
+        let left_controls_width = extent
+            + gap
+            + checkbox_width("Sync scroll")
+            + if self.editing {
+                legend_width(ui, &[StatusIcon::Conflict]) + checkbox_width("Run Diff") + gap
+            } else {
+                0.0
+            }
+            + if self.from_folders { extent + gap } else { 0.0 };
+        let available_side_width = width / 2.0 - (5.0 * extent + 4.0 * gap) / 2.0 - gap;
+        let compact = width < 700.0 || left_controls_width > available_side_width;
         let height = if compact {
             3.0 * extent + 2.0 * gap
         } else {
@@ -850,8 +872,10 @@ impl InteractiveView {
         let side_width = if compact {
             width
         } else {
-            (width / 2.0 - 2.0 * (extent + gap) - 8.0).max(110.0)
+            (width / 2.0 - (5.0 * extent + 4.0 * gap) / 2.0 - gap).max(110.0)
         };
+        let normal_legend_inline = self.engine_enabled()
+            && legend_width(ui, &DIFF_LEGEND_ICONS) + left_controls_width <= side_width;
         ui.scope_builder(
             egui::UiBuilder::new()
                 .max_rect(Rect::from_min_max(
@@ -865,6 +889,14 @@ impl InteractiveView {
                 {
                     self.back = true;
                 }
+                if normal_legend_inline {
+                    for icon in DIFF_LEGEND_ICONS {
+                        legend_item(ui, icon, icon.label());
+                    }
+                }
+                if self.editing {
+                    legend_item(ui, StatusIcon::Conflict, "Conflict");
+                }
                 if icon_button(ui, ToolbarIcon::New, true, "New comparison").clicked() {
                     self.new_requested = true;
                 }
@@ -874,33 +906,9 @@ impl InteractiveView {
                         self.set_run_diff(enabled);
                     }
                 }
-                let previous = if self.editing {
-                    self.merge_options
-                } else {
-                    self.diff_options
-                };
-                let mut prefs = previous;
-                let mut changed = false;
-                for (index, icon, label) in [
-                    (0, ToolbarIcon::Differences, "Show only differences"),
-                    (1, ToolbarIcon::Whitespace, "Ignore whitespace"),
-                    (2, ToolbarIcon::LineEndings, "Ignore line endings"),
-                ] {
-                    if icon_button_state(ui, icon, true, prefs[index], label).clicked() {
-                        prefs[index] = !prefs[index];
-                        changed = true;
-                    }
-                }
-                if changed {
-                    if self.editing {
-                        self.merge_options = prefs;
-                    } else {
-                        self.diff_options = prefs;
-                    }
-                    if prefs[1..] != previous[1..] {
-                        self.invalidate_diff();
-                    }
-                }
+                ui.push_id("merge-sync-scroll", |ui| {
+                    ui.checkbox(&mut self.sync_scroll, "Sync scroll");
+                });
             },
         );
         let actions_width = 5.0 * extent + 4.0 * gap;
@@ -978,12 +986,29 @@ impl InteractiveView {
                 }
             },
         );
+        let zoom_width = ui
+            .painter()
+            .layout_no_wrap(
+                format!("Zoom {:.0}%", ui.ctx().zoom_factor() * 100.0),
+                egui::TextStyle::Button.resolve(ui.style()),
+                palette.muted,
+            )
+            .size()
+            .x
+            + 2.0 * ui.spacing().button_padding.x
+            + 2.0 * (extent + gap);
+        let right_width = zoom_width
+            + if self.engine_enabled() {
+                5.0 * (extent + gap)
+            } else {
+                0.0
+            };
         let right = Rect::from_min_max(
             egui::pos2(
                 if compact {
-                    center.left()
+                    (center.right() - right_width).max(center.left())
                 } else {
-                    (actions.right() + gap).max(center.right() - 320.0)
+                    (center.right() - right_width).max(actions.right() + gap)
                 },
                 if compact {
                     center.top() + 2.0 * (extent + gap)
@@ -996,17 +1021,36 @@ impl InteractiveView {
         ui.scope_builder(
             egui::UiBuilder::new()
                 .max_rect(right)
-                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
             |ui| {
-                if icon_button(
-                    ui,
-                    ToolbarIcon::Next,
-                    self.has_differences(),
-                    "Next difference",
-                )
-                .clicked()
-                {
-                    self.jump_diff(true, ui.ctx());
+                zoom_controls(ui);
+                if !self.engine_enabled() {
+                    return;
+                }
+                let previous = if self.editing {
+                    self.merge_options
+                } else {
+                    self.diff_options
+                };
+                let mut prefs = previous;
+                for (index, icon, label) in [
+                    (0, ToolbarIcon::Differences, "Show only differences"),
+                    (1, ToolbarIcon::Whitespace, "Ignore whitespace"),
+                    (2, ToolbarIcon::LineEndings, "Ignore line endings"),
+                ] {
+                    if icon_button_state(ui, icon, true, prefs[index], label).clicked() {
+                        prefs[index] = !prefs[index];
+                    }
+                }
+                if prefs != previous {
+                    if self.editing {
+                        self.merge_options = prefs;
+                    } else {
+                        self.diff_options = prefs;
+                    }
+                    if prefs[1..] != previous[1..] {
+                        self.invalidate_diff();
+                    }
                 }
                 if icon_button(
                     ui,
@@ -1018,11 +1062,26 @@ impl InteractiveView {
                 {
                     self.jump_diff(false, ui.ctx());
                 }
-                zoom_controls(ui);
+                if icon_button(
+                    ui,
+                    ToolbarIcon::Next,
+                    self.has_differences(),
+                    "Next difference",
+                )
+                .clicked()
+                {
+                    self.jump_diff(true, ui.ctx());
+                }
             },
         );
+        if self.engine_enabled() && !normal_legend_inline {
+            ui.horizontal_wrapped(|ui| {
+                for icon in DIFF_LEGEND_ICONS {
+                    legend_item(ui, icon, icon.label());
+                }
+            });
+        }
         ui.horizontal(|ui| {
-            ui.checkbox(&mut self.sync_scroll, "Sync scroll");
             if self.diff_job.is_some() && self.engine_enabled() {
                 ui.spinner();
                 ui.label("Comparing working copies…");
@@ -2628,6 +2687,7 @@ mod tests {
             let ctx = egui::Context::default();
             ctx.set_zoom_factor(zoom);
             let mut view = view("left\n", "right\n");
+            view.set_run_diff(true);
             frame(&mut view, &ctx, vec![]).drop_without_applying_deltas();
             let left = ctx
                 .read_response(egui::Id::new("Accept All Left — replace Right with Left"))
@@ -2650,6 +2710,125 @@ mod tests {
                 ctx.viewport_rect()
             );
             assert!(left.top() >= 0.0);
+        }
+    }
+    fn text_rect(output: &egui::FullOutput, label: &str) -> Rect {
+        output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text() == label => {
+                    Some(Rect::from_min_size(text.pos, text.galley.size()))
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("Missing {label}"))
+    }
+    fn click_position(view: &mut InteractiveView, ctx: &egui::Context, position: Pos2) {
+        for pressed in [true, false] {
+            frame(
+                view,
+                ctx,
+                vec![
+                    egui::Event::PointerMoved(position),
+                    egui::Event::PointerButton {
+                        pos: position,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            )
+            .drop_without_applying_deltas();
+        }
+    }
+    #[test]
+    fn merge_toolbar_toggles_diff_controls_and_legends_without_resetting_edits() {
+        let diff_buttons = [
+            "Show only differences",
+            "Ignore whitespace",
+            "Ignore line endings",
+            "Previous difference",
+            "Next difference",
+        ];
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            for zoom in [1.0, 2.0] {
+                let ctx = egui::Context::default();
+                set_theme(&ctx, theme);
+                ctx.set_zoom_factor(zoom);
+                ctx.run_ui(egui::RawInput::default(), |_| {})
+                    .drop_without_applying_deltas();
+                let mut view = view("left\n", "right\n");
+                view.merge_options = [false, true, true];
+                view.diff_options = [true, false, true];
+                view.workspace
+                    .as_mut()
+                    .unwrap()
+                    .edit_bytes(TwoWaySide::Left, 0..0, "edited\n".into())
+                    .unwrap();
+                view.selected = [0..1, 0..1];
+                view.invalidate_diff();
+                let undo = view.workspace.as_ref().unwrap().next_undo_tag();
+                let mut output = frame(&mut view, &ctx, vec![]);
+                output.textures_delta.clear();
+                let run = text_rect(&output, "Run Diff");
+                let sync = text_rect(&output, "Sync scroll");
+                let conflict = text_rect(&output, "Conflict");
+                let new = ctx
+                    .read_response(egui::Id::new("New comparison"))
+                    .unwrap()
+                    .rect;
+                assert!(
+                    conflict.right() < new.left()
+                        && new.right() < run.left()
+                        && run.right() < sync.left()
+                );
+                assert!((run.center().y - sync.center().y).abs() < 1.0);
+                for label in diff_buttons {
+                    assert!(
+                        ctx.read_response(egui::Id::new(label)).is_none(),
+                        "{label} is visible with Run Diff off"
+                    );
+                }
+                for icon in DIFF_LEGEND_ICONS {
+                    assert!(!output.shapes.iter().any(|shape|matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text()==icon.label())));
+                }
+                click_position(&mut view, &ctx, sync.center());
+                assert!(view.sync_scroll);
+                click_position(&mut view, &ctx, run.center());
+                assert!(view.run_diff_enabled());
+                let mut output = frame(&mut view, &ctx, vec![]);
+                output.textures_delta.clear();
+                let controls: Vec<_> = ["Zoom out", "Zoom in"]
+                    .into_iter()
+                    .chain(diff_buttons)
+                    .map(|label| ctx.read_response(egui::Id::new(label)).unwrap().rect)
+                    .collect();
+                assert!(
+                    controls
+                        .windows(2)
+                        .all(|pair| pair[0].right() < pair[1].left())
+                );
+                assert!(controls.last().unwrap().right() <= ctx.viewport_rect().right() + 1.0);
+                for icon in DIFF_LEGEND_ICONS {
+                    text_rect(&output, icon.label());
+                }
+                text_rect(&output, "Conflict");
+                let run = text_rect(&output, "Run Diff");
+                click_position(&mut view, &ctx, run.center());
+                assert!(!view.run_diff_enabled());
+                let mut output = frame(&mut view, &ctx, vec![]);
+                output.textures_delta.clear();
+                for label in diff_buttons {
+                    assert!(ctx.read_response(egui::Id::new(label)).is_none());
+                }
+                assert_eq!(view.working_text(0), Some("edited\nleft\n"));
+                assert_eq!(view.workspace.as_ref().unwrap().next_undo_tag(), undo);
+                assert_eq!(view.selected, [0..1, 0..1]);
+                assert_eq!(view.merge_options, [false, true, true]);
+                assert_eq!(view.diff_options, [true, false, true]);
+                assert!(view.sync_scroll && view.diff_job.is_none());
+            }
         }
     }
     #[test]
