@@ -11,9 +11,9 @@ use std::{
     },
 };
 use versus::{
-    FileComparison, FileViewOptions, HistoryTag, InteractiveDocument, TransferPlacement,
-    TwoWaySide, TwoWayWorkspace, WorkingFile, compare_loaded_text, load_working_file,
-    save_working_file,
+    ComparisonProgress, FileComparison, FileViewOptions, HistoryTag, InteractiveDocument,
+    TransferPlacement, TwoWaySide, TwoWayWorkspace, WorkingFile, compare_loaded_text,
+    load_working_file, save_working_file,
 };
 
 #[derive(Clone)]
@@ -31,6 +31,7 @@ struct RetainedFile {
 struct DiffJob {
     receiver: Receiver<Result<Option<FileComparison>, String>>,
     cancel: Arc<AtomicBool>,
+    progress: Arc<ComparisonProgress>,
 }
 impl Drop for DiffJob {
     fn drop(&mut self) {
@@ -937,10 +938,11 @@ impl InteractiveView {
             } else {
                 self.diff_options
             };
+            let progress = Arc::new(ComparisonProgress::default());
             let options = FileViewOptions {
                 ignore_whitespace: preferences[1],
                 ignore_line_endings: preferences[2],
-                progress: None,
+                progress: Some(progress.clone()),
             };
             let cancel = Arc::new(AtomicBool::new(false));
             let worker_cancel = cancel.clone();
@@ -955,7 +957,11 @@ impl InteractiveView {
                 .map_err(|e| e.to_string());
                 let _ = sender.send(result);
             });
-            self.diff_job = Some(DiffJob { receiver, cancel });
+            self.diff_job = Some(DiffJob {
+                receiver,
+                cancel,
+                progress,
+            });
             self.diff_dirty = false;
         }
         if let Some(result) = self
@@ -998,8 +1004,76 @@ impl InteractiveView {
         self.shortcuts(ui);
         self.toolbar(ui);
     }
+    pub(super) fn change_label(&self) -> String {
+        if self.folder_overview {
+            let count = self.folder_differences.len();
+            return self
+                .folder_difference_index
+                .map(|index| format!("Change {} of {count}", index + 1))
+                .unwrap_or_else(|| format!("{count} changes"));
+        }
+        let current = self.editor_context.as_ref().and_then(|ctx| {
+            ctx.memory(|memory| {
+                memory
+                    .data
+                    .get_temp::<usize>(egui::Id::new("interactive-diff-navigation"))
+            })
+        });
+        current
+            .map(|index| format!("Change {} of {}", index + 1, self.diff_rows.len()))
+            .unwrap_or_else(|| format!("{} changes", self.diff_rows.len()))
+    }
+    pub(super) fn render_header_status(&mut self, ui: &mut egui::Ui) -> bool {
+        let palette = Palette::for_context(ui.ctx());
+        if let Some(job) = &self.diff_job {
+            ui.spinner();
+            let cancel_width = control_extent(ui) + ui.spacing().item_spacing.x;
+            ui.allocate_ui_with_layout(
+                egui::vec2(
+                    (ui.available_width() - cancel_width).max(0.0),
+                    control_extent(ui),
+                ),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| header_progress_label(ui, job.progress.snapshot(), palette.muted),
+            );
+            if icon_button(ui, ToolbarIcon::Cancel, true, "Cancel file comparison").clicked() {
+                self.run_diff = false;
+                self.invalidate_diff();
+            }
+            return true;
+        }
+        if self.save_job.is_some() {
+            ui.spinner();
+            header_status_label(ui, "Saving…", palette.muted);
+            return true;
+        }
+        if let Some(error) = &self.error {
+            header_status_label(ui, error, palette.error);
+            return true;
+        }
+        if self.loading.is_some() || self.side_loading.iter().any(Option::is_some) {
+            header_status_label(ui, "Loading selected files…", palette.muted);
+            ui.ctx().request_repaint_after(Duration::from_millis(25));
+            return true;
+        }
+        if !self.status.is_empty() {
+            header_status_label(ui, &self.status, palette.muted);
+            return true;
+        }
+        false
+    }
     pub(super) fn render_footer(&mut self, ui: &mut egui::Ui) {
         self.footer(ui);
+    }
+    pub(super) fn footer_height(&self, ui: &egui::Ui) -> f32 {
+        let icons = self.footer_legend_icons();
+        control_extent(ui)
+            + if icons.is_empty() {
+                0.0
+            } else {
+                ui.spacing().item_spacing.y
+                    + bottom_legend_height(ui, &icons, self.footer_legend_counts())
+            }
     }
     pub(super) fn render_previews(&mut self, ctx: &egui::Context) {
         self.save_preview(ctx);
@@ -1027,7 +1101,7 @@ impl InteractiveView {
         self.render_workspace_toolbar(ui, false);
         ui.add_space(5.);
         let area = ui.available_rect_before_wrap();
-        let foot = control_extent(ui) + 8.;
+        let foot = self.footer_height(ui) + 8.;
         let body = Rect::from_min_max(
             area.min,
             egui::pos2(area.right(), (area.bottom() - foot).max(area.top())),
@@ -1054,16 +1128,7 @@ impl InteractiveView {
         let extent = control_extent(ui);
         let width = ui.available_width();
         let gap = ui.spacing().item_spacing.x;
-        let left_controls_width = extent
-            + gap
-            + if self.editing {
-                legend_width(ui, &[StatusIcon::Conflict]) + gap
-            } else {
-                0.0
-            }
-            + if self.from_folders { extent + gap } else { 0.0 };
-        let available_side_width = width / 2.0 - (5.0 * extent + 4.0 * gap) / 2.0 - gap;
-        let compact = width < 700.0 || left_controls_width > available_side_width;
+        let compact = width < 700.0;
         let height = if compact {
             3.0 * extent + 2.0 * gap
         } else {
@@ -1076,8 +1141,6 @@ impl InteractiveView {
         } else {
             (width / 2.0 - (5.0 * extent + 4.0 * gap) / 2.0 - gap).max(110.0)
         };
-        let compact_legend = self.engine_enabled()
-            && legend_width(ui, &DIFF_LEGEND_ICONS) + left_controls_width > side_width;
         ui.scope_builder(
             egui::UiBuilder::new()
                 .max_rect(Rect::from_min_max(
@@ -1091,20 +1154,35 @@ impl InteractiveView {
                 {
                     self.back = true;
                 }
-                if self.engine_enabled() {
-                    for icon in DIFF_LEGEND_ICONS {
-                        if compact_legend {
-                            compact_legend_item(ui, icon, icon.label());
-                        } else {
-                            legend_item(ui, icon, icon.label());
-                        }
-                    }
-                }
-                if self.editing {
-                    legend_item(ui, StatusIcon::Conflict, "Conflict");
-                }
                 if icon_button(ui, ToolbarIcon::New, true, "New comparison").clicked() {
                     self.new_requested = true;
+                }
+                if self.engine_enabled() {
+                    if icon_button(
+                        ui,
+                        ToolbarIcon::Previous,
+                        self.has_differences(),
+                        "Previous difference",
+                    )
+                    .clicked()
+                    {
+                        self.jump_diff(false, ui.ctx());
+                    }
+                    if icon_button(
+                        ui,
+                        ToolbarIcon::Next,
+                        self.has_differences(),
+                        "Next difference",
+                    )
+                    .clicked()
+                    {
+                        self.jump_diff(true, ui.ctx());
+                    }
+                    ui.label(
+                        RichText::new(self.change_label())
+                            .small()
+                            .color(palette.muted),
+                    );
                 }
             },
         );
@@ -1249,50 +1327,8 @@ impl InteractiveView {
                         self.invalidate_diff();
                     }
                 }
-                if icon_button(
-                    ui,
-                    ToolbarIcon::Previous,
-                    self.has_differences(),
-                    "Previous difference",
-                )
-                .clicked()
-                {
-                    self.jump_diff(false, ui.ctx());
-                }
-                if icon_button(
-                    ui,
-                    ToolbarIcon::Next,
-                    self.has_differences(),
-                    "Next difference",
-                )
-                .clicked()
-                {
-                    self.jump_diff(true, ui.ctx());
-                }
             },
         );
-        ui.horizontal(|ui| {
-            if self.diff_job.is_some() && self.engine_enabled() {
-                ui.spinner();
-                ui.label("Comparing working copies…");
-                if icon_button(ui, ToolbarIcon::Cancel, true, "Cancel file comparison").clicked() {
-                    self.run_diff = false;
-                    self.invalidate_diff();
-                }
-            }
-            if self.save_job.is_some() {
-                ui.spinner();
-                ui.label("Saving…");
-            }
-            if let Some(error) = &self.error {
-                ui.colored_label(palette.error, error);
-            } else {
-                ui.add(
-                    egui::Label::new(RichText::new(&self.status).small().color(palette.muted))
-                        .truncate(),
-                );
-            }
-        });
     }
     fn jump_diff(&mut self, forward: bool, ctx: &egui::Context) {
         if self.folder_overview {
@@ -1318,7 +1354,6 @@ impl InteractiveView {
             };
             self.folder_difference_index = Some(index);
             self.folder_jump = Some(self.folder_differences[index].clone());
-            self.status = format!("Change {} of {}", index + 1, count);
             ctx.request_repaint();
             return;
         }
@@ -1941,6 +1976,37 @@ impl InteractiveView {
                 }
             });
         });
+        let icons = self.footer_legend_icons();
+        if !icons.is_empty() {
+            ui.add_space(ui.spacing().item_spacing.y);
+            bottom_legend(ui, &icons, self.footer_legend_counts());
+        }
+    }
+    fn footer_legend_icons(&self) -> Vec<StatusIcon> {
+        let mut icons = if self.engine_enabled() {
+            DIFF_LEGEND_ICONS.to_vec()
+        } else {
+            Vec::new()
+        };
+        if self.editing {
+            icons.push(StatusIcon::Conflict);
+        }
+        icons
+    }
+    fn footer_legend_counts(&self) -> Option<[usize; 6]> {
+        let diff = self.diff.as_ref()?;
+        let mut counts = [0; 6];
+        for row in &diff.rows {
+            match row.state {
+                DirectoryEntryState::Different => counts[1] += 1,
+                DirectoryEntryState::LeftOnly => counts[2] += 1,
+                DirectoryEntryState::RightOnly => counts[3] += 1,
+                DirectoryEntryState::TypeMismatch => counts[4] += 1,
+                DirectoryEntryState::Error(_) => counts[5] += 1,
+                DirectoryEntryState::Same => {}
+            }
+        }
+        Some(counts)
     }
     fn active_file(&self, side: usize) -> Option<&WorkingFile> {
         self.side_sources[side]
@@ -2398,12 +2464,6 @@ fn inline_action(
     );
     response.on_hover_text(label)
 }
-fn compact_legend_item(ui: &mut egui::Ui, icon: StatusIcon, label: &str) {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), Sense::hover());
-    paint_status_icon(ui.painter(), rect.center(), icon);
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, label));
-    response.on_hover_text(label);
-}
 fn append_code_line(
     job: &mut egui::text::LayoutJob,
     line: &str,
@@ -2587,6 +2647,34 @@ mod tests {
     #[test]
     fn diff_starts_disabled() {
         assert!(!InteractiveView::default().run_diff_enabled())
+    }
+    #[test]
+    fn header_status_owns_busy_and_error_messages_outside_the_toolbar() {
+        let ctx = egui::Context::default();
+        let mut view = InteractiveView::default();
+        view.status = "Loading file…".into();
+        let mut rendered = false;
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            rendered = view.render_header_status(ui);
+        })
+        .drop_without_applying_deltas();
+        assert!(rendered);
+        view.status.clear();
+        view.error = Some("Load failed".into());
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            assert!(view.render_header_status(ui));
+        })
+        .drop_without_applying_deltas();
+    }
+    #[test]
+    fn change_label_reports_count_before_navigation_and_position_afterward() {
+        let ctx = egui::Context::default();
+        let mut view = InteractiveView::default();
+        view.folder_overview = true;
+        view.folder_differences = vec![PathBuf::from("one"), PathBuf::from("two")];
+        assert_eq!(view.change_label(), "2 changes");
+        view.jump_diff(true, &ctx);
+        assert_eq!(view.change_label(), "Change 1 of 2");
     }
     #[test]
     fn keyboard_edit_before_repeated_protected_lines_uses_cursor_anchor() {
@@ -3038,18 +3126,6 @@ mod tests {
             assert!(left.top() >= 0.0);
         }
     }
-    fn text_rect(output: &egui::FullOutput, label: &str) -> Rect {
-        output
-            .shapes
-            .iter()
-            .find_map(|shape| match &shape.shape {
-                egui::Shape::Text(text) if text.galley.text() == label => {
-                    Some(Rect::from_min_size(text.pos, text.galley.size()))
-                }
-                _ => None,
-            })
-            .unwrap_or_else(|| panic!("Missing {label}"))
-    }
     #[test]
     fn merge_toolbar_toggles_diff_controls_and_legends_without_resetting_edits() {
         let diff_buttons = [
@@ -3080,7 +3156,28 @@ mod tests {
                 let undo = view.workspace.as_ref().unwrap().next_undo_tag();
                 let mut output = frame(&mut view, &ctx, vec![]);
                 output.textures_delta.clear();
-                text_rect(&output, "Conflict");
+                let legend_labels: Vec<_> = output
+                    .shapes
+                    .iter()
+                    .filter_map(|shape| match &shape.shape {
+                        egui::Shape::Text(text) => Some(text.galley.text()),
+                        _ => None,
+                    })
+                    .collect();
+                assert!(
+                    legend_labels
+                        .iter()
+                        .any(|label| label.starts_with("Conflict"))
+                );
+                for icon in DIFF_LEGEND_ICONS {
+                    assert!(
+                        legend_labels
+                            .iter()
+                            .any(|label| label.starts_with(icon.label()))
+                    );
+                }
+                let toolbar_undo = ctx.read_response(egui::Id::new("Undo")).unwrap().rect;
+                assert!(toolbar_undo.bottom() < ctx.viewport_rect().bottom());
                 for label in diff_buttons {
                     assert!(
                         ctx.read_response(egui::Id::new(label)).is_some(),

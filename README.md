@@ -27,12 +27,12 @@ line endings) have separate settings in Diff and Merge; their Merge settings sta
 off and do not change Diff preferences.
 
 Run Diff sits in the header immediately left of the theme button. Merge keeps
-Conflict and New comparison (+) on the left of the button line. Zoom remains on
+New comparison (+) on the left of the button line. Zoom remains on
 the right. With Run Diff enabled, the comparison options appear immediately to
-the right of zoom, followed by difference navigation. The usual diff legend
-appears before Conflict on that same line, using compact icons with tooltips when
-space is limited. Turning Run Diff off hides those controls and legend entries
-while retaining the Merge settings. Each file and folder pane loads, expands, and
+the right of zoom, followed by difference navigation. A change count appears
+beside +. The legends are centered below the panes with full icons and text,
+including Conflict in Merge. Turning Run Diff off hides the diff controls, change
+count, and normal legend entries while retaining the Merge settings. Each file and folder pane loads, expands, and
 scrolls independently; a single selected source opens immediately. Transfer
 controls and file comparison assistance become available once both files are open.
 
@@ -95,7 +95,7 @@ Unavailable or changed sources show an error and can be selected again.
 Choosing another Folder/File header option starts a fresh comparison and cancels
 pending work. Clicking the active mode preserves the current comparison; clicking
 the Folder button while viewing a file from its tree returns to that tree. The **+**
-button at the right of the legend has the tooltip **New comparison** and clears both selections,
+button on the left of the toolbar has the tooltip **New comparison** and clears both selections,
 results, and pending work while keeping the selected Folder/File comparison mode
 and theme. Switching between Diff and Merge preserves the current session.
 
@@ -128,7 +128,7 @@ and Home/End.
 - Red warning triangle: a filesystem read error. Hover for details.
 
 Identical files, folders, and lines use ordinary gray text without a status icon
-or a legend entry. The legend sits above the two panes; the same icons replace
+or a legend entry. The legend is centered at the bottom with icons and text; the same icons replace
 status words in each compact tree row. File sizes and recursive folder totals appear beside the status
 icon, independently for each side, using binary units (KiB, MiB, and so on). Sizes
 reflect filesystem metadata collected during the scan. Folder
@@ -143,15 +143,14 @@ This keeps traversal within the selected roots and avoids loops or repeated
 comparisons when links point to ancestors or outside folders. Empty folders are
 included. Changing a path clears the prior result so it cannot be mistaken for
 the new selection.
-The status area immediately to the right of the legend shows change position,
-loading progress, or errors without adding another row above the panes.
-Long status messages are shortened on screen; hover for the complete text.
-While loading, it shows the current stage and elapsed time.
-Measured stages also show progress and an approximate time remaining for that
-stage. Folder discovery and line alignment have no reliable total, so they show
-activity without a time estimate. File loading can also be cancelled.
+The status area is centered in the header space to the right of File Diff or
+File Merge. It shows loading progress, saves, source details, or errors. Long
+messages are shortened on screen; hover for the complete text. Measured stages
+show percentage complete. Folder discovery and line alignment have no reliable
+total and show activity instead. Comparisons can be cancelled from the header.
+The change count and current difference position stay beside + in the toolbar.
 
-The **+** button stays beside the legend. The other icon controls at the far right
+The **+** button stays on the left of the toolbar. The other icon controls at the far right
 apply to both comparison views:
 
 - **Show only differences** hides identical lines and tree entries. File line
@@ -205,7 +204,7 @@ version on the right while the comment text remains highlighted as a change.
 Similarity alignment uses bounded extra work; very large changed blocks or an
 exhausted processing budget retain positional pairing.
 In Diff, vertical scrolling stays linked, and each pane can scroll horizontally
-for long lines. Merge panes scroll independently. The **back arrow**, at the left of the legend, returns to the folder view
+for long lines. Merge panes scroll independently. The **back arrow**, on the left of the toolbar, returns to the folder view
 with its selection, expansion, and scroll position preserved. Enter or Space on a
 focused file also opens it.
 
@@ -221,7 +220,7 @@ The sun/moon icon at the upper right switches between light and dark themes in
 either view. The logo and window icon preserve the blue half and use a white half
 in dark mode or the original dark half in light mode.
 
-The legend row places **Zoom** and its percentage immediately before adjacent
+The toolbar places **Zoom** and its percentage immediately before adjacent
 magnifying-glass **−** and **+** buttons, just left of **Show only differences**.
 Click them to reduce or enlarge the interface. Hold
 **Ctrl** and scroll the mouse wheel up/down to zoom in/out; the wheel alone

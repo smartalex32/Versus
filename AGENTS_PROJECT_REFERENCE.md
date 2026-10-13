@@ -45,8 +45,8 @@ APIs and must fail cleanly when unavailable.
   when enabled; manual transfers work without them. File-pair history uses
   canonical tagged snapshots and survives navigation and alternate pairing.
   Run Diff is in the header immediately left of the theme button. The toolbar
-  keeps Conflict and New comparison on the left, with the normal diff legend
-  preceding Conflict on the same line when enabled (compact icons when needed).
+  keeps New comparison and the change count on the left while Run Diff is on.
+  Full icon/text legends are centered at the bottom, with Conflict in Merge.
   Zoom stays on the right; comparison options and difference navigation follow it
   only while Run Diff is enabled. Hidden Merge option states are retained. Each
   side loads and scrolls independently; transfers require two loaded files.
@@ -122,7 +122,8 @@ APIs and must fail cleanly when unavailable.
   status, and text. Up/Down tree navigation preserves focus side and Tab escapes.
   Focusable file panes support keyboard scrolling. Empty panes show persistent
   drop outlines; toolbar press feedback precedes release activation.
-  Legend-row status text is clipped to one line with full messages on hover.
+  Header status text is centered beside the File button, clipped to one line
+  with full messages on hover.
   The zoom percentage precedes adjacent magnifier −/+ buttons immediately left
   of the differences filter; Ctrl/Command + wheel changes
   UI scale using egui’s smooth zoom delta, without scrolling the comparison.
@@ -133,12 +134,11 @@ APIs and must fail cleanly when unavailable.
   whitespace or line endings. Differences-only filtering and both ignore rules are
   enabled by default in Diff. Merge has a separate set of these three options,
   initially off. Filtering keeps a top-visible or nearest-surviving anchor;
-  diff navigation reports the current change position in the reserved legend-row
-  status area.
+  diff navigation reports the current change position beside New comparison.
   Changes to ignore rules restart background workers
   while retaining the displayed result until its replacement is ready. Refreshes
   preserve expansion, selection and source-line scroll anchors; progress uses a
-  reserved legend-row status area, and folder jumps clamp before painting to avoid
+  reserved header status area, and folder jumps clamp before painting to avoid
   transient shifts.
   Folder ignores use bounded UTF-8 normalization and fall back to byte comparison
   for binary, invalid UTF-8, or larger files. Native single-path drops select a
@@ -156,8 +156,8 @@ APIs and must fail cleanly when unavailable.
   Linux chooses X11/XWayland when `DISPLAY` exists for native file drops,
   retaining native Wayland browsing when no X11 display is available.
 - `src/core/progress.rs` publishes synchronized stage snapshots. Measured stages
-  support approximate stage-local remaining time; scanning and line alignment
-  show activity without an invented total or estimate.
+  show percentage complete for the current measured stage; scanning and line
+  alignment show activity without an invented total. Time estimates are removed.
 - `tests/` covers externally observable comparison and filesystem behavior.
 - `.cargo/config.toml` replaces crates.io with the checked-in `vendor/` tree and
   forces Cargo offline.

@@ -1,7 +1,4 @@
-use std::{
-    sync::Mutex,
-    time::{Duration, Instant},
-};
+use std::sync::Mutex;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProgressStage {
@@ -18,24 +15,14 @@ pub struct ProgressSnapshot {
     pub stage: ProgressStage,
     pub completed: u64,
     pub total: Option<u64>,
-    pub started: Instant,
 }
 
 impl ProgressSnapshot {
-    /// An estimate for this measured stage, not a promise about later work.
-    pub fn remaining_at(&self, now: Instant) -> Option<Duration> {
-        let total = self.total?;
-        let elapsed = now.saturating_duration_since(self.started);
-        if self.completed == 0
-            || self.completed >= total
-            || elapsed < Duration::from_millis(250)
-            || self.stage == ProgressStage::Finished
-        {
-            return None;
-        }
-        let seconds =
-            elapsed.as_secs_f64() * (total - self.completed) as f64 / self.completed as f64;
-        Duration::try_from_secs_f64(seconds).ok()
+    /// Completion for a measured stage. Unknown and empty totals have no ratio.
+    pub fn fraction(&self) -> Option<f32> {
+        self.total
+            .filter(|total| *total > 0)
+            .map(|total| (self.completed.min(total) as f64 / total as f64) as f32)
     }
 }
 
@@ -49,7 +36,6 @@ impl Default for ComparisonProgress {
             stage: ProgressStage::Scanning,
             completed: 0,
             total: None,
-            started: Instant::now(),
         }))
     }
 }
@@ -60,7 +46,6 @@ impl ComparisonProgress {
             stage,
             completed: 0,
             total,
-            started: Instant::now(),
         };
     }
 
@@ -82,35 +67,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn estimates_only_measured_work_and_resets_between_stages() {
+    fn measured_progress_reports_completion_and_resets_between_stages() {
         let progress = ComparisonProgress::default();
         progress.advance(50);
-        let scan = progress.snapshot();
-        assert!(
-            scan.remaining_at(scan.started + Duration::from_secs(2))
-                .is_none()
-        );
+        assert_eq!(progress.snapshot().fraction(), None);
         progress.begin(ProgressStage::Reading, Some(200));
+        assert_eq!(progress.snapshot().fraction(), Some(0.0));
         progress.advance(50);
-        let reading = progress.snapshot();
-        assert_eq!(reading.completed, 50);
-        assert_eq!(
-            reading.remaining_at(reading.started + Duration::from_secs(2)),
-            Some(Duration::from_secs(6))
-        );
-        assert!(
-            reading
-                .remaining_at(reading.started + Duration::from_millis(10))
-                .is_none()
-        );
+        assert_eq!(progress.snapshot().fraction(), Some(0.25));
         progress.advance(u64::MAX);
-        let done = progress.snapshot();
-        assert_eq!(done.completed, 200);
-        assert!(
-            done.remaining_at(done.started + Duration::from_secs(2))
-                .is_none()
-        );
+        assert_eq!(progress.snapshot().completed, 200);
+        assert_eq!(progress.snapshot().fraction(), Some(1.0));
         progress.begin(ProgressStage::ComparingLines, None);
         assert_eq!(progress.snapshot().completed, 0);
+        assert_eq!(progress.snapshot().fraction(), None);
+        progress.begin(ProgressStage::Finished, Some(0));
+        assert_eq!(progress.snapshot().fraction(), None);
     }
 }

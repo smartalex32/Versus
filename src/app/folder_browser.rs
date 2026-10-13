@@ -490,7 +490,6 @@ impl FolderBrowser {
         self.poll(ui.ctx());
         self.poll_save(view, ui.ctx());
         self.update_overlays(view, ui.ctx());
-        let palette = Palette::for_context(ui.ctx());
         ui.horizontal(|ui| {
             if ui.button("Find and Replace…").clicked() {
                 self.search_open = true;
@@ -512,19 +511,30 @@ impl FolderBrowser {
             {
                 self.pair_open_requested = true;
             }
-            if self.jobs.iter().any(|jobs| !jobs.is_empty()) {
-                ui.spinner();
-                ui.label("Loading directory metadata…");
-            }
-            if self.overlay_job.is_some() {
-                ui.spinner();
-                ui.label("Comparing changed working copies…");
-            }
-            if let Some(error) = &self.error {
-                ui.colored_label(palette.error, error);
-            }
         });
         self.search_window(ui.ctx(), view);
+    }
+    /// Draws one centered status in the main header. Controls intentionally do
+    /// not duplicate this text so narrow folder views retain usable actions.
+    pub(super) fn render_header_status(&self, ui: &mut egui::Ui) -> bool {
+        let palette = Palette::for_context(ui.ctx());
+        if let Some(error) = &self.error {
+            header_status_label(ui, error, palette.error);
+        } else if let Some(save) = &self.save {
+            let percent = if save.total == 0 {
+                100
+            } else {
+                save.completed.min(save.total) * 100 / save.total
+            };
+            header_status_label(ui, &format!("Saving files… {percent}%"), palette.text);
+        } else if self.jobs.iter().any(|jobs| !jobs.is_empty()) {
+            header_status_label(ui, "Loading directory metadata…", palette.muted);
+        } else if self.overlay_job.is_some() || !self.retired_overlay_jobs.is_empty() {
+            header_status_label(ui, "Comparing changed working copies…", palette.muted);
+        } else {
+            return false;
+        }
+        true
     }
     /// Renders one independently navigable source tree and returns a file
     /// opened from that side. Missing sources intentionally render nothing.
