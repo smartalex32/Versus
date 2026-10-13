@@ -90,6 +90,7 @@ pub(super) struct InteractiveView {
     selected_side: usize,
     back: bool,
     new_requested: bool,
+    search_requested: bool,
     from_folders: bool,
     editor_context: Option<egui::Context>,
     pending_auto: Option<Vec<(Range<usize>, Range<usize>)>>,
@@ -337,6 +338,36 @@ impl InteractiveView {
     }
     pub(super) fn take_new_requested(&mut self) -> bool {
         std::mem::take(&mut self.new_requested)
+    }
+    pub(super) fn take_search_requested(&mut self) -> bool {
+        std::mem::take(&mut self.search_requested)
+    }
+    pub(super) fn is_side_dirty(&self, side: usize) -> bool {
+        self.workspace
+            .as_ref()
+            .is_some_and(|workspace| workspace.is_dirty(side_of(side)))
+    }
+    pub(super) fn can_save_side(&self, side: usize) -> bool {
+        self.editing
+            && !self.is_saving()
+            && self.side_has_file(side)
+            && (self.is_side_dirty(side)
+                || self.active_file(side).is_some_and(|file| {
+                    matches!(file.fingerprint, versus::FileFingerprint::Missing)
+                }))
+    }
+    pub(super) fn request_side_save(&mut self, side: usize) {
+        if self.can_save_side(side) {
+            self.request_save(vec![side]);
+        }
+    }
+    pub(super) fn clear_error(&mut self) {
+        if self.error.take().is_some() {
+            self.status.clear();
+        }
+    }
+    pub(super) fn error_details(&self) -> Option<&str> {
+        self.error.as_deref()
     }
     #[cfg(test)]
     pub(super) fn working_text(&self, side: usize) -> Option<&str> {
@@ -1066,14 +1097,7 @@ impl InteractiveView {
         self.footer(ui);
     }
     pub(super) fn footer_height(&self, ui: &egui::Ui) -> f32 {
-        let icons = self.footer_legend_icons();
         control_extent(ui)
-            + if icons.is_empty() {
-                0.0
-            } else {
-                ui.spacing().item_spacing.y
-                    + bottom_legend_height(ui, &icons, self.footer_legend_counts())
-            }
     }
     pub(super) fn render_previews(&mut self, ctx: &egui::Context) {
         self.save_preview(ctx);
@@ -1090,23 +1114,45 @@ impl InteractiveView {
     }
     #[cfg(test)]
     pub(super) fn render(&mut self, ui: &mut egui::Ui) {
-        self.render_with_sources(ui, |_| {});
+        let (_, status) = self.render_with_sources(ui, |_| {});
+        ui.scope_builder(egui::UiBuilder::new().max_rect(status), |ui| {
+            let errors: Vec<_> = self
+                .error_details()
+                .map(|error| error.lines().map(str::to_owned).collect())
+                .unwrap_or_default();
+            bottom_status_area(ui, |ui| {
+                if errors.is_empty() {
+                    self.render_header_status(ui);
+                } else {
+                    error_summary(ui, &errors);
+                }
+            });
+        });
     }
     pub(super) fn render_with_sources(
         &mut self,
         ui: &mut egui::Ui,
         sources: impl FnOnce(&mut egui::Ui),
-    ) -> [Rect; 2] {
+    ) -> ([Rect; 2], Rect) {
         self.folder_overview = false;
         self.render_workspace_toolbar(ui, false);
         ui.add_space(5.);
         let area = ui.available_rect_before_wrap();
-        let foot = self.footer_height(ui) + 8.;
+        let footer_height = self.footer_height(ui);
+        let status_height = control_extent(ui);
+        let foot = footer_height + status_height + ui.spacing().item_spacing.y + 8.;
         let body = Rect::from_min_max(
             area.min,
             egui::pos2(area.right(), (area.bottom() - foot).max(area.top())),
         );
-        let footer = Rect::from_min_max(egui::pos2(area.left(), body.bottom() + 4.), area.max);
+        let footer = Rect::from_min_size(
+            egui::pos2(area.left(), body.bottom() + 4.),
+            egui::vec2(area.width(), footer_height),
+        );
+        let status = Rect::from_min_size(
+            egui::pos2(footer.left(), footer.bottom() + ui.spacing().item_spacing.y),
+            egui::vec2(area.width(), status_height),
+        );
         let mut panes = split_rect(body);
         ui.scope_builder(egui::UiBuilder::new().max_rect(body), |ui| {
             comparison_panel(ui).show(ui, |ui| {
@@ -1120,7 +1166,7 @@ impl InteractiveView {
             self.render_footer(ui)
         });
         self.render_previews(ui.ctx());
-        panes
+        (panes, status)
     }
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         let palette = Palette::for_context(ui.ctx());
@@ -1149,7 +1195,8 @@ impl InteractiveView {
                 ))
                 .layout(egui::Layout::left_to_right(egui::Align::Center)),
             |ui| {
-                if self.from_folders
+                if !self.editing
+                    && self.from_folders
                     && icon_button(ui, ToolbarIcon::Back, true, "Back to folders").clicked()
                 {
                     self.back = true;
@@ -1157,30 +1204,16 @@ impl InteractiveView {
                 if icon_button(ui, ToolbarIcon::New, true, "New comparison").clicked() {
                     self.new_requested = true;
                 }
+                if self.editing
+                    && self.from_folders
+                    && icon_button(ui, ToolbarIcon::Search, true, "Find and replace").clicked()
+                {
+                    self.search_requested = true;
+                }
                 if self.engine_enabled() {
-                    if icon_button(
-                        ui,
-                        ToolbarIcon::Previous,
-                        self.has_differences(),
-                        "Previous difference",
-                    )
-                    .clicked()
-                    {
-                        self.jump_diff(false, ui.ctx());
-                    }
-                    if icon_button(
-                        ui,
-                        ToolbarIcon::Next,
-                        self.has_differences(),
-                        "Next difference",
-                    )
-                    .clicked()
-                    {
-                        self.jump_diff(true, ui.ctx());
-                    }
                     ui.label(
                         RichText::new(self.change_label())
-                            .small()
+                            .size(11.0)
                             .color(palette.muted),
                     );
                 }
@@ -1317,6 +1350,26 @@ impl InteractiveView {
                         prefs[index] = !prefs[index];
                     }
                 }
+                if icon_button(
+                    ui,
+                    ToolbarIcon::Previous,
+                    self.has_differences(),
+                    "Previous difference",
+                )
+                .clicked()
+                {
+                    self.jump_diff(false, ui.ctx());
+                }
+                if icon_button(
+                    ui,
+                    ToolbarIcon::Next,
+                    self.has_differences(),
+                    "Next difference",
+                )
+                .clicked()
+                {
+                    self.jump_diff(true, ui.ctx());
+                }
                 if prefs != previous {
                     if self.editing {
                         self.merge_options = prefs;
@@ -1437,9 +1490,13 @@ impl InteractiveView {
             .max_height(height)
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                self.header(ui, side);
-                ui.separator();
-                self.editor(ui, side, height - 35.);
+                if !self.editing {
+                    self.header(ui, side);
+                    ui.separator();
+                    self.editor(ui, side, height - 35.);
+                } else {
+                    self.editor(ui, side, height);
+                }
             });
     }
     fn header(&self, ui: &mut egui::Ui, side: usize) {
@@ -1918,69 +1975,43 @@ impl InteractiveView {
     }
     fn footer(&mut self, ui: &mut egui::Ui) {
         let p = Palette::for_context(ui.ctx());
-        ui.horizontal(|ui| {
+        let icons = self.footer_legend_icons();
+        let save_enabled = self.editing
+            && self.workspace.is_some()
+            && self.side_has_file(0)
+            && self.side_has_file(1)
+            && !self.is_saving();
+        let row_height = control_extent(ui);
+        let (row, _) =
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), row_height), Sense::hover());
+        let reserve = 126.0_f32.min(row.width() / 2.0);
+        let left = Rect::from_min_max(row.min, egui::pos2(row.left() + reserve, row.bottom()));
+        let center = Rect::from_min_max(
+            egui::pos2(left.right(), row.top()),
+            egui::pos2(row.right() - reserve, row.bottom()),
+        );
+        let right = Rect::from_min_max(egui::pos2(center.right(), row.top()), row.max);
+        ui.scope_builder(egui::UiBuilder::new().max_rect(left), |ui| {
             if self.any_dirty() {
                 ui.label(RichText::new("Unsaved Changes").strong().color(p.changed));
             }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let l = self
-                    .workspace
-                    .as_ref()
-                    .is_some_and(|w| w.is_dirty(TwoWaySide::Left));
-                let r = self
-                    .workspace
-                    .as_ref()
-                    .is_some_and(|w| w.is_dirty(TwoWaySide::Right));
+        });
+        ui.scope_builder(egui::UiBuilder::new().max_rect(center), |ui| {
+            bottom_legend_inline(ui, &icons, self.footer_legend_counts());
+        });
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(right)
+                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+            |ui| {
                 if ui
-                    .add_enabled(
-                        self.editing
-                            && self.workspace.is_some()
-                            && self.side_has_file(0)
-                            && self.side_has_file(1)
-                            && !self.is_saving(),
-                        egui::Button::new("Save Both"),
-                    )
+                    .add_enabled(save_enabled, egui::Button::new("Save Both"))
                     .clicked()
                 {
                     self.request_save(vec![0, 1]);
                 }
-                if ui
-                    .add_enabled(
-                        self.editing
-                            && !self.is_saving()
-                            && self.side_has_file(1)
-                            && (r
-                                || self.active_file(1).is_some_and(|file| {
-                                    matches!(file.fingerprint, versus::FileFingerprint::Missing)
-                                })),
-                        egui::Button::new("Save Right"),
-                    )
-                    .clicked()
-                {
-                    self.request_save(vec![1]);
-                }
-                if ui
-                    .add_enabled(
-                        self.editing
-                            && !self.is_saving()
-                            && self.side_has_file(0)
-                            && (l
-                                || self.active_file(0).is_some_and(|file| {
-                                    matches!(file.fingerprint, versus::FileFingerprint::Missing)
-                                })),
-                        egui::Button::new("Save Left"),
-                    )
-                    .clicked()
-                {
-                    self.request_save(vec![0]);
-                }
-            });
-        });
-        let icons = self.footer_legend_icons();
-        if !icons.is_empty() {
-            ui.add_space(ui.spacing().item_spacing.y);
-            bottom_legend(ui, &icons, self.footer_legend_counts());
-        }
+            },
+        );
     }
     fn footer_legend_icons(&self) -> Vec<StatusIcon> {
         let mut icons = if self.engine_enabled() {
@@ -3117,6 +3148,12 @@ mod tests {
                 .unwrap()
                 .rect;
             assert!(left.right() < undo.left());
+            let options = ctx
+                .read_response(egui::Id::new("Ignore line endings"))
+                .unwrap()
+                .rect;
+            assert!(options.right() < previous.left());
+            assert!((options.center().y - previous.center().y).abs() < 0.5);
             assert!(previous.right() < next.left());
             assert!(
                 next.right() <= ctx.viewport_rect().right() + 1.0,
@@ -3125,6 +3162,26 @@ mod tests {
             );
             assert!(left.top() >= 0.0);
         }
+    }
+    #[test]
+    fn merge_toolbar_uses_search_after_new_without_a_global_back_button() {
+        let ctx = egui::Context::default();
+        let mut view = view("left\n", "right\n");
+        view.from_folders = true;
+        frame(&mut view, &ctx, vec![]).drop_without_applying_deltas();
+        let new = ctx
+            .read_response(egui::Id::new("New comparison"))
+            .unwrap()
+            .rect;
+        let search = ctx
+            .read_response(egui::Id::new("Find and replace"))
+            .unwrap()
+            .rect;
+        assert!(new.right() <= search.left());
+        assert!(
+            ctx.read_response(egui::Id::new("Back to folders"))
+                .is_none()
+        );
     }
     #[test]
     fn merge_toolbar_toggles_diff_controls_and_legends_without_resetting_edits() {

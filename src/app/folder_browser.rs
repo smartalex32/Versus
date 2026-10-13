@@ -82,7 +82,6 @@ pub(super) struct FolderBrowser {
     working: BTreeMap<PathBuf, WorkingFile>,
     pending_save: bool,
     save: Option<SaveJob>,
-    pair_open_requested: bool,
 }
 
 impl FolderBrowser {
@@ -119,7 +118,6 @@ impl FolderBrowser {
             working: BTreeMap::new(),
             pending_save: false,
             save: None,
-            pair_open_requested: false,
         };
         for side in 0..2 {
             view.load_side(side, PathBuf::new());
@@ -160,20 +158,31 @@ impl FolderBrowser {
         self.preview = None;
         self.selected_hits.clear();
         self.searched_query = None;
-        self.pair_open_requested = false;
     }
     pub(super) fn source_roots(&self) -> [Option<PathBuf>; 2] {
         self.sources.clone()
     }
-    pub(super) fn take_selected_pair(&mut self) -> Option<[PathBuf; 2]> {
-        if !std::mem::take(&mut self.pair_open_requested) {
-            return None;
+    pub(super) fn open_search(&mut self) {
+        self.search_open = true;
+    }
+    /// Refreshes only metadata for already expanded directories. Working files,
+    /// selection, expansion, and scroll identities remain intact.
+    pub(super) fn refresh_listing(&mut self) {
+        for side in 0..2 {
+            self.listings[side].clear();
+            self.jobs[side].clear();
+            self.load_side(side, PathBuf::new());
+            let expanded: Vec<_> = self.expanded[side].iter().cloned().collect();
+            for relative in expanded {
+                self.load_side(side, relative);
+            }
         }
-        let roots = self.paired_roots()?;
-        let [Some(left), Some(right)] = self.selected.clone() else {
-            return None;
-        };
-        Some([roots[0].join(left), roots[1].join(right)])
+    }
+    pub(super) fn clear_error(&mut self) {
+        self.error = None;
+    }
+    pub(super) fn error_details(&self) -> Vec<String> {
+        self.error.iter().cloned().collect()
     }
     fn paired_roots(&self) -> Option<[PathBuf; 2]> {
         Some([self.sources[0].clone()?, self.sources[1].clone()?])
@@ -490,31 +499,9 @@ impl FolderBrowser {
         self.poll(ui.ctx());
         self.poll_save(view, ui.ctx());
         self.update_overlays(view, ui.ctx());
-        ui.horizontal(|ui| {
-            if ui.button("Find and Replace…").clicked() {
-                self.search_open = true;
-            }
-            if ui.button("Refresh listing").clicked() {
-                for side in 0..2 {
-                    self.listings[side].clear();
-                    self.load_side(side, PathBuf::new());
-                }
-            }
-            if self.paired_roots().is_some()
-                && ui
-                    .add_enabled(
-                        self.selected.iter().all(Option::is_some),
-                        egui::Button::new("Open selected pair"),
-                    )
-                    .on_hover_text("Pair files with different names or paths")
-                    .clicked()
-            {
-                self.pair_open_requested = true;
-            }
-        });
         self.search_window(ui.ctx(), view);
     }
-    /// Draws one centered status in the main header. Controls intentionally do
+    /// Draws one status in the bottom-right status area. Controls intentionally do
     /// not duplicate this text so narrow folder views retain usable actions.
     pub(super) fn render_header_status(&self, ui: &mut egui::Ui) -> bool {
         let palette = Palette::for_context(ui.ctx());
@@ -708,9 +695,6 @@ impl FolderBrowser {
                 opened[side] = self.render_side(&mut columns[side], view, compared, side);
             }
         });
-        if let Some(pair) = self.take_selected_pair() {
-            return Some(pair);
-        }
         match opened {
             [Some(left), Some(right)] => Some([left, right]),
             [Some(left), None] => self.paired_roots().map(|roots| {
@@ -1465,6 +1449,18 @@ mod tests {
             browser.overlays.get(std::path::Path::new("kept.txt")),
             Some(&DirectoryEntryState::Different)
         );
+    }
+
+    #[test]
+    fn search_and_error_apis_do_not_change_working_state() {
+        let mut browser = FolderBrowser::new_with_sources([None, None]);
+        browser.open_search();
+        assert!(browser.search_open);
+        browser.error = Some("metadata failure".into());
+        assert_eq!(browser.error_details(), ["metadata failure"]);
+        browser.clear_error();
+        assert!(browser.error_details().is_empty());
+        assert!(browser.working.is_empty());
     }
 
     #[test]

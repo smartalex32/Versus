@@ -26,13 +26,16 @@ The three comparison options (Show only differences, Ignore whitespace, Ignore
 line endings) have separate settings in Diff and Merge; their Merge settings start
 off and do not change Diff preferences.
 
-Run Diff sits in the header immediately left of the theme button. Merge keeps
-New comparison (+) on the left of the button line. Zoom remains on
-the right. With Run Diff enabled, the comparison options appear immediately to
+Run Diff sits in the header beside the theme button; when enabled, the refresh
+icon appears immediately to its right. Merge keeps New comparison (+) on the left
+of the button line, followed by a magnifying-glass **Find and Replace** icon in
+folder workspaces. Zoom remains on the right. With Run Diff enabled, the comparison options appear immediately to
 the right of zoom, followed by difference navigation. A change count appears
-beside +. The legends are centered below the panes with full icons and text,
-including Conflict in Merge. Turning Run Diff off hides the diff controls, change
-count, and normal legend entries while retaining the Merge settings. Each file and folder pane loads, expands, and
+beside the left-side actions, using the same style as Diff. The legends are
+centered below the panes with full icons and text, including Conflict in Merge.
+The Merge legend shares its row with **Save Both** and **Unsaved Changes**.
+Turning Run Diff off hides the diff controls, change count, and normal legend
+entries while retaining the Merge settings. Each file and folder pane loads, expands, and
 scrolls independently; a single selected source opens immediately. Transfer
 controls and file comparison assistance become available once both files are open.
 
@@ -54,9 +57,10 @@ does not guess replacements. Undo and Redo cover edits, transfers, chunk changes
 and ignored-range changes. They are also available in the toolbar;
 Ctrl/Command+Z and Ctrl+Y or Command+Shift+Z work while editing.
 
-Use **Save Left**, **Save Right**, or **Save Both** to review a preview and write
-the selected working copies. Versus checks that the files have not changed on disk
-since they were opened before replacing them. Interactive text files are limited
+Use the **Save Left** or **Save Right** disk icon immediately to the right of
+each pane’s Browse button, or **Save Both** in the bottom row, to review a preview
+and write the selected working copies. Versus checks that the files have not
+changed on disk since they were opened before replacing them. Interactive text files are limited
 to 32 MiB. UTF-8 with or without a BOM and UTF-16 little- and big-endian text retain
 their encoding; original line endings are preserved where possible. Cancelled or
 failed saves leave the working copies intact. Unsaved changes are marked
@@ -66,9 +70,9 @@ For folder pairs, Merge opens a lazy browser that enumerates directory entries a
 basic metadata as folders are expanded. It does not compare file contents unless
 Run Diff is enabled; files load when opened. Double-clicking a file opens only
 that pane; the other pane can keep browsing a folder or editing a file. Each
-file pane has a back arrow to its own tree. Select files by relative path or choose
-files from different paths on each side and open that pair. Each file pair keeps
-its own undo history as you navigate or pair files again. Folder-wide **Find and
+file pane has a back arrow before its LEFT/RIGHT label to return to its own tree.
+Open files independently on each side, including files with different names or
+relative paths. Each file pair keeps its own undo history as you navigate or pair files again. Folder-wide **Find and
 Replace** searches the left tree, right tree, or both, with plain text or regular
 expressions, case and whole-word options. Results include file and line, and
 replacement previews can be applied as undoable batches to the working copies.
@@ -136,18 +140,21 @@ totals count regular-file bytes and exclude symlink targets. Empty folders show
 zero bytes; unknown sizes or incomplete totals show a dash. Hover for status and
 error details. The cursor becomes a pointer over files and folders.
 
-Comparison runs in the background with refresh and cancel icons in the header.
+Comparison runs in the background with a refresh icon in the header and
+cancellation beside progress.
 Files are compared by content, not timestamps. Symlinks are compared by their
 target paths rather than target contents and are never recursively followed.
 This keeps traversal within the selected roots and avoids loops or repeated
 comparisons when links point to ancestors or outside folders. Empty folders are
 included. Changing a path clears the prior result so it cannot be mistaken for
 the new selection.
-The status area is centered in the header space to the right of File Diff or
-File Merge. It shows loading progress, saves, source details, or errors. Long
-messages are shortened on screen; hover for the complete text. Measured stages
-show percentage complete. Folder discovery and line alignment have no reliable
-total and show activity instead. Comparisons can be cancelled from the header.
+The status area is at the bottom right in both modes. It shows loading progress,
+saves, and source details. Errors appear as **1 error** or **N errors**; hover
+the summary to read the details. Moving or clicking inside either pane dismisses
+the errors. Long status messages are shortened on screen; hover for the complete
+text. Measured stages show percentage complete. Folder discovery and line alignment have no reliable
+total and show activity instead. Comparisons can be cancelled beside the
+progress status.
 The change count and current difference position stay beside + in the toolbar.
 
 The **+** button stays on the left of the toolbar. The other icon controls at the far right

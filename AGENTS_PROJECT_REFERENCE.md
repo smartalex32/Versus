@@ -31,7 +31,8 @@ APIs and must fail cleanly when unavailable.
   within the editors; there is no separate comparison-alignment panel.
 - `src/app/interactive_view.rs` renders the two-way editing workspace. Each side
   has its own text buffer, line numbers, dirty state, scroll position, and explicit
-  Save Left/Save Right/Save Both action with a pending-content preview. Selection
+  Save Left/Save Right disk icon beside Browse, plus Save Both in the footer,
+  with a pending-content preview. Selection
   transfers can insert at a chosen line or replace an explicitly selected target.
   Accept All Left/Right copy one side into the other as a single transaction, while
   honoring destination protection. Auto Merge previews incoming-only insertions
@@ -44,9 +45,12 @@ APIs and must fail cleanly when unavailable.
   ignored-range state. Diff rows only assist with alignment and target suggestions
   when enabled; manual transfers work without them. File-pair history uses
   canonical tagged snapshots and survives navigation and alternate pairing.
-  Run Diff is in the header immediately left of the theme button. The toolbar
-  keeps New comparison and the change count on the left while Run Diff is on.
-  Full icon/text legends are centered at the bottom, with Conflict in Merge.
+  Run Diff is in the header beside the theme button, with Refresh immediately
+  to its right while enabled. The toolbar keeps New comparison and the folder
+  Find and Replace magnifying glass on the left, followed by the change count
+  while Run Diff is on. Full icon/text legends are centered at the bottom, with
+  Conflict in Merge, on the same row as Save Both and Unsaved Changes. Each file
+  side has a Back button before its LEFT/RIGHT label to return to its own tree.
   Zoom stays on the right; comparison options and difference navigation follow it
   only while Run Diff is enabled. Hidden Merge option states are retained. Each
   side loads and scrolls independently; transfers require two loaded files.
@@ -122,8 +126,10 @@ APIs and must fail cleanly when unavailable.
   status, and text. Up/Down tree navigation preserves focus side and Tab escapes.
   Focusable file panes support keyboard scrolling. Empty panes show persistent
   drop outlines; toolbar press feedback precedes release activation.
-  Header status text is centered beside the File button, clipped to one line
-  with full messages on hover.
+  Status and progress sit at the bottom right, clipped to one line with full
+  messages on hover. Deduplicated errors show an N errors summary with hover
+  details; pointer movement or clicks in either pane dismiss errors without
+  changing working copies or history.
   The zoom percentage precedes adjacent magnifier −/+ buttons immediately left
   of the differences filter; Ctrl/Command + wheel changes
   UI scale using egui’s smooth zoom delta, without scrolling the comparison.
@@ -138,7 +144,7 @@ APIs and must fail cleanly when unavailable.
   Changes to ignore rules restart background workers
   while retaining the displayed result until its replacement is ready. Refreshes
   preserve expansion, selection and source-line scroll anchors; progress uses a
-  reserved header status area, and folder jumps clamp before painting to avoid
+  reserved bottom-right status area, and folder jumps clamp before painting to avoid
   transient shifts.
   Folder ignores use bounded UTF-8 normalization and fall back to byte comparison
   for binary, invalid UTF-8, or larger files. Native single-path drops select a
