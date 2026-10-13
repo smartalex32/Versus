@@ -1274,7 +1274,7 @@ impl VersusApp {
                 egui::Event::Key { key: egui::Key::Tab, pressed: true, modifiers, .. } if modifiers.shift))) {
                 "Browse right folder"
             } else {
-                "Folder Compare"
+                "Folder Diff"
             };
             ui.memory_mut(|memory| {
                 memory.move_focus(egui::FocusDirection::None);
@@ -1320,7 +1320,6 @@ impl VersusApp {
             .show(ui, |ui| {
                 self.header(ui);
                 ui.add_space(5.0);
-                self.workspace_mode_toggle(ui);
                 if self.interactive.is_some() && (self.merge_mode || self.merge_file_open) {
                     self.interactive_area(ui);
                     return;
@@ -1368,14 +1367,28 @@ impl VersusApp {
 
     fn workspace_mode_toggle(&mut self, ui: &mut egui::Ui) {
         let mut merge = self.merge_mode;
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut merge, false, "Diff")
-                .on_hover_text("Inspect differences using comparison preferences");
-            ui.selectable_value(&mut merge, true, "Merge")
-                .on_hover_text("Edit and transfer content; comparison is optional");
-        });
+        for (enabled, label, tooltip) in [
+            (
+                false,
+                "Diff",
+                "Inspect differences using comparison preferences",
+            ),
+            (
+                true,
+                "Merge",
+                "Edit and transfer content; comparison is optional",
+            ),
+        ] {
+            if workspace_mode_button(ui, label, merge == enabled)
+                .on_hover_text(tooltip)
+                .clicked()
+            {
+                merge = enabled;
+            }
+        }
         if merge != self.merge_mode {
             self.set_workspace_merge(merge);
+            ui.ctx().request_repaint();
         }
     }
 
@@ -1490,15 +1503,19 @@ impl VersusApp {
             view.set_editing(self.merge_mode, prefs);
         }
         if self.merge_file_open {
-            if self.merge_folders.is_none() {
-                self.folder_inputs(ui);
-            }
-            self.pane_rects = split_rect(ui.available_rect_before_wrap());
-            if let Some(view) = &mut self.interactive {
+            if let Some(mut view) = self.interactive.take() {
                 view.set_from_folders(self.merge_folders.is_some());
-                view.render(ui);
+                self.pane_rects = view.render_with_sources(ui, |ui| {
+                    if self.merge_folders.is_none() {
+                        self.folder_inputs(ui);
+                        paint_panel_divider(ui);
+                    }
+                });
                 if self.merge_folders.is_none() {
-                    if let Some(paths) = view.take_loaded_paths() {
+                    if let Some(paths) = view
+                        .take_loaded_paths()
+                        .filter(|_| self.source_jobs.iter().all(Option::is_none))
+                    {
                         self.paths = paths
                             .clone()
                             .map(|path| path.to_string_lossy().into_owned());
@@ -1518,6 +1535,7 @@ impl VersusApp {
                         self.start_comparison();
                     }
                 }
+                self.interactive = Some(view);
             }
             if self
                 .interactive
@@ -1553,21 +1571,28 @@ impl VersusApp {
                     }
                 });
             }
-            self.folder_inputs(ui);
-            self.pane_rects = split_rect(ui.available_rect_before_wrap());
-            if let (Some(browser), Some(view)) = (&mut self.merge_folders, &mut self.interactive) {
-                if let Some(paths) = browser.render(ui, view, self.tree.as_ref()) {
-                    view.open_pair(paths);
-                    self.merge_file_open = true;
+            comparison_panel(ui).show(ui, |ui| {
+                ui.set_min_height((ui.available_height() - 2.0).max(0.0));
+                ui.spacing_mut().item_spacing = Vec2::ZERO;
+                self.folder_inputs(ui);
+                paint_panel_divider(ui);
+                self.pane_rects = split_rect(ui.available_rect_before_wrap());
+                if let (Some(browser), Some(view)) =
+                    (&mut self.merge_folders, &mut self.interactive)
+                {
+                    if let Some(paths) = browser.render(ui, view, self.tree.as_ref()) {
+                        view.open_pair(paths);
+                        self.merge_file_open = true;
+                    }
+                } else {
+                    empty_display(
+                        ui,
+                        ui.available_height().max(60.0),
+                        "Choose files or folders",
+                        "Use Browse or drop a source into each pane.",
+                    );
                 }
-            } else {
-                empty_display(
-                    ui,
-                    ui.available_height().max(60.0),
-                    "Choose files or folders",
-                    "Use Browse or drop a source into each pane.",
-                );
-            }
+            });
             if self
                 .interactive
                 .as_mut()
@@ -1621,7 +1646,12 @@ impl VersusApp {
     fn header(&mut self, ui: &mut egui::Ui) {
         let modes = [ComparisonMode::Folder, ComparisonMode::File];
         let labels = modes.map(|mode| {
-            egui::WidgetText::from(RichText::new(mode.label()).size(14.0).strong()).into_galley(
+            egui::WidgetText::from(
+                RichText::new(mode.workspace_label(self.merge_mode))
+                    .size(14.0)
+                    .strong(),
+            )
+            .into_galley(
                 ui,
                 Some(egui::TextWrapMode::Extend),
                 f32::INFINITY,
@@ -1648,10 +1678,16 @@ impl VersusApp {
                 ))
                 .layout(egui::Layout::left_to_right(egui::Align::Center)),
         );
-        if let Some((_, logo)) = &self.logo_texture {
-            brand_ui.image((logo.id(), egui::vec2(28.0, 28.0)));
+        if header.width() >= 700.0 {
+            if let Some((_, logo)) = &self.logo_texture {
+                brand_ui.image((logo.id(), egui::vec2(28.0, 28.0)));
+            }
+            brand_ui.label(RichText::new("Versus").size(18.0).strong());
+            brand_ui.add_space(16.0);
+        } else {
+            brand_ui.spacing_mut().item_spacing.x = 4.0;
         }
-        brand_ui.label(RichText::new("Versus").size(18.0).strong());
+        self.workspace_mode_toggle(&mut brand_ui);
 
         let mut x = group.left();
         for (index, mode) in modes.into_iter().enumerate() {
@@ -2131,11 +2167,7 @@ impl VersusApp {
         let row_height = self.row_height;
         let mut focused_file_side = self.file_keyboard_focus_side;
         let from_folders = self.file_view.as_ref().unwrap().from_folders;
-        egui::Frame::default()
-            .fill(palette.panel)
-            .stroke(Stroke::new(1.0, palette.border))
-            .corner_radius(6)
-            .show(ui, |ui| {
+        comparison_panel(ui).show(ui, |ui| {
                 ui.set_min_height((ui.available_height() - 2.0).max(0.0));
                 if !from_folders {
                     self.folder_inputs(ui);
@@ -2385,291 +2417,283 @@ impl VersusApp {
         let palette = Palette::for_context(ui.ctx());
         let row_height = self.row_height;
         let mut open = None;
-        egui::Frame::default()
-            .fill(palette.panel)
-            .stroke(Stroke::new(1.0, palette.border))
-            .corner_radius(6)
-            .show(ui, |ui| {
-                ui.set_min_height(height);
-                ui.set_max_height(height);
-                ui.spacing_mut().item_spacing = Vec2::ZERO;
-                let header_top = ui.cursor().top();
-                self.folder_inputs(ui);
-                let header_height = ui.cursor().top() - header_top;
-                let (divider, _) =
-                    ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), Sense::hover());
-                ui.painter().line_segment(
-                    [divider.left_center(), divider.right_center()],
-                    Stroke::new(1.0, palette.border),
-                );
-                let body_height = (height - header_height - 2.0).max(60.0);
-                if let Some(tree) = &mut self.tree {
-                    let rows: Vec<_> = tree
-                        .visible_rows()
-                        .into_iter()
-                        .filter(|row| {
-                            !self.show_only_differences
-                                || row.node.state != DirectoryEntryState::Same
-                        })
-                        .collect();
-                    if rows.is_empty() {
-                        empty_display(
-                            ui,
-                            body_height,
-                            if self.show_only_differences {
-                                "No differences"
-                            } else {
-                                "Both folders are empty"
-                            },
-                            if self.show_only_differences {
-                                "No files or folders differ with the current options."
-                            } else {
-                                "There are no files or folders to compare."
-                            },
-                        );
-                        return;
-                    }
-                    let mut toggle = None;
-                    let mut selected = None;
-                    let mut tree_keyboard_focus = self.tree_keyboard_focus.clone();
-                    // A target is only retained between the Arrow-key frame and
-                    // the frame where virtual scrolling renders that row. Keep
-                    // its side beside the path so focus does not jump panes.
-                    let pending_side_id = ui.id().with("tree-keyboard-focus-side");
-                    let mut pending_side =
-                        ui.memory(|memory| memory.data.get_temp::<usize>(pending_side_id));
-                    let mut rendered_tree_focus = None;
-                    self.tree_focus_id = None;
-                    // show_rows paints before ScrollArea clamps its offset. Clamp
-                    // first so a jump near the end is correct on its first frame.
-                    self.tree_scroll_y = self
-                        .tree_scroll_y
-                        .clamp(0.0, (rows.len() as f32 * row_height - body_height).max(0.0));
-                    let output = egui::ScrollArea::vertical()
-                        .id_salt(("linked-trees", self.scroll_generation))
-                        .auto_shrink([false, false])
-                        .max_height(body_height)
-                        .vertical_scroll_offset(self.tree_scroll_y)
-                        .show_rows(ui, row_height, rows.len(), |ui, range| {
-                            for index in range {
-                                let row = &rows[index];
-                                let node = row.node;
-                                let (rect, _) = ui.allocate_exact_size(
-                                    egui::vec2(ui.available_width(), row_height),
-                                    Sense::hover(),
+        comparison_panel(ui).show(ui, |ui| {
+            ui.set_min_height(height);
+            ui.set_max_height(height);
+            ui.spacing_mut().item_spacing = Vec2::ZERO;
+            let header_top = ui.cursor().top();
+            self.folder_inputs(ui);
+            let header_height = ui.cursor().top() - header_top;
+            let (divider, _) =
+                ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), Sense::hover());
+            ui.painter().line_segment(
+                [divider.left_center(), divider.right_center()],
+                Stroke::new(1.0, palette.border),
+            );
+            let body_height = (height - header_height - 2.0).max(60.0);
+            if let Some(tree) = &mut self.tree {
+                let rows: Vec<_> = tree
+                    .visible_rows()
+                    .into_iter()
+                    .filter(|row| {
+                        !self.show_only_differences || row.node.state != DirectoryEntryState::Same
+                    })
+                    .collect();
+                if rows.is_empty() {
+                    empty_display(
+                        ui,
+                        body_height,
+                        if self.show_only_differences {
+                            "No differences"
+                        } else {
+                            "Both folders are empty"
+                        },
+                        if self.show_only_differences {
+                            "No files or folders differ with the current options."
+                        } else {
+                            "There are no files or folders to compare."
+                        },
+                    );
+                    return;
+                }
+                let mut toggle = None;
+                let mut selected = None;
+                let mut tree_keyboard_focus = self.tree_keyboard_focus.clone();
+                // A target is only retained between the Arrow-key frame and
+                // the frame where virtual scrolling renders that row. Keep
+                // its side beside the path so focus does not jump panes.
+                let pending_side_id = ui.id().with("tree-keyboard-focus-side");
+                let mut pending_side =
+                    ui.memory(|memory| memory.data.get_temp::<usize>(pending_side_id));
+                let mut rendered_tree_focus = None;
+                self.tree_focus_id = None;
+                // show_rows paints before ScrollArea clamps its offset. Clamp
+                // first so a jump near the end is correct on its first frame.
+                self.tree_scroll_y = self
+                    .tree_scroll_y
+                    .clamp(0.0, (rows.len() as f32 * row_height - body_height).max(0.0));
+                let output = egui::ScrollArea::vertical()
+                    .id_salt(("linked-trees", self.scroll_generation))
+                    .auto_shrink([false, false])
+                    .max_height(body_height)
+                    .vertical_scroll_offset(self.tree_scroll_y)
+                    .show_rows(ui, row_height, rows.len(), |ui, range| {
+                        for index in range {
+                            let row = &rows[index];
+                            let node = row.node;
+                            let (rect, _) = ui.allocate_exact_size(
+                                egui::vec2(ui.available_width(), row_height),
+                                Sense::hover(),
+                            );
+                            let is_selected = self.selected.as_ref() == Some(&node.relative_path);
+                            for (side, half) in split_rect(rect).into_iter().enumerate() {
+                                let entry = if side == 0 { &node.left } else { &node.right };
+                                let present = entry.exists;
+                                let response = ui.interact(
+                                    half,
+                                    ui.id().with((&node.relative_path, side)),
+                                    Sense::click(),
                                 );
-                                let is_selected =
-                                    self.selected.as_ref() == Some(&node.relative_path);
-                                for (side, half) in split_rect(rect).into_iter().enumerate() {
-                                    let entry = if side == 0 { &node.left } else { &node.right };
-                                    let present = entry.exists;
-                                    let response = ui.interact(
-                                        half,
-                                        ui.id().with((&node.relative_path, side)),
-                                        Sense::click(),
-                                    );
-                                    let response = if present {
-                                        response.on_hover_cursor(egui::CursorIcon::PointingHand)
-                                    } else {
-                                        response
-                                    };
-                                    if tree_keyboard_focus.as_ref() == Some(&node.relative_path)
-                                        && pending_side == Some(side)
-                                    {
-                                        response.request_focus();
-                                        tree_keyboard_focus = None;
-                                        pending_side = None;
-                                        ui.memory_mut(|memory| {
-                                            memory.data.remove::<usize>(pending_side_id);
-                                        });
-                                    }
-                                    response.widget_info(|| {
-                                        egui::WidgetInfo::selected(
-                                            egui::WidgetType::SelectableLabel,
-                                            true,
-                                            is_selected,
-                                            if node.is_expandable() {
-                                                format!(
-                                                    "{}, {}",
-                                                    tree_row_accessible_label(node, side),
-                                                    if tree.is_expanded(&node.relative_path) {
-                                                        "expanded"
-                                                    } else {
-                                                        "collapsed"
-                                                    }
-                                                )
-                                            } else {
-                                                tree_row_accessible_label(node, side)
+                                let response = if present {
+                                    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+                                } else {
+                                    response
+                                };
+                                if tree_keyboard_focus.as_ref() == Some(&node.relative_path)
+                                    && pending_side == Some(side)
+                                {
+                                    response.request_focus();
+                                    tree_keyboard_focus = None;
+                                    pending_side = None;
+                                    ui.memory_mut(|memory| {
+                                        memory.data.remove::<usize>(pending_side_id);
+                                    });
+                                }
+                                response.widget_info(|| {
+                                    egui::WidgetInfo::selected(
+                                        egui::WidgetType::SelectableLabel,
+                                        true,
+                                        is_selected,
+                                        if node.is_expandable() {
+                                            format!(
+                                                "{}, {}",
+                                                tree_row_accessible_label(node, side),
+                                                if tree.is_expanded(&node.relative_path) {
+                                                    "expanded"
+                                                } else {
+                                                    "collapsed"
+                                                }
+                                            )
+                                        } else {
+                                            tree_row_accessible_label(node, side)
+                                        },
+                                    )
+                                });
+                                paint_row(
+                                    ui,
+                                    half,
+                                    node,
+                                    side,
+                                    RowAppearance {
+                                        depth: row.depth,
+                                        expanded: tree.is_expanded(&node.relative_path),
+                                        alternate: index % 2 == 1,
+                                        selected: is_selected,
+                                        hovered: response.hovered() || response.has_focus(),
+                                    },
+                                );
+                                if response.has_focus() {
+                                    self.tree_focus_id = Some(response.id);
+                                    ui.memory_mut(|memory| {
+                                        memory.set_focus_lock_filter(
+                                            response.id,
+                                            egui::EventFilter {
+                                                horizontal_arrows: true,
+                                                vertical_arrows: true,
+                                                ..Default::default()
                                             },
                                         )
                                     });
-                                    paint_row(
-                                        ui,
-                                        half,
-                                        node,
-                                        side,
-                                        RowAppearance {
-                                            depth: row.depth,
-                                            expanded: tree.is_expanded(&node.relative_path),
-                                            alternate: index % 2 == 1,
-                                            selected: is_selected,
-                                            hovered: response.hovered() || response.has_focus(),
-                                        },
+                                    rendered_tree_focus = Some((node.relative_path.clone(), side));
+                                    ui.painter().rect_stroke(
+                                        half.shrink(1.0),
+                                        3.0,
+                                        Stroke::new(2.0, palette.accent),
+                                        egui::StrokeKind::Inside,
                                     );
-                                    if response.has_focus() {
-                                        self.tree_focus_id = Some(response.id);
-                                        ui.memory_mut(|memory| {
-                                            memory.set_focus_lock_filter(
-                                                response.id,
-                                                egui::EventFilter {
-                                                    horizontal_arrows: true,
-                                                    vertical_arrows: true,
-                                                    ..Default::default()
-                                                },
-                                            )
-                                        });
-                                        rendered_tree_focus =
-                                            Some((node.relative_path.clone(), side));
-                                        ui.painter().rect_stroke(
-                                            half.shrink(1.0),
-                                            3.0,
-                                            Stroke::new(2.0, palette.accent),
-                                            egui::StrokeKind::Inside,
+                                }
+                                let expandable = node.is_expandable()
+                                    && entry.kind == Some(DirectoryEntryKind::Directory);
+                                let keyboard_toggle = response.has_focus()
+                                    && ui.input(|input| {
+                                        input.key_pressed(egui::Key::Space)
+                                            || input.key_pressed(egui::Key::Enter)
+                                    });
+                                if (response.double_clicked() || keyboard_toggle)
+                                    && entry.kind == Some(DirectoryEntryKind::File)
+                                {
+                                    open = Some((
+                                        node.relative_path.clone(),
+                                        [node.left.exists, node.right.exists],
+                                        [&node.left, &node.right].into_iter().any(|entry| {
+                                            entry.exists
+                                                && entry.kind != Some(DirectoryEntryKind::File)
+                                        }),
+                                    ));
+                                }
+                                if response.clicked() || keyboard_toggle {
+                                    response.request_focus();
+                                    self.tree_focus_id = Some(response.id);
+                                    selected = Some(node.relative_path.clone());
+                                    if expandable {
+                                        toggle = Some(node.relative_path.clone());
+                                    }
+                                }
+                                if response.has_focus() && expandable {
+                                    let expanded = tree.is_expanded(&node.relative_path);
+                                    if ui.input(|input| {
+                                        (input.key_pressed(egui::Key::ArrowRight) && !expanded)
+                                            || (input.key_pressed(egui::Key::ArrowLeft) && expanded)
+                                    }) {
+                                        toggle = Some(node.relative_path.clone());
+                                    }
+                                }
+                                response.on_hover_ui(|ui| {
+                                    ui.monospace(node.relative_path.display().to_string());
+                                    ui.label(if present {
+                                        state_label(&node.state)
+                                    } else {
+                                        "Not present on this side"
+                                    });
+                                    if let Some(roots) = &self.roots {
+                                        ui.monospace(
+                                            roots[side]
+                                                .join(&node.relative_path)
+                                                .display()
+                                                .to_string(),
                                         );
                                     }
-                                    let expandable = node.is_expandable()
-                                        && entry.kind == Some(DirectoryEntryKind::Directory);
-                                    let keyboard_toggle = response.has_focus()
-                                        && ui.input(|input| {
-                                            input.key_pressed(egui::Key::Space)
-                                                || input.key_pressed(egui::Key::Enter)
-                                        });
-                                    if (response.double_clicked() || keyboard_toggle)
-                                        && entry.kind == Some(DirectoryEntryKind::File)
-                                    {
-                                        open = Some((
-                                            node.relative_path.clone(),
-                                            [node.left.exists, node.right.exists],
-                                            [&node.left, &node.right].into_iter().any(|entry| {
-                                                entry.exists
-                                                    && entry.kind != Some(DirectoryEntryKind::File)
-                                            }),
-                                        ));
+                                    if let DirectoryEntryState::Error(error) = &node.state {
+                                        ui.colored_label(palette.error, error.to_string());
                                     }
-                                    if response.clicked() || keyboard_toggle {
-                                        response.request_focus();
-                                        self.tree_focus_id = Some(response.id);
-                                        selected = Some(node.relative_path.clone());
-                                        if expandable {
-                                            toggle = Some(node.relative_path.clone());
-                                        }
-                                    }
-                                    if response.has_focus() && expandable {
-                                        let expanded = tree.is_expanded(&node.relative_path);
-                                        if ui.input(|input| {
-                                            (input.key_pressed(egui::Key::ArrowRight) && !expanded)
-                                                || (input.key_pressed(egui::Key::ArrowLeft)
-                                                    && expanded)
-                                        }) {
-                                            toggle = Some(node.relative_path.clone());
-                                        }
-                                    }
-                                    response.on_hover_ui(|ui| {
-                                        ui.monospace(node.relative_path.display().to_string());
-                                        ui.label(if present {
-                                            state_label(&node.state)
-                                        } else {
-                                            "Not present on this side"
-                                        });
-                                        if let Some(roots) = &self.roots {
-                                            ui.monospace(
-                                                roots[side]
-                                                    .join(&node.relative_path)
-                                                    .display()
-                                                    .to_string(),
-                                            );
-                                        }
-                                        if let DirectoryEntryState::Error(error) = &node.state {
-                                            ui.colored_label(palette.error, error.to_string());
-                                        }
-                                    });
-                                }
-                                ui.painter().line_segment(
-                                    [rect.center_top(), rect.center_bottom()],
-                                    Stroke::new(1.0, palette.border),
-                                );
+                                });
                             }
-                        });
-                    self.tree_scroll_y = output.state.offset.y;
-                    if let Some((current_path, side)) = rendered_tree_focus {
-                        let step = ui.input(|input| {
-                            if input.key_pressed(egui::Key::ArrowDown) {
-                                1_i32
-                            } else if input.key_pressed(egui::Key::ArrowUp) {
-                                -1
-                            } else {
-                                0
-                            }
-                        });
-                        if step != 0 {
-                            let current = rows
-                                .iter()
-                                .position(|row| row.node.relative_path == current_path)
-                                .unwrap_or(0);
-                            let next = (current as i32 + step)
-                                .clamp(0, rows.len().saturating_sub(1) as i32)
-                                as usize;
-                            let path = rows[next].node.relative_path.clone();
-                            tree_keyboard_focus = Some(path.clone());
-                            ui.memory_mut(|memory| {
-                                memory.data.insert_temp(pending_side_id, side);
-                            });
-                            selected = Some(path);
-                            let target_top = next as f32 * row_height;
-                            let target_bottom = target_top + row_height;
-                            let viewport_height = output.inner_rect.height();
-                            self.tree_scroll_y = if target_top < self.tree_scroll_y {
-                                target_top
-                            } else if target_bottom > self.tree_scroll_y + viewport_height {
-                                target_bottom - viewport_height
-                            } else {
-                                self.tree_scroll_y
-                            }
-                            .clamp(0.0, (rows.len() as f32 * row_height - body_height).max(0.0));
-                            ui.ctx().request_repaint();
+                            ui.painter().line_segment(
+                                [rect.center_top(), rect.center_bottom()],
+                                Stroke::new(1.0, palette.border),
+                            );
                         }
-                    }
-                    if let Some(path) = toggle {
-                        tree.toggle_expanded(path);
-                    }
-                    if let Some(path) = selected {
-                        self.selected = Some(path);
-                    }
-                    self.tree_keyboard_focus = tree_keyboard_focus;
-                } else if self.paths.iter().all(String::is_empty)
-                    && (!self.recent.entries().is_empty() || self.recent_message.is_some())
-                {
-                    self.recent_area(ui, body_height);
-                } else {
-                    let title = if self.job.is_some() {
-                        "Comparing folders…"
-                    } else if self.source_jobs.iter().any(Option::is_some) {
-                        "Opening selected source…"
-                    } else if self.mode() == SelectionMode::Incompatible {
-                        "Incompatible source types"
-                    } else if self.error.is_some() {
-                        "Cannot open selected source"
-                    } else if self.mode() == SelectionMode::Folder {
-                        "Choose another folder"
-                    } else {
-                        match self.comparison_mode {
-                            ComparisonMode::Folder => "Choose folders to compare",
-                            ComparisonMode::File => "Choose files to compare",
+                    });
+                self.tree_scroll_y = output.state.offset.y;
+                if let Some((current_path, side)) = rendered_tree_focus {
+                    let step = ui.input(|input| {
+                        if input.key_pressed(egui::Key::ArrowDown) {
+                            1_i32
+                        } else if input.key_pressed(egui::Key::ArrowUp) {
+                            -1
+                        } else {
+                            0
                         }
-                    };
-                    empty_display(ui, body_height, title, &self.message);
+                    });
+                    if step != 0 {
+                        let current = rows
+                            .iter()
+                            .position(|row| row.node.relative_path == current_path)
+                            .unwrap_or(0);
+                        let next = (current as i32 + step)
+                            .clamp(0, rows.len().saturating_sub(1) as i32)
+                            as usize;
+                        let path = rows[next].node.relative_path.clone();
+                        tree_keyboard_focus = Some(path.clone());
+                        ui.memory_mut(|memory| {
+                            memory.data.insert_temp(pending_side_id, side);
+                        });
+                        selected = Some(path);
+                        let target_top = next as f32 * row_height;
+                        let target_bottom = target_top + row_height;
+                        let viewport_height = output.inner_rect.height();
+                        self.tree_scroll_y = if target_top < self.tree_scroll_y {
+                            target_top
+                        } else if target_bottom > self.tree_scroll_y + viewport_height {
+                            target_bottom - viewport_height
+                        } else {
+                            self.tree_scroll_y
+                        }
+                        .clamp(0.0, (rows.len() as f32 * row_height - body_height).max(0.0));
+                        ui.ctx().request_repaint();
+                    }
                 }
-            });
+                if let Some(path) = toggle {
+                    tree.toggle_expanded(path);
+                }
+                if let Some(path) = selected {
+                    self.selected = Some(path);
+                }
+                self.tree_keyboard_focus = tree_keyboard_focus;
+            } else if self.paths.iter().all(String::is_empty)
+                && (!self.recent.entries().is_empty() || self.recent_message.is_some())
+            {
+                self.recent_area(ui, body_height);
+            } else {
+                let title = if self.job.is_some() {
+                    "Comparing folders…"
+                } else if self.source_jobs.iter().any(Option::is_some) {
+                    "Opening selected source…"
+                } else if self.mode() == SelectionMode::Incompatible {
+                    "Incompatible source types"
+                } else if self.error.is_some() {
+                    "Cannot open selected source"
+                } else if self.mode() == SelectionMode::Folder {
+                    "Choose another folder"
+                } else {
+                    match self.comparison_mode {
+                        ComparisonMode::Folder => "Choose folders to compare",
+                        ComparisonMode::File => "Choose files to compare",
+                    }
+                };
+                empty_display(ui, body_height, title, &self.message);
+            }
+        });
         if let Some((path, present, type_mismatch)) = open {
             self.open_file(path, present, type_mismatch);
         }
@@ -3069,7 +3093,7 @@ fn comparison_mode_button(
             egui::WidgetType::Button,
             ui.is_enabled(),
             selected,
-            mode.label(),
+            label.text(),
         )
     });
     let visuals = ui.style().interact_selectable(&response, selected);
@@ -3123,6 +3147,62 @@ fn comparison_mode_button(
     ui.painter()
         .galley_with_override_text_color(position, label, visuals.fg_stroke.color);
     response
+}
+
+fn workspace_mode_button(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {
+    let galley = ui.painter().layout_no_wrap(
+        label.into(),
+        FontId::proportional(11.0),
+        Palette::for_context(ui.ctx()).text,
+    );
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(galley.size().x + 12.0, 28.0), Sense::hover());
+    let response = ui
+        .interact(
+            rect,
+            egui::Id::new(("workspace-mode", label)),
+            Sense::click(),
+        )
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), selected, label)
+    });
+    let visuals = ui.style().interact_selectable(&response, selected);
+    if selected
+        || response.hovered()
+        || response.has_focus()
+        || response.is_pointer_button_down_on()
+    {
+        ui.painter().rect(
+            rect,
+            visuals.corner_radius,
+            visuals.weak_bg_fill,
+            visuals.bg_stroke,
+            egui::StrokeKind::Inside,
+        );
+    }
+    ui.painter().galley_with_override_text_color(
+        rect.center() - galley.size() * 0.5,
+        galley,
+        visuals.fg_stroke.color,
+    );
+    response
+}
+
+fn comparison_panel(ui: &egui::Ui) -> egui::Frame {
+    let palette = Palette::for_context(ui.ctx());
+    egui::Frame::default()
+        .fill(palette.panel)
+        .stroke(Stroke::new(1.0, palette.border))
+        .corner_radius(6)
+}
+fn paint_panel_divider(ui: &mut egui::Ui) {
+    let (divider, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), Sense::hover());
+    ui.painter().line_segment(
+        [divider.left_center(), divider.right_center()],
+        Stroke::new(1.0, Palette::for_context(ui.ctx()).border),
+    );
 }
 
 fn paint_side_label(painter: &egui::Painter, rect: Rect, side: usize, palette: Palette) {
@@ -5582,7 +5662,7 @@ mod tests {
         let view = app.file_view.as_ref().unwrap();
         assert!(!view.from_folders && view.comparison.is_none() && view.job.is_none());
         let output = render(&mut app, &ctx, vec![]);
-        assert_eq!(text_positions(&output, "File Compare").len(), 1);
+        assert_eq!(text_positions(&output, "File Diff").len(), 1);
         assert!(
             ctx.read_response(egui::Id::new("Back to folders"))
                 .is_none()
@@ -5642,7 +5722,7 @@ mod tests {
         assert_eq!(app.mode(), SelectionMode::Folder);
         assert!(app.tree.is_none() && app.job.is_none() && app.file_view.is_none());
         let output = render(&mut app, &ctx, vec![]);
-        assert_eq!(text_positions(&output, "Folder Compare").len(), 1);
+        assert_eq!(text_positions(&output, "Folder Diff").len(), 1);
         assert_eq!(
             text_positions(&output, "Drop a file or folder here").len(),
             2
@@ -5689,13 +5769,10 @@ mod tests {
                         })
                         .unwrap();
                     let folder = ctx
-                        .read_response(egui::Id::new("Folder Compare"))
+                        .read_response(egui::Id::new("Folder Diff"))
                         .unwrap()
                         .rect;
-                    let file = ctx
-                        .read_response(egui::Id::new("File Compare"))
-                        .unwrap()
-                        .rect;
+                    let file = ctx.read_response(egui::Id::new("File Diff")).unwrap().rect;
                     assert!(ctx.read_response(egui::Id::new("File Merge")).is_none());
                     assert!((folder.union(file).center().x - screen.center().x).abs() < 0.5);
                     assert!(folder.right() < file.left());
@@ -5710,7 +5787,7 @@ mod tests {
                         .unwrap()
                         .rect;
                     assert!(file.right() < theme_button.left());
-                    for (label, rect) in [("Folder Compare", folder), ("File Compare", file)] {
+                    for (label, rect) in [("Folder Diff", folder), ("File Diff", file)] {
                         assert!(screen.contains_rect(rect));
                         let text = output
                             .shapes
@@ -5733,11 +5810,11 @@ mod tests {
                         assert!(icon.right() < bounds.left());
                         assert!(
                             output.shapes.iter().any(|shape| match &shape.shape {
-                                egui::Shape::Rect(shape) if label == "Folder Compare" =>
+                                egui::Shape::Rect(shape) if label == "Folder Diff" =>
                                     icon.contains_rect(shape.rect)
                                         && shape.rect.width() == 13.0
                                         && shape.stroke.width > 0.0,
-                                egui::Shape::Path(shape) if label == "File Compare" =>
+                                egui::Shape::Path(shape) if label == "File Diff" =>
                                     shape.closed
                                         && shape.points.len() == 5
                                         && shape.points.iter().all(|point| icon.contains(*point)),
@@ -5753,14 +5830,136 @@ mod tests {
     }
 
     #[test]
+    fn header_toggle_shares_the_top_row_and_updates_centered_captions() {
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            for zoom in [1.0, 2.0] {
+                let ctx = egui::Context::default();
+                set_theme(&ctx, theme);
+                ctx.set_zoom_factor(zoom);
+                ctx.run_ui(egui::RawInput::default(), |_| {})
+                    .drop_without_applying_deltas();
+                let mut app = VersusApp::default();
+                let draw = |app: &mut VersusApp| {
+                    let mut output = ctx.run_ui(
+                        egui::RawInput {
+                            screen_rect: Some(Rect::from_min_size(
+                                Pos2::ZERO,
+                                egui::vec2(900.0 / zoom, 650.0 / zoom),
+                            )),
+                            ..Default::default()
+                        },
+                        |ui| app.render(ui),
+                    );
+                    output.textures_delta.clear();
+                    output
+                };
+                for merge in [false, true] {
+                    app.set_workspace_merge(merge);
+                    let output = draw(&mut app);
+                    let folder = ctx
+                        .read_response(egui::Id::new(ComparisonMode::Folder.label()))
+                        .unwrap()
+                        .rect;
+                    let file = ctx
+                        .read_response(egui::Id::new(ComparisonMode::File.label()))
+                        .unwrap()
+                        .rect;
+                    let toggle = ctx
+                        .read_response(egui::Id::new(("workspace-mode", "Merge")))
+                        .unwrap()
+                        .rect
+                        .union(
+                            ctx.read_response(egui::Id::new(("workspace-mode", "Diff")))
+                                .unwrap()
+                                .rect,
+                        );
+                    assert!((folder.union(file).center().x - 450.0 / zoom).abs() < 0.5);
+                    assert!((toggle.center().y - folder.center().y).abs() < 0.5);
+                    assert!(
+                        toggle.right() + 4.0 < folder.left(),
+                        "{toggle:?} overlaps {folder:?}"
+                    );
+                    assert_eq!(
+                        text_positions(&output, ComparisonMode::Folder.workspace_label(merge))
+                            .len(),
+                        1
+                    );
+                    assert_eq!(
+                        text_positions(&output, ComparisonMode::File.workspace_label(merge)).len(),
+                        1
+                    );
+                    output.drop_without_applying_deltas();
+                }
+                let toggle = ctx
+                    .read_response(egui::Id::new(("workspace-mode", "Diff")))
+                    .unwrap()
+                    .rect
+                    .center();
+                click(&mut app, &ctx, toggle);
+                assert!(!app.merge_mode);
+            }
+        }
+    }
+
+    #[test]
+    fn merge_and_diff_selectors_share_panel_and_empty_drop_styles() {
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            for mode in [ComparisonMode::Folder, ComparisonMode::File] {
+                let mut selectors = Vec::new();
+                for merge in [false, true] {
+                    let ctx = egui::Context::default();
+                    set_theme(&ctx, theme);
+                    let palette = Palette::for_context(&ctx);
+                    let mut app = VersusApp::default();
+                    app.comparison_mode = mode;
+                    app.set_workspace_merge(merge);
+                    let output = render(&mut app, &ctx, vec![]);
+                    let picker = ctx
+                        .read_response(egui::Id::new(format!(
+                            "Browse left {}",
+                            mode.source_label()
+                        )))
+                        .unwrap()
+                        .rect;
+                    let panel = output
+                        .shapes
+                        .iter()
+                        .find_map(|shape| match &shape.shape {
+                            egui::Shape::Rect(rect)
+                                if rect.fill == palette.panel
+                                    && rect.stroke == Stroke::new(1.0, palette.border)
+                                    && rect.rect.contains_rect(picker)
+                                    && rect.rect.width() > 500.0 =>
+                            {
+                                Some(rect)
+                            }
+                            _ => None,
+                        })
+                        .expect("source picker must be inside the comparison panel");
+                    assert_eq!(panel.corner_radius.nw, 6);
+                    assert_eq!(
+                        text_positions(&output, "Drop a file or folder here").len(),
+                        2
+                    );
+                    for side in 0..2 {
+                        let half = split_rect(panel.rect)[side];
+                        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::LineSegment { points, stroke } if *stroke == Stroke::new(1.0, palette.border) && half.contains(points[0]) && (points[0].distance(points[1])-6.0).abs() < 0.01)));
+                    }
+                    selectors.push(picker);
+                    output.drop_without_applying_deltas();
+                }
+                assert_eq!(selectors[0].size(), selectors[1].size());
+                assert!((selectors[0].left() - selectors[1].left()).abs() < 0.01);
+            }
+        }
+    }
+
+    #[test]
     fn compare_icons_are_clickable_and_mode_buttons_support_keyboard_activation() {
         let ctx = egui::Context::default();
         let mut app = VersusApp::default();
         render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
-        let file = ctx
-            .read_response(egui::Id::new("File Compare"))
-            .unwrap()
-            .rect;
+        let file = ctx.read_response(egui::Id::new("File Diff")).unwrap().rect;
         let icon = egui::pos2(file.left() + 12.0, file.center().y);
         let output = render(&mut app, &ctx, vec![egui::Event::PointerMoved(icon)]);
         assert_eq!(
@@ -5816,7 +6015,7 @@ mod tests {
         assert!(app.file_view.is_none() && app.tree.is_none() && app.roots.is_none());
         assert_eq!(ctx.theme(), egui::Theme::Light);
         let output = render(&mut app, &ctx, vec![]);
-        assert_eq!(text_positions(&output, "File Compare").len(), 1);
+        assert_eq!(text_positions(&output, "File Diff").len(), 1);
         assert_eq!(text_positions(&output, "Choose a folder").len(), 2);
         output.drop_without_applying_deltas();
     }
@@ -5912,7 +6111,7 @@ mod tests {
         let sender = attach_job(&mut app);
         let cancellation = app.job.as_ref().unwrap().cancellation.clone();
         let output = render(&mut app, &ctx, vec![]);
-        let file_button = text_centers(&output, "File Compare")[0];
+        let file_button = text_centers(&output, "File Diff")[0];
         output.drop_without_applying_deltas();
         click(&mut app, &ctx, file_button);
         assert_eq!(app.comparison_mode, ComparisonMode::File);
@@ -5995,7 +6194,7 @@ mod tests {
         settle_sources(&mut app, &ctx);
         let paths = app.paths.clone();
         let output = render(&mut app, &ctx, vec![]);
-        let file_button = text_centers(&output, "File Compare")[0];
+        let file_button = text_centers(&output, "File Diff")[0];
         output.drop_without_applying_deltas();
         click(&mut app, &ctx, file_button);
         assert_eq!(app.paths, paths);
@@ -6025,7 +6224,7 @@ mod tests {
         app.file_view = Some(loaded_file_view());
         let generation = app.scroll_generation;
         let output = render(&mut app, &ctx, vec![]);
-        let folder_button = text_centers(&output, "Folder Compare")[0];
+        let folder_button = text_centers(&output, "Folder Diff")[0];
         output.drop_without_applying_deltas();
         click(&mut app, &ctx, folder_button);
         assert!(app.file_view.is_none());
@@ -7376,7 +7575,7 @@ mod tests {
                     Some(egui::Id::new(if backwards {
                         "Browse right folder"
                     } else {
-                        "Folder Compare"
+                        "Folder Diff"
                     }))
                 );
                 assert!(app.tree_keyboard_focus.is_none());

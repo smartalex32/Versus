@@ -3,9 +3,10 @@
 ## Purpose
 
 Versus is an offline native engineering workspace for file or folder comparison
-on Windows and Linux. Header buttons choose Folder Compare or File Compare;
-browse opens the corresponding native picker directly. The comparison toolbar
-switches between Diff and Merge for the same open sources. Diff is read-only and
+on Windows and Linux. Centered header buttons choose Folder Diff or File Diff,
+changing to Folder Merge or File Merge with the adjacent Diff/Merge toggle.
+Browse opens the corresponding native picker directly. The toggle switches modes
+for the same open sources. Diff is read-only and
 compares automatically. Merge uses two independent editable working copies; there
 is no desktop Base pane or three-way workflow. Its optional Run Diff setting starts
 off, leaving editing, chunking, transfers, and protected ignored ranges independent
@@ -21,6 +22,7 @@ APIs and must fail cleanly when unavailable.
 - Rust 1.95 with `eframe`/`egui` (the `glow` backend) for the native UI.
 - `similar` for text differences and `rfd` for native path pickers.
 - `src/app.rs` renders the existing comparison workspace, the Diff/Merge toggle,
+  and shared comparison-panel styling for source pickers and empty drop targets,
   file/folder navigation, and mode-specific comparison options. Diff preferences
   are kept separately from Merge preferences; the three Merge options start off.
   Enabling Run Diff schedules a debounced comparison for the open pair on a

@@ -170,6 +170,38 @@ fn merge_selected_before_unrelated_files_never_starts_legacy_file_comparison() {
 }
 
 #[test]
+fn picker_selection_is_not_overwritten_by_an_older_loaded_pair_event() {
+    let sources = SourceFixture::new();
+    let ctx = egui::Context::default();
+    let mut app = VersusApp::default();
+    app.comparison_mode = ComparisonMode::File;
+    app.set_workspace_merge(true);
+    let old = [sources.path("left/one.txt"), sources.path("right/one.txt")];
+    app.paths = old.clone().map(|path| path.display().to_string());
+    app.source_paths = old.clone().map(Some);
+    app.source_kinds = [Some(SourceKind::File); 2];
+    app.merge_file_open = true;
+    app.interactive.as_mut().unwrap().open_pair(old);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while app.interactive.as_ref().unwrap().current_paths().is_none() {
+        app.interactive.as_mut().unwrap().poll(&ctx);
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(1));
+    }
+    let selected = sources.path("left/new.txt");
+    app.select_path(0, selected.clone());
+    frame(&mut app, &ctx).drop_without_applying_deltas();
+    assert_eq!(app.source_paths[0], Some(selected.clone()));
+    assert_eq!(app.source_kinds[0], None);
+    settle_sources(&mut app, &ctx);
+    settle_interactive(&mut app, &ctx);
+    assert_eq!(
+        app.interactive.as_ref().unwrap().current_paths().unwrap()[0],
+        selected
+    );
+}
+
+#[test]
 fn merge_and_diff_toggles_keep_working_copies_and_mode_specific_preferences() {
     let sources = SourceFixture::new();
     let ctx = egui::Context::default();

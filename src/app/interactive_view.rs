@@ -796,7 +796,15 @@ impl InteractiveView {
     pub(super) fn take_folder_jump(&mut self) -> Option<PathBuf> {
         self.folder_jump.take()
     }
+    #[cfg(test)]
     pub(super) fn render(&mut self, ui: &mut egui::Ui) {
+        self.render_with_sources(ui, |_| {});
+    }
+    pub(super) fn render_with_sources(
+        &mut self,
+        ui: &mut egui::Ui,
+        sources: impl FnOnce(&mut egui::Ui),
+    ) -> [Rect; 2] {
         self.folder_overview = false;
         self.poll(ui.ctx());
         self.shortcuts(ui);
@@ -809,12 +817,21 @@ impl InteractiveView {
             egui::pos2(area.right(), (area.bottom() - foot).max(area.top())),
         );
         let footer = Rect::from_min_max(egui::pos2(area.left(), body.bottom() + 4.), area.max);
-        ui.scope_builder(egui::UiBuilder::new().max_rect(body), |ui| self.panes(ui));
+        let mut panes = split_rect(body);
+        ui.scope_builder(egui::UiBuilder::new().max_rect(body), |ui| {
+            comparison_panel(ui).show(ui, |ui| {
+                ui.set_min_height((ui.available_height() - 2.0).max(0.0));
+                sources(ui);
+                panes = split_rect(ui.available_rect_before_wrap());
+                self.panes(ui);
+            });
+        });
         ui.scope_builder(egui::UiBuilder::new().max_rect(footer), |ui| {
             self.footer(ui)
         });
         self.save_preview(ui.ctx());
         self.auto_preview(ui.ctx());
+        panes
     }
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         let palette = Palette::for_context(ui.ctx());
@@ -1149,43 +1166,33 @@ impl InteractiveView {
         self.diff_options
     }
     fn panes(&mut self, ui: &mut egui::Ui) {
-        let p = Palette::for_context(ui.ctx());
         let height = ui.available_height().max(1.);
         let clip = ui.clip_rect().intersect(ui.available_rect_before_wrap());
-        egui::Frame::new()
-            .fill(p.panel)
-            .stroke(Stroke::new(1., p.border))
-            .corner_radius(6)
-            .show(ui, |ui| {
-                ui.set_clip_rect(clip);
-                if self.workspace.is_none() {
-                    empty_display(
-                        ui,
-                        height,
-                        "Choose a pair",
-                        "Open a file pair from the comparison workspace.",
-                    );
-                    return;
-                }
-                paint_drop_outline(
-                    ui.painter(),
-                    ui.available_rect_before_wrap().shrink(3.0),
-                    p.border,
+        ui.scope(|ui| {
+            ui.set_clip_rect(clip);
+            if self.workspace.is_none() {
+                empty_display(
+                    ui,
+                    height,
+                    "Choose a pair",
+                    "Open a file pair from the comparison workspace.",
                 );
-                ui.columns(2, |columns| {
-                    for side in 0..2 {
-                        egui::ScrollArea::vertical()
-                            .id_salt(("merge-pane-controls", self.generation, side))
-                            .max_height(height)
-                            .auto_shrink([false, false])
-                            .show(&mut columns[side], |ui| {
-                                self.header(ui, side);
-                                ui.separator();
-                                self.editor(ui, side, height - 35.);
-                            });
-                    }
-                });
+                return;
+            }
+            ui.columns(2, |columns| {
+                for side in 0..2 {
+                    egui::ScrollArea::vertical()
+                        .id_salt(("merge-pane-controls", self.generation, side))
+                        .max_height(height)
+                        .auto_shrink([false, false])
+                        .show(&mut columns[side], |ui| {
+                            self.header(ui, side);
+                            ui.separator();
+                            self.editor(ui, side, height - 35.);
+                        });
+                }
             });
+        });
     }
     fn header(&self, ui: &mut egui::Ui, side: usize) {
         let p = Palette::for_context(ui.ctx());

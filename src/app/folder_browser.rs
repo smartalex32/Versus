@@ -498,118 +498,112 @@ impl FolderBrowser {
         }
         let available = ui.available_height().max(80.0);
         let row_height = comparison_row_height(ui);
-        egui::Frame::new()
-            .fill(palette.panel)
-            .stroke(Stroke::new(1.0, palette.border))
-            .corner_radius(6)
-            .show(ui, |ui| {
-                let outer = ui.available_rect_before_wrap();
-                paint_drop_outline(ui.painter(), outer.shrink(3.0), palette.border);
-                let mut scroll = egui::ScrollArea::vertical()
-                    .id_salt("merge-folder-tree")
-                    .max_height(available - 5.0);
-                if let Some(index) = reveal_index {
-                    scroll = scroll.vertical_scroll_offset(index as f32 * row_height);
-                }
-                scroll.show_rows(ui, row_height, rows.len(), |ui, range| {
-                    for index in range {
-                        let (entry, depth) = &rows[index];
-                        let (rect, _) = ui.allocate_exact_size(
-                            egui::vec2(ui.available_width(), row_height),
-                            Sense::hover(),
+        ui.scope(|ui| {
+            let mut scroll = egui::ScrollArea::vertical()
+                .id_salt("merge-folder-tree")
+                .max_height(available - 5.0);
+            if let Some(index) = reveal_index {
+                scroll = scroll.vertical_scroll_offset(index as f32 * row_height);
+            }
+            scroll.show_rows(ui, row_height, rows.len(), |ui, range| {
+                for index in range {
+                    let (entry, depth) = &rows[index];
+                    let (rect, _) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), row_height),
+                        Sense::hover(),
+                    );
+                    let mut toggle = false;
+                    for (side, half) in split_rect(rect).into_iter().enumerate() {
+                        let meta = if side == 0 { &entry.left } else { &entry.right };
+                        let present = meta.is_some();
+                        let directory = meta
+                            .as_ref()
+                            .is_some_and(|m| m.kind == DirectoryEntryKind::Directory);
+                        let file = meta
+                            .as_ref()
+                            .is_some_and(|m| m.kind == DirectoryEntryKind::File);
+                        let response = ui.interact(
+                            half,
+                            ui.id().with(("merge-entry", &entry.relative_path, side)),
+                            Sense::click(),
                         );
-                        let mut toggle = false;
-                        for (side, half) in split_rect(rect).into_iter().enumerate() {
-                            let meta = if side == 0 { &entry.left } else { &entry.right };
-                            let present = meta.is_some();
-                            let directory = meta
-                                .as_ref()
-                                .is_some_and(|m| m.kind == DirectoryEntryKind::Directory);
-                            let file = meta
-                                .as_ref()
-                                .is_some_and(|m| m.kind == DirectoryEntryKind::File);
-                            let response = ui.interact(
-                                half,
-                                ui.id().with(("merge-entry", &entry.relative_path, side)),
-                                Sense::click(),
-                            );
-                            if self.selected[side].as_ref() == Some(&entry.relative_path)
-                                || response.hovered()
-                            {
-                                ui.painter().rect_filled(half, 0.0, palette.hover);
-                            }
-                            let icon = if directory {
-                                if self.expanded.contains(&entry.relative_path) {
-                                    "▾"
-                                } else {
-                                    "▸"
-                                }
-                            } else if file {
-                                "·"
+                        if self.selected[side].as_ref() == Some(&entry.relative_path)
+                            || response.hovered()
+                        {
+                            ui.painter().rect_filled(half, 0.0, palette.hover);
+                        }
+                        let icon = if directory {
+                            if self.expanded.contains(&entry.relative_path) {
+                                "▾"
                             } else {
-                                ""
-                            };
-                            let name = if present {
-                                entry
-                                    .relative_path
-                                    .file_name()
-                                    .unwrap_or_default()
-                                    .to_string_lossy()
-                                    .to_string()
-                            } else {
-                                "—".into()
-                            };
-                            let text = format!("{icon} {name}");
-                            let pos = half.left_center()
-                                + egui::vec2(
-                                    9.0 + *depth as f32 * 16.0,
-                                    -comparison_font(ui.ctx()).size / 2.0,
-                                );
-                            ui.painter().text(
-                                pos,
-                                Align2::LEFT_TOP,
-                                text,
-                                comparison_font(ui.ctx()),
-                                if present { palette.text } else { palette.muted },
+                                "▸"
+                            }
+                        } else if file {
+                            "·"
+                        } else {
+                            ""
+                        };
+                        let name = if present {
+                            entry
+                                .relative_path
+                                .file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .to_string()
+                        } else {
+                            "—".into()
+                        };
+                        let text = format!("{icon} {name}");
+                        let pos = half.left_center()
+                            + egui::vec2(
+                                9.0 + *depth as f32 * 16.0,
+                                -comparison_font(ui.ctx()).size / 2.0,
                             );
-                            if let Some(state) = states.get(&entry.relative_path) {
-                                if let Some(icon) = status_icon(state) {
-                                    paint_status_icon(
-                                        ui.painter(),
-                                        half.right_center() - egui::vec2(16.0, 0.0),
-                                        icon,
-                                    );
-                                }
-                            }
-                            if response.clicked() {
-                                if file {
-                                    self.selected[side] = Some(entry.relative_path.clone());
-                                } else if directory {
-                                    toggle = true;
-                                }
-                            }
-                            if response.double_clicked() && file {
-                                open = Some(
-                                    self.roots
-                                        .clone()
-                                        .map(|root| root.join(&entry.relative_path)),
+                        ui.painter().text(
+                            pos,
+                            Align2::LEFT_TOP,
+                            text,
+                            comparison_font(ui.ctx()),
+                            if present { palette.text } else { palette.muted },
+                        );
+                        if let Some(state) = states.get(&entry.relative_path) {
+                            if let Some(icon) = status_icon(state) {
+                                paint_status_icon(
+                                    ui.painter(),
+                                    half.right_center() - egui::vec2(16.0, 0.0),
+                                    icon,
                                 );
                             }
                         }
-                        ui.painter().line_segment(
-                            [rect.center_top(), rect.center_bottom()],
-                            Stroke::new(1.0, palette.border),
-                        );
-                        if toggle {
-                            if !self.expanded.insert(entry.relative_path.clone()) {
-                                self.expanded.remove(&entry.relative_path);
-                            } else {
-                                self.load(entry.relative_path.clone());
+                        if response.clicked() {
+                            if file {
+                                self.selected[side] = Some(entry.relative_path.clone());
+                            } else if directory {
+                                toggle = true;
                             }
+                        }
+                        if response.double_clicked() && file {
+                            open = Some(
+                                self.roots
+                                    .clone()
+                                    .map(|root| root.join(&entry.relative_path)),
+                            );
                         }
                     }
-                });
+                    ui.painter().line_segment(
+                        [rect.center_top(), rect.center_bottom()],
+                        Stroke::new(1.0, palette.border),
+                    );
+                    if toggle {
+                        if !self.expanded.insert(entry.relative_path.clone()) {
+                            self.expanded.remove(&entry.relative_path);
+                        } else {
+                            self.load(entry.relative_path.clone());
+                        }
+                    }
+                }
             });
+        });
         self.search_window(ui.ctx(), view);
         open
     }

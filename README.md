@@ -8,9 +8,10 @@ authentication or make outbound network requests at runtime.
 
 ## Use
 
-Choose **Folder Compare** or **File Compare** in the centered header to start a
-fresh workspace. Within that workspace, switch between **Diff** and **Merge** in
-the comparison toolbar without reopening sources. Diff is the default. Merge turns
+Choose **Folder Diff** or **File Diff** in the centered header to start a
+fresh workspace. The adjacent **Diff / Merge** header toggle switches the current
+workspace without reopening sources; the centered buttons become **Folder Merge**
+and **File Merge** when Merge is selected. Diff is the default. Merge turns
 the existing two panes into independent editable working copies; there is no third
 Base file. Changes remain in memory until you explicitly save. Switching between
 Diff and Merge preserves the open files and edits.
@@ -67,9 +68,9 @@ With Run Diff enabled, folder statuses include staged working copies and ignored
 ranges. The up/down controls jump to changed files and reveal their parent folders.
 
 Each comparison mode has a folder or file icon and the active mode is highlighted,
-with Folder Compare selected initially. Clicking a path area or browse icon in
+with Folder Diff selected initially. Clicking a path area or browse icon in
 either pane opens that mode's native folder or file picker directly. Selecting the
-second source starts comparison automatically in Diff mode. File Compare opens
+second source starts comparison automatically in Diff mode. File Diff opens
 the line comparison without a Back button.
 
 The **Recently compared** list appears when Versus opens and after **New
@@ -82,7 +83,7 @@ Unavailable or changed sources show an error and can be selected again.
 
 Choosing another Folder/File header option starts a fresh comparison and cancels
 pending work. Clicking the active mode preserves the current comparison; clicking
-Folder Compare while viewing a file from its tree returns to that tree. The **+**
+the Folder button while viewing a file from its tree returns to that tree. The **+**
 button at the right of the legend has the tooltip **New comparison** and clears both selections,
 results, and pending work while keeping the selected Folder/File comparison mode
 and theme. Switching between Diff and Merge preserves the current session.
