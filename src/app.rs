@@ -2030,9 +2030,7 @@ impl VersusApp {
             .max(1.0)
         });
         let galleys = std::array::from_fn::<_, 2, _>(|side| {
-            if self.source_kinds[side] == Some(SourceKind::File)
-                || merge.is_some_and(|header| header.files[side].is_some())
-            {
+            if merge.is_some() || self.source_kinds[side] == Some(SourceKind::File) {
                 left_elided_path(
                     ui.painter(),
                     &full_paths[side],
@@ -5475,6 +5473,69 @@ mod tests {
         }
         assert!(rows[0].y < 160.0, "Compact tree should begin near the top");
         output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn merge_source_paths_stay_on_one_line_and_keep_their_names_visible() {
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            for kind in [SourceKind::Folder, SourceKind::File] {
+                let ctx = egui::Context::default();
+                set_theme(&ctx, theme);
+                let mut app = VersusApp::default();
+                app.comparison_mode = if kind == SourceKind::File {
+                    ComparisonMode::File
+                } else {
+                    ComparisonMode::Folder
+                };
+                app.set_workspace_merge(true);
+                app.source_kinds = [Some(kind); 2];
+                let name = if kind == SourceKind::File {
+                    "model.rs"
+                } else {
+                    "release"
+                };
+                app.paths = [
+                    engineering_path(&format!("{}project/{name}", "é𐐀目录/".repeat(60))),
+                    engineering_path(&format!("short/{name}")),
+                ];
+                let output = render(&mut app, &ctx, vec![]);
+                let (shape, path) = output
+                    .shapes
+                    .iter()
+                    .find_map(|shape| match &shape.shape {
+                        egui::Shape::Text(text) if text.galley.text().starts_with('…') => {
+                            Some((shape, text))
+                        }
+                        _ => None,
+                    })
+                    .expect("long Merge paths should have a leading ellipsis");
+                let suffix = PathBuf::from("project").join(name);
+                assert!(path.galley.text().ends_with(suffix.to_str().unwrap()));
+                assert_eq!(path.galley.rows.len(), 1);
+                let bounds = Rect::from_min_size(path.pos, path.galley.size());
+                assert!(app.source_header_rects[0].contains_rect(bounds));
+                assert!(shape.clip_rect.contains_rect(bounds));
+                let browse = ctx
+                    .read_response(egui::Id::new(format!(
+                        "Browse left {}",
+                        if kind == SourceKind::File {
+                            "file"
+                        } else {
+                            "folder"
+                        }
+                    )))
+                    .unwrap()
+                    .rect;
+                assert!(bounds.right() < browse.left());
+                let short = text_centers(&output, &app.paths[1])[0];
+                assert!((bounds.center().y - short.y).abs() < 0.1);
+                let height = app.source_header_rects[0].height();
+                output.drop_without_applying_deltas();
+                app.paths[0] = engineering_path(&format!("short/{name}"));
+                render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+                assert_eq!(app.source_header_rects[0].height(), height);
+            }
+        }
     }
 
     #[test]

@@ -105,8 +105,10 @@ results, and pending work while keeping the selected Folder/File comparison mode
 and theme. Switching between Diff and Merge preserves the current session.
 
 Both pane headers remain available for browsing in directly selected file views.
-Folder paths wrap to show the full path; file paths use a leading ellipsis with
-the full path on hover. LEFT/RIGHT and browse stay centered beside the path.
+Merge paths stay on one line and trim the beginning with a leading ellipsis when
+needed, keeping the folder or file name visible. The full path appears on hover.
+Diff folder paths wrap; Diff file paths use the same leading ellipsis. LEFT/RIGHT
+and browse stay centered beside the path.
 The refresh icon at the upper right reloads the file comparison you are viewing,
 including files opened from a folder tree. In the folder view it compares the same
 folders again while preserving selection, expansion, and scroll position; a
