@@ -60,7 +60,9 @@ APIs and must fail cleanly when unavailable.
   side loads and scrolls independently; transfers require two loaded files.
 - `src/app/file_style.rs` shares File Diff's row backgrounds, state stripes,
   number/status gutters, inline highlights, and line-ending badges with editable
-  Merge. Transfer arrows are larger and use the source side's LEFT/RIGHT color.
+  Merge. Transfer arrows use vector geometry and the source side's LEFT/RIGHT
+  color, avoiding platform font fallback boxes. The compact line-number gutter
+  is shared by both views and reserves extra width for large line numbers.
   Each source has a separate center transfer track outside the clipped file
   content. Arrows follow that source’s independent scroll; expansion toggles
   remain inside a reserved content gutter with clearance from row highlights.

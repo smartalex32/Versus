@@ -56,6 +56,7 @@ struct ReadonlyPresentation {
     preferences: [bool; 3],
     font: FontId,
     row_height: f32,
+    gutter_extra: f32,
 }
 
 #[derive(Default)]
@@ -1717,19 +1718,27 @@ impl InteractiveView {
         // minimum when it renders, so resizing cannot leave a full-body width
         // stuck on a short file.
         let mut content_widths = [0.0_f32; 2];
+        let mut max_line_number = 1;
         for (index, row) in diff.rows.iter().enumerate() {
             if !self.diff_options[0] || row.state != DirectoryEntryState::Same {
                 rows.push(index);
             }
             for (side, line) in [&row.left, &row.right].into_iter().enumerate() {
-                if let Some((_, text)) = line {
+                if let Some((number, text)) = line {
+                    max_line_number = max_line_number.max(*number);
                     // This is deliberately the same conservative width budget
                     // as native File Diff: tabs occupy four character slots.
                     let expanded =
                         text.len() + text.bytes().filter(|byte| *byte == b'\t').count() * 3;
-                    content_widths[side] =
-                        content_widths[side].max(96.0 + expanded as f32 * font.size);
+                    content_widths[side] = content_widths[side]
+                        .max(super::file_style::TEXT_OFFSET + 28.0 + expanded as f32 * font.size);
                 }
+            }
+        }
+        let gutter_extra = super::file_style::gutter_extra(max_line_number);
+        for width in &mut content_widths {
+            if *width > 0.0 {
+                *width += gutter_extra;
             }
         }
         self.readonly_presentation = Some(ReadonlyPresentation {
@@ -1738,6 +1747,7 @@ impl InteractiveView {
             preferences: self.diff_options,
             font,
             row_height,
+            gutter_extra,
         });
         if let Some((anchor, fraction)) = self.readonly_pending_anchor.take() {
             let rows = &self.readonly_presentation.as_ref().unwrap().rows;
@@ -1878,6 +1888,7 @@ impl InteractiveView {
                 changed,
                 ending_diff.then_some(ending).flatten(),
                 navigation == Some(row_index),
+                self.readonly_presentation.as_ref().unwrap().gutter_extra,
             );
             let line = if side == 0 { &row.left } else { &row.right };
             ui.interact(
@@ -1977,6 +1988,7 @@ impl InteractiveView {
             .unwrap()
             .ignored_ranges(source)
             .to_vec();
+        let mut max_line_number = count;
         let changed: BTreeMap<usize, (DirectoryEntryState, Vec<Range<usize>>)> = self
             .diff
             .as_ref()
@@ -1984,6 +1996,9 @@ impl InteractiveView {
                 diff.rows
                     .iter()
                     .filter_map(|row| {
+                        for (number, _) in row.left.iter().chain(row.right.iter()) {
+                            max_line_number = max_line_number.max(*number);
+                        }
                         let line = if side == 0 { &row.left } else { &row.right };
                         let ranges = if side == 0 {
                             &row.left_changed
@@ -1996,6 +2011,7 @@ impl InteractiveView {
                     .collect()
             })
             .unwrap_or_default();
+        let gutter_extra = super::file_style::gutter_extra(max_line_number);
         let filtering_same = self.run_diff && self.merge_options[0] && self.diff.is_some();
         let projection = filtering_same.then(|| merge_projection(&displayed, &changed));
         if projection
@@ -2102,7 +2118,7 @@ impl InteractiveView {
             .max_height(text_height)
             .vertical_scroll_offset(self.scroll[side])
             .show(ui, |ui| {
-                let number_width = 64.0;
+                let number_width = super::file_style::TEXT_OFFSET - 4.0 + gutter_extra;
                 let gutter_width = if merge_controls { 32.0 } else { 0.0 };
                 let width = ui.available_width().max(180.0);
                 let text_width = (width - number_width - gutter_width - 12.0).max(80.0);
@@ -2148,6 +2164,7 @@ impl InteractiveView {
                         Rect::from_min_size(egui::pos2(numbers_x, row_rect.top()), row_rect.size()),
                         line + 1,
                         state,
+                        gutter_extra,
                     );
                     if let Some((state, ranges)) = changed.get(&line) {
                         let slot = ui.painter().add(egui::Shape::Noop);
@@ -2399,7 +2416,7 @@ impl InteractiveView {
                             ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
                                 ui.set_clip_rect(track_clip);
                                 let tooltip=if expanded{format!("Copy line {} to the chosen target",line+1)}else{format!("Copy chunk {}–{} to the chosen target · Right-click for chunk controls",run.start+1,run.end)};
-                                let response=transfer_action(ui,rect,egui::Id::new(("two-way-transfer",side,chunk.id,line)),if side==0{"→"}else{"←"},side,&tooltip);
+                                let response=transfer_action(ui,rect,egui::Id::new(("two-way-transfer",side,chunk.id,line)),side,&tooltip);
                                 if response.clicked() {
                                     pending_transfer = Some(if expanded {
                                         line..line + 1
@@ -3150,7 +3167,6 @@ fn transfer_action(
     ui: &egui::Ui,
     rect: Rect,
     id: egui::Id,
-    glyph: &str,
     side: usize,
     label: &str,
 ) -> egui::Response {
@@ -3166,12 +3182,15 @@ fn transfer_action(
         ui.painter()
             .rect_filled(rect.shrink(1.0), 2.0, palette.hover);
     }
-    ui.painter().text(
-        rect.center(),
-        Align2::CENTER_CENTER,
-        glyph,
-        FontId::proportional(18.0),
-        color,
+    // Vector geometry avoids missing-glyph boxes in platform font fallbacks.
+    let direction = if side == 0 { 1.0 } else { -1.0 };
+    let point = |x: f32, y: f32| rect.center() + egui::vec2(x * direction, y);
+    let stroke = Stroke::new(2.0, color);
+    ui.painter()
+        .line_segment([point(-8.0, 0.0), point(8.0, 0.0)], stroke);
+    ui.painter().line(
+        vec![point(0.0, -5.0), point(8.0, 0.0), point(0.0, 5.0)],
+        stroke,
     );
     response
         .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -4151,8 +4170,9 @@ mod tests {
             .map(|index| format!("left\tline {index}").len() + 3)
             .max()
             .unwrap();
-        let expected_left_width =
-            96.0 + longest_left as f32 * view.readonly_presentation.as_ref().unwrap().font.size;
+        let expected_left_width = super::file_style::TEXT_OFFSET
+            + 28.0
+            + longest_left as f32 * view.readonly_presentation.as_ref().unwrap().font.size;
         assert_eq!(first_widths[0], expected_left_width);
         let mut row_height = 0.0;
         ctx.run_ui(egui::RawInput::default(), |ui| {
@@ -4447,10 +4467,33 @@ mod tests {
                         } else {
                             assert!(toggle.left() >= tracks[side].right() + 5.0);
                         }
-                        for shape in output.shapes.iter().filter(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == if side == 0 { "→" } else { "←" })) {
-                            assert!(shape.clip_rect.left() >= tracks[side].left());
-                            assert!(shape.clip_rect.right() <= tracks[side].right());
-                        }
+                        let color = if side == 0 {
+                            Palette::for_context(&ctx).left_only
+                        } else {
+                            Palette::for_context(&ctx).right_only
+                        };
+                        let head = output
+                            .shapes
+                            .iter()
+                            .find_map(|shape| match &shape.shape {
+                                egui::Shape::Path(path)
+                                    if path.stroke.color
+                                        == egui::epaint::ColorMode::Solid(color)
+                                        && path
+                                            .points
+                                            .iter()
+                                            .all(|point| arrow.contains(*point)) =>
+                                {
+                                    Some((path, shape.clip_rect))
+                                }
+                                _ => None,
+                            })
+                            .expect("each track has a vector arrow");
+                        assert!(
+                            head.1.left() >= tracks[side].left()
+                                && head.1.right() <= tracks[side].right()
+                        );
+                        assert_eq!(head.0.points[1].x > head.0.points[0].x, side == 0);
                     }
                     output.drop_without_applying_deltas();
                     let first_left = chunks[0][0].range.start + usize::from(run_diff);
@@ -4510,19 +4553,24 @@ mod tests {
                 .rect;
             assert!(arrow.width() >= 30.0);
             assert!(arrow.width() > granularity.width());
-            let glyph = output
+            let arrow_head = output
                 .shapes
                 .iter()
                 .find_map(|shape| match &shape.shape {
-                    egui::Shape::Text(text) if text.galley.text() == "→" => Some(text),
+                    egui::Shape::Path(path)
+                        if path.stroke.color
+                            == egui::epaint::ColorMode::Solid(
+                                Palette::for_context(&ctx).left_only,
+                            )
+                            && path.points.iter().all(|point| arrow.contains(*point)) =>
+                    {
+                        Some(path)
+                    }
                     _ => None,
                 })
-                .expect("transfer arrow should be painted");
-            assert_eq!(glyph.galley.job.sections[0].format.font_id.size, 18.0);
-            assert_eq!(
-                glyph.galley.job.sections[0].format.color,
-                Palette::for_context(&ctx).left_only
-            );
+                .expect("copy control should draw a vector arrow");
+            assert_eq!(arrow_head.stroke.width, 2.0);
+            assert!(arrow_head.points[1].x > arrow_head.points[0].x);
             output.drop_without_applying_deltas();
             for id in [
                 egui::Id::new(("two-way-transfer", 0usize, chunk.id, chunk.range.start)),

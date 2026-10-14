@@ -186,6 +186,7 @@ struct FileView {
     error_icon: StatusIcon,
     scroll_y: f32,
     content_widths: [f32; 2],
+    gutter_extra: f32,
     counts: [usize; 6],
     visible_rows: Vec<usize>,
     difference_rows: Vec<usize>,
@@ -1040,6 +1041,7 @@ impl VersusApp {
             error_icon: if type_mismatch { StatusIcon::TypeMismatch } else { StatusIcon::Error },
             scroll_y: 0.0,
             content_widths: [0.0; 2],
+            gutter_extra: 0.0,
             counts: [0; 6],
             visible_rows: Vec::new(),
             difference_rows: Vec::new(),
@@ -1084,15 +1086,24 @@ impl VersusApp {
                     view.counts = [0; 6];
                     view.content_widths = [0.0; 2];
                     let font_width = comparison_font(ctx).size;
+                    let mut max_line_number = 1;
                     for row in &comparison.rows {
                         view.counts[state_index(&row.state)] += 1;
                         for (side, line) in [&row.left, &row.right].into_iter().enumerate() {
-                            if let Some((_, text)) = line {
+                            if let Some((number, text)) = line {
+                                max_line_number = max_line_number.max(*number);
                                 view.content_widths[side] = view.content_widths[side].max(
-                                    96.0 + (text.len() + text.matches('\t').count() * 3) as f32
-                                        * font_width,
+                                    (file_style::TEXT_OFFSET + 28.0)
+                                        + (text.len() + text.matches('\t').count() * 3) as f32
+                                            * font_width,
                                 );
                             }
+                        }
+                    }
+                    view.gutter_extra = file_style::gutter_extra(max_line_number);
+                    for width in &mut view.content_widths {
+                        if *width > 0.0 {
+                            *width += view.gutter_extra;
                         }
                     }
                     view.comparison = Some(comparison);
@@ -2781,6 +2792,7 @@ impl VersusApp {
                             changed,
                             ending_diff.then_some(ending).flatten(),
                             view.navigation_row == Some(original_index),
+                            view.gutter_extra,
                         );
                         let line_response = ui.interact(
                             rect.intersect(viewport),
@@ -3868,6 +3880,7 @@ fn paint_file_line(
     changed: &[std::ops::Range<usize>],
     ending: Option<versus::DisplayLineEnding>,
     selected: bool,
+    gutter_extra: f32,
 ) {
     let palette = Palette::for_context(painter.ctx());
     let painter = painter.with_clip_rect(rect);
@@ -3875,7 +3888,7 @@ fn paint_file_line(
     file_style::paint_background(&painter, rect, state, alternate, selected);
     let Some((number, text)) = line else {
         painter.text(
-            rect.left_center() + egui::vec2(66.0, 0.0),
+            rect.left_center() + egui::vec2(file_style::TEXT_OFFSET - 2.0 + gutter_extra, 0.0),
             Align2::LEFT_CENTER,
             "—",
             comparison_font(painter.ctx()),
@@ -3883,7 +3896,7 @@ fn paint_file_line(
         );
         return;
     };
-    file_style::paint_gutter(&painter, rect, *number, state);
+    file_style::paint_gutter(&painter, rect, *number, state, gutter_extra);
     let mut job = egui::text::LayoutJob::default();
     file_style::append_text(
         &mut job,
@@ -3895,7 +3908,10 @@ fn paint_file_line(
         None,
     );
     let galley = painter.layout_job(job);
-    let position = egui::pos2(rect.left() + 68.0, rect.center().y - galley.size().y / 2.0);
+    let position = egui::pos2(
+        rect.left() + file_style::TEXT_OFFSET + gutter_extra,
+        rect.center().y - galley.size().y / 2.0,
+    );
     let end_x = position.x + galley.size().x;
     painter.galley(position, galley, color);
     if let Some(ending) = ending {
@@ -5936,6 +5952,7 @@ mod tests {
             error_icon: StatusIcon::Error,
             scroll_y: 0.0,
             content_widths: [300.0; 2],
+            gutter_extra: 0.0,
             counts: [1, 1, 1, 0, 0, 0],
             visible_rows: vec![0, 1, 2],
             difference_rows: vec![1, 2],

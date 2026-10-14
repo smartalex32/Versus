@@ -38,23 +38,36 @@ pub(super) fn paint_background(
     }
 }
 
+pub(super) const TEXT_OFFSET: f32 = 56.0;
+
+/// Keep the normal gutter compact and reserve extra space for wide line numbers.
+pub(super) fn gutter_extra(line_count: usize) -> f32 {
+    let digits = line_count.max(1).ilog10() + 1;
+    digits.saturating_sub(4) as f32 * 6.0
+}
+
 /// Paint the line number and status icon at the fixed File Diff gutter slots.
 pub(super) fn paint_gutter(
     painter: &egui::Painter,
     rect: Rect,
     number: usize,
     state: &DirectoryEntryState,
+    extra: f32,
 ) {
     let palette = Palette::for_context(painter.ctx());
     painter.text(
-        rect.left_center() + egui::vec2(42.0, 0.0),
+        rect.left_center() + egui::vec2(30.0 + extra, 0.0),
         Align2::RIGHT_CENTER,
         number.to_string(),
         FontId::monospace(10.0),
         palette.muted,
     );
     if let Some(icon) = status_icon(state) {
-        paint_status_icon(painter, rect.left_center() + egui::vec2(54.0, 0.0), icon);
+        paint_status_icon(
+            painter,
+            rect.left_center() + egui::vec2(42.0 + extra, 0.0),
+            icon,
+        );
     }
 }
 
@@ -369,6 +382,63 @@ mod tests {
                     }
                 })
                 .drop_without_applying_deltas();
+            }
+        }
+    }
+
+    #[test]
+    fn compact_gutter_keeps_small_and_wide_line_numbers_clear_of_the_diff_bar() {
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            for zoom in [1.0, 2.0] {
+                for number in [1usize, 9999, 10_000, 99_999_999] {
+                    let ctx = egui::Context::default();
+                    set_theme(&ctx, theme);
+                    ctx.set_zoom_factor(zoom);
+                    let rect =
+                        Rect::from_min_size(egui::pos2(100.0, 80.0), egui::vec2(300.0, 24.0));
+                    let extra = gutter_extra(number);
+                    let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                        paint_background(
+                            ui.painter(),
+                            rect,
+                            &DirectoryEntryState::Different,
+                            false,
+                            false,
+                        );
+                        paint_gutter(
+                            ui.painter(),
+                            rect,
+                            number,
+                            &DirectoryEntryState::Different,
+                            extra,
+                        );
+                    });
+                    let label = output
+                        .shapes
+                        .iter()
+                        .find_map(|shape| match &shape.shape {
+                            egui::Shape::Text(text) if text.galley.text() == number.to_string() => {
+                                Some(text)
+                            }
+                            _ => None,
+                        })
+                        .unwrap();
+                    assert!(
+                        label.pos.x >= rect.left() + 5.0,
+                        "wide numbers must clear the three-pixel bar"
+                    );
+                    assert!(
+                        label.pos.x + label.galley.size().x < rect.left() + 42.0 + extra - 5.0,
+                        "numbers must clear the status icon"
+                    );
+                    if number == 1 {
+                        assert!(
+                            label.pos.x < rect.left() + 25.0,
+                            "ordinary numbers move closer to the diff bar"
+                        );
+                    }
+                    output.drop_without_applying_deltas();
+                }
             }
         }
     }

@@ -44,7 +44,7 @@ pane loads, expands, and scrolls independently; a single selected source opens i
 controls and file comparison assistance become available once both files are open.
 
 With Run Diff enabled, Merge uses File Diff's row colors, status icons, changed-text
-highlights, and line-ending badges. Transfer arrows use the source side's color
+highlights, and line-ending badges. Transfer arrows are drawn toward the destination and use the source side's color
 and sit in two bordered tracks between the file panes: left-to-right copies in
 the left track, right-to-left copies in the right track. The line-expansion
 buttons stay inside the file panes, separated from highlighted text.
