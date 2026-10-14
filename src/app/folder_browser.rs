@@ -718,7 +718,7 @@ impl FolderBrowser {
                     painter.rect_filled(
                         Rect::from_min_size(rect.min, egui::vec2(3.0, rect.height())),
                         0,
-                        color,
+                        state_bar_color(&state, palette, painter.ctx()),
                     );
                 }
                 let x = rect.left() + 8.0 + *depth as f32 * 14.0;

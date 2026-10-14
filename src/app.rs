@@ -4130,6 +4130,15 @@ fn state_color(state: &DirectoryEntryState, palette: Palette) -> Color32 {
     status_icon(state).map_or(palette.muted, |icon| icon.color(palette))
 }
 
+fn state_bar_color(state: &DirectoryEntryState, palette: Palette, ctx: &egui::Context) -> Color32 {
+    let color = state_color(state, palette);
+    if ctx.theme() == egui::Theme::Light {
+        color.lerp_to_gamma(Color32::WHITE, 0.4)
+    } else {
+        color
+    }
+}
+
 fn paint_status_icon(painter: &egui::Painter, center: Pos2, icon: StatusIcon) {
     let palette = Palette::for_context(painter.ctx());
     let stroke = Stroke::new(1.3, icon.color(palette));
@@ -4912,7 +4921,7 @@ fn paint_row(ui: &egui::Ui, rect: Rect, node: &TreeNode, side: usize, appearance
         painter.rect_filled(
             Rect::from_min_size(rect.min, egui::vec2(3.0, rect.height())),
             0,
-            color,
+            state_bar_color(state, palette, painter.ctx()),
         );
     }
     let x = rect.left() + 8.0 + depth as f32 * 14.0;

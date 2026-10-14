@@ -16,7 +16,7 @@ pub(super) fn paint_background(
     selected: bool,
 ) {
     let palette = Palette::for_context(painter.ctx());
-    let color = state_color(state, palette);
+    let color = state_bar_color(state, palette, painter.ctx());
     painter.rect_filled(
         rect,
         0,
