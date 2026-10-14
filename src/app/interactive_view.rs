@@ -1644,13 +1644,52 @@ impl InteractiveView {
             self.readonly_editor(ui, side, height);
             return;
         }
-        egui::ScrollArea::vertical()
-            .id_salt(("merge-pane-controls", self.side_generation[side], side))
-            .max_height(height)
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                self.editor(ui, side, height);
-            });
+        let pane = ui.available_rect_before_wrap();
+        let track = self.has_actual_pair().then(|| {
+            let width = 38.0;
+            let rect = if side == 0 {
+                Rect::from_min_max(egui::pos2(pane.right() - width, pane.top()), pane.max)
+            } else {
+                Rect::from_min_max(pane.min, egui::pos2(pane.left() + width, pane.bottom()))
+            };
+            let palette = Palette::for_context(ui.ctx());
+            ui.painter().rect_filled(rect, 0.0, palette.background);
+            for x in [rect.left(), rect.right()] {
+                ui.painter().line_segment(
+                    [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+                    Stroke::new(1.0, palette.border),
+                );
+            }
+            ui.interact(
+                rect,
+                egui::Id::new(("merge-transfer-track", side)),
+                Sense::hover(),
+            );
+            rect
+        });
+        let content = track.map_or(pane, |track| {
+            if side == 0 {
+                Rect::from_min_max(pane.min, egui::pos2(track.left(), pane.bottom()))
+            } else {
+                Rect::from_min_max(egui::pos2(track.right(), pane.top()), pane.max)
+            }
+        });
+        let pane_clip = ui.clip_rect();
+        ui.scope_builder(egui::UiBuilder::new().max_rect(content), |ui| {
+            ui.set_clip_rect(content.intersect(pane_clip));
+            egui::ScrollArea::vertical()
+                .id_salt(("merge-pane-controls", self.side_generation[side], side))
+                .max_height(height)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    self.editor(
+                        ui,
+                        side,
+                        height,
+                        track.map(|rect| rect.intersect(pane_clip)),
+                    );
+                });
+        });
     }
     fn ensure_readonly_presentation(&mut self, ui: &egui::Ui) {
         let font = comparison_font(ui.ctx());
@@ -1920,7 +1959,7 @@ impl InteractiveView {
             );
         }
     }
-    fn editor(&mut self, ui: &mut egui::Ui, side: usize, height: f32) {
+    fn editor(&mut self, ui: &mut egui::Ui, side: usize, height: f32, track: Option<Rect>) {
         let palette = Palette::for_context(ui.ctx());
         let source = side_of(side);
         let current = self.workspace.as_ref().unwrap().text(source).to_owned();
@@ -2064,7 +2103,7 @@ impl InteractiveView {
             .vertical_scroll_offset(self.scroll[side])
             .show(ui, |ui| {
                 let number_width = 64.0;
-                let gutter_width = if merge_controls { 58.0 } else { 0.0 };
+                let gutter_width = if merge_controls { 32.0 } else { 0.0 };
                 let width = ui.available_width().max(180.0);
                 let text_width = (width - number_width - gutter_width - 12.0).max(80.0);
                 let origin = ui.cursor().min;
@@ -2094,8 +2133,8 @@ impl InteractiveView {
                         .map(|(state, _)| state)
                         .unwrap_or(&DirectoryEntryState::Same);
                     let row_rect = Rect::from_min_size(
-                        egui::pos2(origin.x, origin.y + display_line as f32 * row_height),
-                        egui::vec2(width, row_height),
+                        egui::pos2(numbers_x, origin.y + display_line as f32 * row_height),
+                        egui::vec2(width - gutter_width, row_height),
                     );
                     super::file_style::paint_background(
                         ui.painter(),
@@ -2348,11 +2387,17 @@ impl InteractiveView {
                                 .position(|visible| *visible == line)
                                 .unwrap();
                             let y = origin.y + display_line as f32 * row_height;
+                            let track = track.expect("loaded merge pair has transfer tracks");
+                            let track_clip = Rect::from_min_max(
+                                egui::pos2(track.left(), track.top().max(ui.clip_rect().top())),
+                                egui::pos2(track.right(), track.bottom().min(ui.clip_rect().bottom())),
+                            );
                             let rect = Rect::from_min_size(
-                                egui::pos2(gutter_x + 24.0, y),
+                                egui::pos2(track.center().x - 15.0, y),
                                 egui::vec2(30.0, row_height),
                             );
                             ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                                ui.set_clip_rect(track_clip);
                                 let tooltip=if expanded{format!("Copy line {} to the chosen target",line+1)}else{format!("Copy chunk {}–{} to the chosen target · Right-click for chunk controls",run.start+1,run.end)};
                                 let response=transfer_action(ui,rect,egui::Id::new(("two-way-transfer",side,chunk.id,line)),if side==0{"→"}else{"←"},side,&tooltip);
                                 if response.clicked() {
@@ -2395,7 +2440,7 @@ impl InteractiveView {
                             .position(|line| *line == first_visible)
                             .unwrap();
                         let toggle = Rect::from_min_size(
-                            egui::pos2(gutter_x, origin.y + first_display as f32 * row_height),
+                            egui::pos2(gutter_x + 5.0, origin.y + first_display as f32 * row_height),
                             egui::vec2(21.0, row_height),
                         );
                         ui.scope_builder(egui::UiBuilder::new().max_rect(toggle), |ui| {
@@ -3100,7 +3145,7 @@ fn inline_action(
 
 /// Larger, side-colored transfer arrows use the same palette slots as File
 /// Diff's left-only and right-only status icons.  This stays separate from the
-/// smaller expand/collapse controls in the same gutter.
+/// smaller expand/collapse controls kept inside the file content.
 fn transfer_action(
     ui: &egui::Ui,
     rect: Rect,
@@ -4336,6 +4381,108 @@ mod tests {
                 egui::CursorIcon::PointingHand
             );
             output.drop_without_applying_deltas();
+        }
+    }
+
+    #[test]
+    fn transfer_tracks_are_outside_content_and_follow_independent_source_scrolls() {
+        let left: String = (0..35)
+            .map(|i| format!("fn block_{i}() {{\n    left_{i}();\n}}\n"))
+            .collect();
+        let right: String = (0..35)
+            .map(|i| format!("fn block_{i}() {{\n    right_{i}();\n}}\n"))
+            .collect();
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            for zoom in [1.0, 2.0] {
+                for run_diff in [false, true] {
+                    let ctx = egui::Context::default();
+                    set_theme(&ctx, theme);
+                    ctx.set_zoom_factor(zoom);
+                    let mut view = view(&left, &right);
+                    if run_diff {
+                        view.set_run_diff(true);
+                        view.diff = compare_loaded_text(
+                            [&left, &right],
+                            &AtomicBool::new(false),
+                            &FileViewOptions::default(),
+                            [&[], &[]],
+                        )
+                        .unwrap();
+                    }
+                    let chunks = [
+                        view.workspace.as_ref().unwrap().chunks(TwoWaySide::Left),
+                        view.workspace.as_ref().unwrap().chunks(TwoWaySide::Right),
+                    ];
+                    for _ in 0..3 {
+                        frame(&mut view, &ctx, vec![]).drop_without_applying_deltas();
+                    }
+                    let output = frame(&mut view, &ctx, vec![]);
+                    let tracks: [Rect; 2] = std::array::from_fn(|side| {
+                        ctx.read_response(egui::Id::new(("merge-transfer-track", side)))
+                            .unwrap()
+                            .rect
+                    });
+                    assert!(tracks[0].right() <= tracks[1].left());
+                    for side in 0..2 {
+                        assert_eq!(tracks[side].width(), 38.0);
+                        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Rect(rect) if rect.rect == tracks[side] && rect.fill == Palette::for_context(&ctx).background)));
+                        let chunk = &chunks[side][0];
+                        let line = chunk.range.start + usize::from(run_diff);
+                        let arrow = ctx
+                            .read_response(egui::Id::new((
+                                "two-way-transfer",
+                                side,
+                                chunk.id,
+                                line,
+                            )))
+                            .unwrap()
+                            .rect;
+                        let toggle = ctx
+                            .read_response(egui::Id::new(("two-way-granularity", side, chunk.id)))
+                            .unwrap()
+                            .rect;
+                        assert!(tracks[side].contains_rect(arrow));
+                        if side == 0 {
+                            assert!(toggle.right() + 5.0 <= tracks[side].left());
+                        } else {
+                            assert!(toggle.left() >= tracks[side].right() + 5.0);
+                        }
+                        for shape in output.shapes.iter().filter(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == if side == 0 { "→" } else { "←" })) {
+                            assert!(shape.clip_rect.left() >= tracks[side].left());
+                            assert!(shape.clip_rect.right() <= tracks[side].right());
+                        }
+                    }
+                    output.drop_without_applying_deltas();
+                    let first_left = chunks[0][0].range.start + usize::from(run_diff);
+                    let first_right = chunks[1][0].range.start + usize::from(run_diff);
+                    let left_id =
+                        egui::Id::new(("two-way-transfer", 0usize, chunks[0][0].id, first_left));
+                    let right_id =
+                        egui::Id::new(("two-way-transfer", 1usize, chunks[1][0].id, first_right));
+                    let left_y = ctx.read_response(left_id).unwrap().rect.top();
+                    let right_y = ctx.read_response(right_id).unwrap().rect.top();
+                    view.scroll[0] = 50.0;
+                    for _ in 0..3 {
+                        frame(&mut view, &ctx, vec![]).drop_without_applying_deltas();
+                    }
+                    assert!(ctx.read_response(left_id).unwrap().rect.top() < left_y - 20.0);
+                    assert!(
+                        (ctx.read_response(right_id).unwrap().rect.top() - right_y).abs() < 0.1
+                    );
+                    view.destination[0] = 0;
+                    click(&mut view, &ctx, right_id);
+                    let copied = if run_diff {
+                        "    right_0();\n"
+                    } else {
+                        "fn block_0() {\n    right_0();\n}\n"
+                    };
+                    assert_eq!(
+                        view.working_text(0),
+                        Some(format!("{copied}{left}").as_str())
+                    );
+                    assert_eq!(view.working_text(1), Some(right.as_str()));
+                }
+            }
         }
     }
 

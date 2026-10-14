@@ -44,7 +44,10 @@ pane loads, expands, and scrolls independently; a single selected source opens i
 controls and file comparison assistance become available once both files are open.
 
 With Run Diff enabled, Merge uses File Diff's row colors, status icons, changed-text
-highlights, and line-ending badges. Transfer arrows use the source side's color.
+highlights, and line-ending badges. Transfer arrows use the source side's color
+and sit in two bordered tracks between the file panes: left-to-right copies in
+the left track, right-to-left copies in the right track. The line-expansion
+buttons stay inside the file panes, separated from highlighted text.
 Switching to File Diff keeps one path header per side and provides Refresh, with
 the same aligned comparison rows as a new File Diff. Edits and undo history remain
 available when returning to Merge; Refresh compares the retained working copies.

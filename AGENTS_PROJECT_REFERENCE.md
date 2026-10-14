@@ -61,6 +61,9 @@ APIs and must fail cleanly when unavailable.
 - `src/app/file_style.rs` shares File Diff's row backgrounds, state stripes,
   number/status gutters, inline highlights, and line-ending badges with editable
   Merge. Transfer arrows are larger and use the source side's LEFT/RIGHT color.
+  Each source has a separate center transfer track outside the clipped file
+  content. Arrows follow that source’s independent scroll; expansion toggles
+  remain inside a reserved content gutter with clearance from row highlights.
   Switching an open merge pair to Diff paints aligned read-only rows through the
   File Diff painter, with one source header and Refresh in the header toolbar.
   Read-only row visibility and widths are cached per comparison/preferences/font;
