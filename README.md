@@ -23,8 +23,11 @@ difference highlighting, navigation, and destination suggestions within the
 editors. Diff work is debounced for the open pair and can be cancelled. Turning
 Run Diff off cancels pending work and clears highlighting.
 The three comparison options (Show only differences, Ignore whitespace, Ignore
-line endings) have separate settings in Diff and Merge; their Merge settings start
-off and do not change Diff preferences.
+line endings) have separate settings in Diff and Merge. Enabling Run Diff for the
+first time defaults all three to on; later toggles preserve your Merge choices
+without changing Diff preferences. Show only differences hides unchanged lines
+without removing them from the working copies. Turn the filter off to edit a
+selection that spans hidden lines.
 
 Run Diff sits in the header beside the theme button; when enabled, the refresh
 icon appears immediately to its right. Merge keeps New comparison (+) on the left
@@ -56,11 +59,10 @@ adjust manual chunks. Ignored line ranges are managed independently on each side
 They stay in the file and block transfers or replacement targets that would
 overwrite protected lines; you can still type directly in an ignored range. The
 automatic transfer and search replacement paths respect those protections.
-The centered toolbar has **Accept All Left**, **Accept All Right**, **Auto Merge
-Non-Conflicts**, **Undo**, and **Redo** icons with tooltips. Accept All copies that
-side into the other as one undoable operation, subject to protection. Auto Merge
-opens a preview of incoming-only insertions with matching boundary context; it
-does not guess replacements. Undo and Redo cover edits, transfers, chunk changes,
+The centered toolbar has **Accept All Left**, **Accept All Right**, **Undo**, and
+**Redo** icons with tooltips. Accept All copies that side into the other as one
+undoable operation, subject to protection. Automatic conflict merging belongs to
+the separate three-way CLI workflow. Undo and Redo cover edits, transfers, chunk changes,
 and ignored-range changes. They are also available in the toolbar;
 Ctrl/Command+Z and Ctrl+Y or Command+Shift+Z work while editing.
 

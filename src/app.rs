@@ -4457,7 +4457,6 @@ enum ToolbarIcon {
     AcceptAllRight,
     Undo,
     Redo,
-    AutoMerge,
     ZoomIn,
     ZoomOut,
     Search,
@@ -4585,25 +4584,6 @@ fn icon_button_content(
                         stroke,
                     );
                 }
-            }
-            ToolbarIcon::AutoMerge => {
-                ui.painter().line(
-                    vec![
-                        point(-6.0, -6.0),
-                        point(-6.0, -2.0),
-                        point(0.0, 2.0),
-                        point(0.0, 6.0),
-                    ],
-                    stroke,
-                );
-                ui.painter().line(
-                    vec![point(6.0, -6.0), point(6.0, -2.0), point(0.0, 2.0)],
-                    stroke,
-                );
-                ui.painter().line(
-                    vec![point(-3.0, 3.0), point(0.0, 6.0), point(3.0, 3.0)],
-                    stroke,
-                );
             }
             ToolbarIcon::Redo => {
                 ui.painter().line(
@@ -6408,6 +6388,19 @@ mod tests {
         settle_sources(&mut app, &ctx);
         assert!(app.tree.is_some() && app.error.is_none());
         assert_eq!(app.counts[1..], [0; 5]);
+        let output = render(&mut app, &ctx, vec![]);
+        assert_eq!(text_positions(&output, "model.txt").len(), 0);
+        output.drop_without_applying_deltas();
+        let filter = ctx
+            .read_response(egui::Id::new("Show only differences"))
+            .unwrap()
+            .rect
+            .center();
+        click(&mut app, &ctx, filter);
+        assert_eq!(
+            app.interactive.as_ref().unwrap().merge_options(),
+            [false, true, true]
+        );
         for _ in 0..3 {
             let output = render(&mut app, &ctx, vec![]);
             assert_eq!(text_positions(&output, "0 changes").len(), 1);
@@ -6855,6 +6848,98 @@ mod tests {
     }
 
     #[test]
+    fn filtered_merge_typing_after_hidden_lines_preserves_source_text_and_undo() {
+        let fixture = SourceFixture::new();
+        let left = "prefix\noldfirst\nmiddle\noldsecond\nsuffix\n";
+        let right = "prefix\nnewfirst\nmiddle\nnewsecond\nsuffix\n";
+        std::fs::write(fixture.path("left/model.txt"), left).unwrap();
+        std::fs::write(fixture.path("right/model.txt"), right).unwrap();
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut app = VersusApp::default();
+        app.comparison_mode = ComparisonMode::File;
+        app.set_workspace_merge(true);
+        app.select_path(0, fixture.path("left/model.txt"));
+        app.select_path(1, fixture.path("right/model.txt"));
+        settle_merge_file(&mut app, &ctx, 0, left);
+        settle_merge_file(&mut app, &ctx, 1, right);
+        app.interactive.as_mut().unwrap().set_run_diff(true);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app
+            .interactive
+            .as_ref()
+            .unwrap()
+            .loaded_pair_comparison()
+            .is_none()
+        {
+            app.interactive.as_mut().unwrap().poll(&ctx);
+            assert!(Instant::now() < deadline, "Merge comparison did not finish");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        for _ in 0..3 {
+            render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+        }
+        let output = render(&mut app, &ctx, vec![]);
+        let position = text_positions(&output, "oldfirst\noldsecond\n")[0];
+        let font = comparison_font(&ctx);
+        let row_height =
+            ROW_HEIGHT.max(ctx.fonts_mut(|fonts| fonts.row_height(&font)).ceil() + 8.0);
+        output.drop_without_applying_deltas();
+        click(&mut app, &ctx, position + egui::vec2(1.0, row_height + 6.0));
+        render(&mut app, &ctx, vec![egui::Event::Text("X".into())]).drop_without_applying_deltas();
+        assert_eq!(
+            app.interactive.as_ref().unwrap().working_text(0),
+            Some("prefix\noldfirst\nmiddle\nXoldsecond\nsuffix\n")
+        );
+        render(
+            &mut app,
+            &ctx,
+            vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        )
+        .drop_without_applying_deltas();
+        render(
+            &mut app,
+            &ctx,
+            vec![
+                egui::Event::Key {
+                    key: egui::Key::Enter,
+                    physical_key: None,
+                    pressed: false,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::Text("Y".into()),
+            ],
+        )
+        .drop_without_applying_deltas();
+        assert_eq!(
+            app.interactive.as_ref().unwrap().working_text(0),
+            Some("prefix\noldfirst\nmiddle\nX\nYoldsecond\nsuffix\n")
+        );
+        for _ in 0..3 {
+            click_action(&mut app, &ctx, "Undo");
+        }
+        assert_eq!(
+            app.interactive.as_ref().unwrap().working_text(0),
+            Some(left)
+        );
+        assert_eq!(
+            app.interactive.as_ref().unwrap().working_text(1),
+            Some(right)
+        );
+        assert_eq!(
+            std::fs::read_to_string(fixture.path("left/model.txt")).unwrap(),
+            left
+        );
+    }
+
+    #[test]
     fn merge_file_opens_on_either_side_before_a_peer_is_selected() {
         let fixture = SourceFixture::new();
         for side in 0..2 {
@@ -7085,6 +7170,15 @@ mod tests {
                 output.drop_without_applying_deltas();
                 click(&mut app, &ctx, run[0] + egui::vec2(3.0, 3.0));
                 assert!(app.interactive.as_ref().unwrap().run_diff_enabled());
+                assert_eq!(app.interactive.as_ref().unwrap().merge_options(), [true; 3]);
+                assert!(
+                    app.show_only_differences && app.ignore_whitespace && app.ignore_line_endings
+                );
+                render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+                assert!(
+                    ctx.read_response(egui::Id::new("Auto Merge Non-Conflicts"))
+                        .is_none()
+                );
             }
         }
     }

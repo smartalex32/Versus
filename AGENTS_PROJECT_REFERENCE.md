@@ -24,7 +24,8 @@ APIs and must fail cleanly when unavailable.
 - `src/app.rs` renders the existing comparison workspace, the Diff/Merge toggle,
   and shared comparison-panel styling for source pickers and empty drop targets,
   file/folder navigation, and mode-specific comparison options. Diff preferences
-  are kept separately from Merge preferences; the three Merge options start off.
+  are kept separately from Merge preferences; enabling Run Diff for the first time
+  defaults all three Merge options on, and later toggles retain user choices.
   Enabling Run Diff schedules a debounced comparison for the open pair on a
   cancellable worker; disabling it drops pending diff work and removes diff
   highlights without resetting working copies or history. Diff assistance appears
@@ -35,8 +36,8 @@ APIs and must fail cleanly when unavailable.
   with a pending-content preview. Selection
   transfers can insert at a chosen line or replace an explicitly selected target.
   Accept All Left/Right copy one side into the other as a single transaction, while
-  honoring destination protection. Auto Merge previews incoming-only insertions
-  with matching boundary context; it does not infer replacements. Chunks are
+  honoring destination protection. Automatic merging belongs only to the separate
+  three-way CLI workflow. Chunks are
   heuristic structural blocks for recognized source-like text or blank-line
   paragraphs, not full language parses; users can create, split, combine, and
   adjust manual chunks. Protected ranges are maintained independently and remain
@@ -201,7 +202,9 @@ APIs and must fail cleanly when unavailable.
 - Diff UI options filter identical entries and independently ignore inline
   whitespace or line endings. Differences-only filtering and both ignore rules are
   enabled by default in Diff. Merge has a separate set of these three options,
-  initially off. Filtering keeps a top-visible or nearest-surviving anchor;
+  defaulted on when Run Diff is first enabled, retaining later user settings.
+  Filtering hides unchanged Merge lines without deleting working-copy content and
+  keeps a top-visible or nearest-surviving anchor;
   diff navigation reports the current change position beside New comparison.
   Changes to ignore rules restart background workers
   while retaining the displayed result until its replacement is ready. Refreshes

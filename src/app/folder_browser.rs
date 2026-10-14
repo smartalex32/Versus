@@ -3481,7 +3481,9 @@ mod tests {
         view.set_editing(true, [false; 3]);
         view.open_sources([Some(path.clone()), Some(peer.clone())]);
         let deadline = Instant::now() + Duration::from_secs(5);
-        while view.working_text(0) != Some("before\n") {
+        // The save fixture edits the paired workspace; wait for both loads
+        // rather than racing the peer loader with the test-only mutation.
+        while view.working_text(0) != Some("before\n") || view.working_text(1) != Some("peer\n") {
             view.poll(&ctx);
             assert!(Instant::now() < deadline, "file did not load");
             std::thread::sleep(Duration::from_millis(1));

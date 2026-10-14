@@ -71,6 +71,19 @@ pub(super) fn append_text(
     font: FontId,
     line_height: Option<f32>,
 ) {
+    append_text_inner(job, text, state, changed, palette, font, line_height, true);
+}
+
+fn append_text_inner(
+    job: &mut egui::text::LayoutJob,
+    text: &str,
+    state: &DirectoryEntryState,
+    changed: &[Range<usize>],
+    palette: Palette,
+    font: FontId,
+    line_height: Option<f32>,
+    inline_background: bool,
+) {
     let color = state_color(state, palette);
     let mut start = 0;
     for range in changed {
@@ -88,14 +101,20 @@ pub(super) fn append_text(
             Color32::TRANSPARENT,
             font.clone(),
             line_height,
+            1.0,
         );
         append_piece(
             job,
             &text[range.clone()],
             palette.text,
-            color.gamma_multiply(0.3),
+            if inline_background {
+                color.gamma_multiply(0.3)
+            } else {
+                Color32::TRANSPARENT
+            },
             font.clone(),
             line_height,
+            1.0,
         );
         start = range.end;
     }
@@ -106,7 +125,67 @@ pub(super) fn append_text(
         Color32::TRANSPARENT,
         font,
         line_height,
+        1.0,
     );
+}
+
+/// Append File Diff colors without a text-format background. The editable
+/// Merge renderer paints its inline background separately so it can use the
+/// native glyph-height rectangle within its taller editor row.
+pub(super) fn append_text_without_inline_background(
+    job: &mut egui::text::LayoutJob,
+    text: &str,
+    state: &DirectoryEntryState,
+    changed: &[Range<usize>],
+    palette: Palette,
+    font: FontId,
+    line_height: Option<f32>,
+) {
+    append_text_inner(job, text, state, changed, palette, font, line_height, false);
+}
+
+/// Compute inline changed spans at native glyph height, centered in an
+/// editable comparison row. The caller reserves their shapes before TextEdit
+/// paints, so highlights remain behind text even after horizontal scrolling.
+pub(super) fn inline_highlight_rects(
+    painter: &egui::Painter,
+    text_origin: Pos2,
+    text: &str,
+    changed: &[Range<usize>],
+    font: FontId,
+    row_height: f32,
+) -> Vec<Rect> {
+    // Derive geometry from File Diff's native galley, including its one-point
+    // background expansion. This keeps short spans, tabs and fallback glyphs
+    // identical while reserving the editor's padded height for cursor layout.
+    let mut job = egui::text::LayoutJob::default();
+    append_text(
+        &mut job,
+        text,
+        &DirectoryEntryState::Different,
+        changed,
+        Palette::for_context(painter.ctx()),
+        font,
+        None,
+    );
+    let galley = painter.layout_job(job);
+    let offset =
+        text_origin.to_vec2() + egui::vec2(0.0, ((row_height - galley.size().y) / 2.0).max(0.0));
+    galley
+        .rows
+        .iter()
+        .flat_map(|row| {
+            row.visuals.mesh.vertices[..row.visuals.glyph_vertex_range.start]
+                .chunks_exact(4)
+                .map(move |vertices| {
+                    let mut rect = Rect::NOTHING;
+                    for vertex in vertices {
+                        rect.extend_with(vertex.pos + row.pos.to_vec2() + offset);
+                    }
+                    rect
+                })
+        })
+        .collect()
 }
 
 /// Paint a line-ending badge immediately after the actual rendered text.
@@ -140,6 +219,7 @@ fn append_piece(
     background: Color32,
     font: FontId,
     line_height: Option<f32>,
+    background_expand: f32,
 ) {
     // TextEdit cursor ranges are expressed in bytes of the original buffer.
     // Keep tabs intact here: egui expands their advance during layout, while a
@@ -151,6 +231,7 @@ fn append_piece(
             font_id: font,
             color,
             background,
+            expand_bg: background_expand,
             line_height,
             ..Default::default()
         },
@@ -182,6 +263,7 @@ mod tests {
             job.sections[1].format.background,
             palette.left_only.gamma_multiply(0.3)
         );
+        assert_eq!(job.sections[1].format.expand_bg, 1.0);
         assert_eq!(job.sections[1].format.line_height, Some(22.0));
     }
 
@@ -220,6 +302,75 @@ mod tests {
         // epaint lays tabs out using its configured four-space tab stop; the
         // essential invariant here is that the source byte offsets stay raw.
         assert_ne!(tabs.text.len(), "a    b".len());
+    }
+
+    #[test]
+    fn inline_highlights_match_native_height_keep_short_spans_and_follow_scroll() {
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            for zoom in [1.0, 2.0] {
+                let ctx = egui::Context::default();
+                set_theme(&ctx, theme);
+                ctx.set_zoom_factor(zoom);
+                ctx.run_ui(egui::RawInput::default(), |ui| {
+                    let font = comparison_font(ui.ctx());
+                    let row_height = comparison_row_height(ui);
+                    let font_height = ui.fonts_mut(|fonts| fonts.row_height(&font));
+                    let origin = egui::pos2(100.0, 80.0);
+                    let ranges = [0..1, 4..5];
+                    let rects = inline_highlight_rects(
+                        ui.painter(),
+                        origin,
+                        "a\tb c",
+                        &ranges,
+                        font.clone(),
+                        row_height,
+                    );
+                    assert_eq!(rects.len(), 2, "all disjoint ranges are present");
+                    for rect in &rects {
+                        assert!(
+                            rect.width() > 1.0,
+                            "one-character spans must retain their width"
+                        );
+                        assert!((rect.height() - (font_height + 2.0)).abs() < 0.6);
+                        assert!(rect.top() >= origin.y && rect.bottom() <= origin.y + row_height);
+                    }
+                    let shifted = inline_highlight_rects(
+                        ui.painter(),
+                        origin - egui::vec2(60.0, 0.0),
+                        "a\tb c",
+                        &ranges,
+                        font.clone(),
+                        row_height,
+                    );
+                    for (before, after) in rects.iter().zip(shifted) {
+                        assert!((before.left() - after.left() - 60.0).abs() < 0.1);
+                        assert_eq!(before.height(), after.height());
+                    }
+                    let mut native = egui::text::LayoutJob::default();
+                    append_text(
+                        &mut native,
+                        "a\tb c",
+                        &DirectoryEntryState::Different,
+                        &ranges,
+                        Palette::for_context(ui.ctx()),
+                        font,
+                        None,
+                    );
+                    for section in native
+                        .sections
+                        .iter()
+                        .filter(|section| section.format.background != Color32::TRANSPARENT)
+                    {
+                        assert_eq!(
+                            section.format.expand_bg, 1.0,
+                            "preserve native File Diff highlights"
+                        );
+                        assert_eq!(section.format.line_height, None);
+                    }
+                })
+                .drop_without_applying_deltas();
+            }
+        }
     }
 
     #[test]

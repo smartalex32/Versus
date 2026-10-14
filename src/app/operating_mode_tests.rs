@@ -531,6 +531,36 @@ fn switching_folder_modes_replaces_results_with_the_correct_ignore_preferences()
     };
     tick(&mut app, &ctx);
     settle_folder_diff(&mut app, &ctx);
+    assert_eq!(state(&app), DirectoryEntryState::Same);
+    assert_eq!(app.interactive.as_ref().unwrap().merge_options(), [true; 3]);
+    frame(&mut app, &ctx).drop_without_applying_deltas();
+    let ignore = ctx
+        .read_response(egui::Id::new("Ignore whitespace"))
+        .unwrap()
+        .rect
+        .center();
+    for pressed in [true, false] {
+        draw(
+            &mut app,
+            &ctx,
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0))),
+                events: vec![
+                    egui::Event::PointerMoved(ignore),
+                    egui::Event::PointerButton {
+                        pos: ignore,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                ..Default::default()
+            },
+        )
+        .drop_without_applying_deltas();
+    }
+    tick(&mut app, &ctx);
+    settle_folder_diff(&mut app, &ctx);
     assert_eq!(state(&app), DirectoryEntryState::Different);
     app.set_workspace_merge(false);
     settle_folder_diff(&mut app, &ctx);
@@ -542,7 +572,7 @@ fn switching_folder_modes_replaces_results_with_the_correct_ignore_preferences()
     assert!(app.ignore_whitespace);
     assert_eq!(
         app.interactive.as_ref().unwrap().merge_options(),
-        [false; 3]
+        [true, false, true]
     );
 }
 

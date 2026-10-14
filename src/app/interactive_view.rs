@@ -87,6 +87,10 @@ pub(super) struct InteractiveView {
     editing: bool,
     diff_options: [bool; 3],
     merge_options: [bool; 3],
+    // Merge starts with no comparison work.  Once the user asks to run a
+    // comparison, all three helpers start enabled; later changes belong to
+    // that Merge session and must survive toggling the worker off and on.
+    merge_options_initialized: bool,
     run_diff: bool,
     diff_dirty: bool,
     diff_rows: Vec<usize>,
@@ -102,12 +106,12 @@ pub(super) struct InteractiveView {
     generation: u64,
     side_generation: [u64; 2],
     selected_side: usize,
+    editor_projection: [Option<EditorProjection>; 2],
     back: bool,
     new_requested: bool,
     search_requested: bool,
     from_folders: bool,
     editor_context: Option<egui::Context>,
-    pending_auto: Option<Vec<(Range<usize>, Range<usize>)>>,
     pending_save: Option<Vec<usize>>,
     error: Option<String>,
     status: String,
@@ -243,6 +247,10 @@ impl InteractiveView {
     }
     pub(super) fn set_run_diff(&mut self, enabled: bool) {
         if self.run_diff != enabled {
+            if enabled && self.editing && !self.merge_options_initialized {
+                self.merge_options = [true; 3];
+                self.merge_options_initialized = true;
+            }
             self.run_diff = enabled;
             self.invalidate_diff();
         }
@@ -921,7 +929,6 @@ impl InteractiveView {
     /// background result cannot paint alignment for new working-copy text.
     pub(super) fn invalidate_diff(&mut self) {
         self.publish_active();
-        self.pending_auto = None;
         if !self.editing {
             if let (Some(cached), Some(diff)) = (&self.readonly_presentation, &self.diff) {
                 let top = (self.scroll[0] / cached.row_height).floor() as usize;
@@ -1213,7 +1220,6 @@ impl InteractiveView {
     }
     pub(super) fn render_previews(&mut self, ctx: &egui::Context) {
         self.save_preview(ctx);
-        self.auto_preview(ctx);
     }
     pub(super) fn set_folder_differences(&mut self, differences: impl Into<Arc<Vec<PathBuf>>>) {
         let differences = differences.into();
@@ -1298,7 +1304,7 @@ impl InteractiveView {
         let side_width = if compact {
             width
         } else {
-            (width / 2.0 - (5.0 * extent + 4.0 * gap) / 2.0 - gap).max(110.0)
+            (width / 2.0 - (4.0 * extent + 3.0 * gap) / 2.0 - gap).max(110.0)
         };
         ui.scope_builder(
             egui::UiBuilder::new()
@@ -1331,7 +1337,7 @@ impl InteractiveView {
                 }
             },
         );
-        let actions_width = 5.0 * extent + 4.0 * gap;
+        let actions_width = 4.0 * extent + 3.0 * gap;
         let actions = Rect::from_center_size(
             egui::pos2(
                 center.center().x,
@@ -1368,16 +1374,6 @@ impl InteractiveView {
                     .clicked()
                     {
                         self.copy_all(TwoWaySide::Right);
-                    }
-                    if icon_button(
-                        ui,
-                        ToolbarIcon::AutoMerge,
-                        self.run_diff && self.diff.is_some(),
-                        "Auto Merge Non-Conflicts",
-                    )
-                    .clicked()
-                    {
-                        self.prepare_auto_merge();
                     }
                     if icon_button(
                         ui,
@@ -1930,16 +1926,10 @@ impl InteractiveView {
         let current = self.workspace.as_ref().unwrap().text(source).to_owned();
         let displayed = current.replace("\r\n", "\n").replace('\r', "\n");
         let displayed_lines: Vec<_> = displayed.lines().collect();
-        let mut next = displayed.clone();
-        let editor_id = egui::Id::new(("two-way-edit", self.side_generation[side], side));
-        let previous_cursor = egui::TextEdit::load_state(ui.ctx(), editor_id)
-            .and_then(|state| state.cursor.char_range())
-            .map(|cursor| {
-                let range = cursor.as_sorted_char_range();
-                usize::from(range.start)..usize::from(range.end)
-            });
         let font = comparison_font(ui.ctx());
         let row_height = super::comparison_row_height(ui);
+        let text_height = ui.fonts_mut(|fonts| fonts.row_height(&font));
+        let text_padding = ((row_height - text_height) / 2.0).max(0.0);
         let count = self.workspace.as_ref().unwrap().line_count(source);
         let chunks = self.workspace.as_ref().unwrap().chunks(source);
         let ignored = self
@@ -1967,6 +1957,59 @@ impl InteractiveView {
                     .collect()
             })
             .unwrap_or_default();
+        let filtering_same = self.run_diff && self.merge_options[0] && self.diff.is_some();
+        let projection = filtering_same.then(|| merge_projection(&displayed, &changed));
+        if projection
+            .as_ref()
+            .is_some_and(|projection| projection.spans.is_empty())
+        {
+            ui.centered_and_justified(|ui| {
+                ui.label(
+                    RichText::new("No differences with the current options.").color(palette.muted),
+                );
+            });
+            return;
+        }
+        let visible_lines: Vec<usize> = projection
+            .as_ref()
+            .map(|projection| {
+                projection
+                    .spans
+                    .iter()
+                    .map(|span| span.source_line)
+                    .collect()
+            })
+            .unwrap_or_else(|| (0..count.max(1)).collect());
+        let mut next = projection
+            .as_ref()
+            .map(|projection| projection.text.clone())
+            .unwrap_or_else(|| displayed.clone());
+        let editor_id = egui::Id::new(("two-way-edit", self.side_generation[side], side));
+        let editor_projection = EditorProjection {
+            text: next.clone(),
+            source_lines: visible_lines.clone(),
+        };
+        if let Some(previous) = self.editor_projection[side].as_ref() {
+            if previous != &editor_projection {
+                if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), editor_id) {
+                    if let Some(cursor) = state.cursor.char_range() {
+                        state.cursor.set_char_range(Some(remap_projection_cursor(
+                            cursor,
+                            previous,
+                            &editor_projection,
+                        )));
+                    }
+                    state.store(ui.ctx(), editor_id);
+                }
+            }
+        }
+        self.editor_projection[side] = Some(editor_projection);
+        let previous_cursor = egui::TextEdit::load_state(ui.ctx(), editor_id)
+            .and_then(|state| state.cursor.char_range())
+            .map(|cursor| {
+                let range = cursor.as_sorted_char_range();
+                usize::from(range.start)..usize::from(range.end)
+            });
         let ending_differences: BTreeMap<usize, versus::DisplayLineEnding> = self
             .diff
             .as_ref()
@@ -2025,13 +2068,7 @@ impl InteractiveView {
                 let width = ui.available_width().max(180.0);
                 let text_width = (width - number_width - gutter_width - 12.0).max(80.0);
                 let origin = ui.cursor().min;
-                let content_height = (displayed
-                    .lines()
-                    .count()
-                    .max(count + usize::from(displayed.ends_with('\n')))
-                    .max(1) as f32
-                    * row_height)
-                    .max(row_height);
+                let content_height = (visible_lines.len().max(1) as f32 * row_height).max(row_height);
                 let gutter_x = if side == 0 {
                     origin.x + width - gutter_width
                 } else {
@@ -2044,26 +2081,27 @@ impl InteractiveView {
                 };
                 let text_x = numbers_x + number_width + 4.0;
                 let text_rect = Rect::from_min_size(
-                    egui::pos2(text_x, origin.y),
+                    egui::pos2(text_x, origin.y + text_padding),
                     egui::vec2(text_width, content_height),
                 );
+                let mut highlight_slots = Vec::new();
                 // The editable surface still owns its TextEdit/history, but
                 // while comparison assistance is present its row decoration is
                 // deliberately the same as File Diff.
-                for line in 0..count.max(1) {
+                for (display_line, &line) in visible_lines.iter().enumerate() {
                     let state = changed
                         .get(&line)
                         .map(|(state, _)| state)
                         .unwrap_or(&DirectoryEntryState::Same);
                     let row_rect = Rect::from_min_size(
-                        egui::pos2(origin.x, origin.y + line as f32 * row_height),
+                        egui::pos2(origin.x, origin.y + display_line as f32 * row_height),
                         egui::vec2(width, row_height),
                     );
                     super::file_style::paint_background(
                         ui.painter(),
                         row_rect,
                         state,
-                        line % 2 == 1,
+                        display_line % 2 == 1,
                         false,
                     );
                     super::file_style::paint_gutter(
@@ -2072,6 +2110,16 @@ impl InteractiveView {
                         line + 1,
                         state,
                     );
+                    if let Some((state, ranges)) = changed.get(&line) {
+                        let slot = ui.painter().add(egui::Shape::Noop);
+                        highlight_slots.push((
+                            slot,
+                            display_line,
+                            displayed_lines.get(line).copied().unwrap_or_default().to_owned(),
+                            ranges.clone(),
+                            state.clone(),
+                        ));
+                    }
                 }
                 let mut text_scroll_x = 0.0;
                 let mut text_clip = text_rect.intersect(ui.clip_rect());
@@ -2079,7 +2127,8 @@ impl InteractiveView {
                     let mut layouter = |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, _: f32| {
                         let mut job = egui::text::LayoutJob::default();
                         job.wrap.max_width = f32::INFINITY;
-                        for (index, line) in buffer.as_str().split_inclusive('\n').enumerate() {
+                        for (display_line, line) in buffer.as_str().split_inclusive('\n').enumerate() {
+                            let index = visible_lines.get(display_line).copied().unwrap_or(display_line);
                             let protected = ignored.iter().any(|r| r.contains(&index));
                             if protected {
                                 job.append(
@@ -2094,7 +2143,7 @@ impl InteractiveView {
                                     },
                                 );
                             } else if let Some((state, ranges)) = changed.get(&index) {
-                                super::file_style::append_text(
+                                super::file_style::append_text_without_inline_background(
                                     &mut job,
                                     line,
                                     state,
@@ -2150,6 +2199,33 @@ impl InteractiveView {
                         });
                     text_scroll_x = horizontal.state.offset.x;
                     text_clip = horizontal.inner_rect.intersect(ui.clip_rect());
+                    let highlight_clip = Rect::from_min_max(
+                        egui::pos2(text_clip.left(), text_clip.top() - text_padding), text_clip.max,
+                    ).intersect(ui.clip_rect());
+                    let highlight_painter = ui.painter().with_clip_rect(highlight_clip);
+                    for (slot, display_line, text, ranges, state) in highlight_slots.drain(..) {
+                        let shapes = super::file_style::inline_highlight_rects(
+                            &highlight_painter,
+                            egui::pos2(
+                                text_x - text_scroll_x,
+                                origin.y + display_line as f32 * row_height,
+                            ),
+                            &text,
+                            &ranges,
+                            font.clone(),
+                            row_height,
+                        )
+                        .into_iter()
+                        .map(|rect| {
+                            egui::Shape::rect_filled(
+                                    rect,
+                                    0.0,
+                                    state_color(&state, palette).gamma_multiply(0.3),
+                                )
+                        })
+                        .collect();
+                        highlight_painter.set(slot, egui::Shape::Vec(shapes));
+                    }
                     let edit = horizontal.inner;
                     if edit.response.has_focus() {
                         self.selected_side = side;
@@ -2168,19 +2244,49 @@ impl InteractiveView {
                                 .filter(|c| *c == '\n')
                                 .count()
                                 .min(text_segments(&next).len());
-                            self.destination[side] = a_line;
+                            let source_at = |display_line: usize, at_end: bool| {
+                                visible_lines.get(display_line).copied().unwrap_or_else(|| {
+                                    visible_lines
+                                        .last()
+                                        .map(|line| line + usize::from(at_end))
+                                        .unwrap_or(0)
+                                })
+                            };
+                            let a_source = source_at(a_line, true);
+                            self.destination[side] = a_source;
                             // A cursor is an insertion target; a selection is an explicit replacement target.
                             let at_line_start = b == 0 || next.chars().take(b).last() == Some('\n');
-                            self.selected[side] = if a == b {
-                                a_line..a_line
+                            let b_source = if at_line_start {
+                                source_at(b_line, true)
                             } else {
-                                a_line..(b_line + usize::from(!at_line_start)).min(text_segments(&next).len())
+                                source_at(b_line, true).saturating_add(1)
+                            };
+                            let selected = if a == b {
+                                a_source..a_source
+                            } else {
+                                a_source..b_source
+                            };
+                            let selection_crosses_hidden = !selected.is_empty()
+                                && visible_lines
+                                    .iter()
+                                    .filter(|line| selected.contains(line))
+                                    .copied()
+                                    .collect::<Vec<_>>()
+                                    .windows(2)
+                                    .any(|pair| pair[1] != pair[0] + 1);
+                            if selection_crosses_hidden {
+                                self.selected[side] = a_source..a_source;
+                                self.error = Some(
+                                    "Selection crosses hidden unchanged lines. Turn off Show only differences to edit or transfer across them.".into(),
+                                );
+                            } else {
+                                self.selected[side] = selected;
                             };
                         }
                     }
                 });
-                for line in 0..count.max(1) {
-                    let y = origin.y + line as f32 * row_height;
+                for (display_line, &line) in visible_lines.iter().enumerate() {
+                    let y = origin.y + display_line as f32 * row_height;
                     if ignored.iter().any(|r| r.contains(&line)) {
                         ui.painter().line_segment(
                             [
@@ -2225,31 +2331,40 @@ impl InteractiveView {
                 }
                 if merge_controls {
                     for chunk in &chunks {
+                        let runs = visible_chunk_runs(&chunk.range, &visible_lines);
+                        if runs.is_empty() {
+                            continue;
+                        }
                         let expanded = self.expanded[side].contains(&chunk.id);
-                        let lines: Vec<_> = if expanded {
-                            chunk.range.clone().collect()
-                        } else {
-                            vec![chunk.range.start]
-                        };
-                        for line in lines {
-                            let y = origin.y + line as f32 * row_height;
+                        for run in &runs {
+                            let lines: Vec<_> = if expanded {
+                                run.clone().collect()
+                            } else {
+                                vec![run.start]
+                            };
+                            for line in lines {
+                            let display_line = visible_lines
+                                .iter()
+                                .position(|visible| *visible == line)
+                                .unwrap();
+                            let y = origin.y + display_line as f32 * row_height;
                             let rect = Rect::from_min_size(
                                 egui::pos2(gutter_x + 24.0, y),
                                 egui::vec2(30.0, row_height),
                             );
                             ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
-                                let tooltip=if expanded{format!("Copy line {} to the chosen target",line+1)}else{format!("Copy chunk {}–{} to the chosen target · Right-click for chunk controls",chunk.range.start+1,chunk.range.end)};
+                                let tooltip=if expanded{format!("Copy line {} to the chosen target",line+1)}else{format!("Copy chunk {}–{} to the chosen target · Right-click for chunk controls",run.start+1,run.end)};
                                 let response=transfer_action(ui,rect,egui::Id::new(("two-way-transfer",side,chunk.id,line)),if side==0{"→"}else{"←"},side,&tooltip);
                                 if response.clicked() {
                                     pending_transfer = Some(if expanded {
                                         line..line + 1
                                     } else {
-                                        chunk.range.clone()
+                                        run.clone()
                                     });
                                 }
                                 response.context_menu(|ui| {
                                     if ui.button("Select this chunk").clicked() {
-                                        self.selected[side] = chunk.range.clone();
+                                        self.selected[side] = run.clone();
                                         ui.close();
                                     }
                                     if ui.button("Split at selected line").clicked() {
@@ -2267,14 +2382,20 @@ impl InteractiveView {
                                     if self.diff.is_some()
                                         && ui.button("Suggest corresponding destination").clicked()
                                     {
-                                        self.suggest_target(source, chunk.range.clone());
+                                        self.suggest_target(source, run.clone());
                                         ui.close();
                                     }
                                 });
                             });
+                            }
                         }
+                        let first_visible = runs[0].start;
+                        let first_display = visible_lines
+                            .iter()
+                            .position(|line| *line == first_visible)
+                            .unwrap();
                         let toggle = Rect::from_min_size(
-                            egui::pos2(gutter_x, origin.y + chunk.range.start as f32 * row_height),
+                            egui::pos2(gutter_x, origin.y + first_display as f32 * row_height),
                             egui::vec2(21.0, row_height),
                         );
                         ui.scope_builder(egui::UiBuilder::new().max_rect(toggle), |ui| {
@@ -2295,20 +2416,56 @@ impl InteractiveView {
                 );
             });
         self.scroll[side] = output.state.offset.y;
-        if next != displayed {
-            let (range, replacement) = editor_byte_edit(&current, &next, previous_cursor);
-            if let Err(error) =
-                self.workspace
-                    .as_mut()
-                    .unwrap()
-                    .edit_bytes(source, range, replacement)
-            {
-                self.error = Some(error.to_string());
+        let base_text = projection
+            .as_ref()
+            .map(|projection| projection.text.as_str())
+            .unwrap_or(displayed.as_str());
+        if next != base_text {
+            let edit = projection.as_ref().map_or_else(
+                || Ok(editor_byte_edit(&current, &next, previous_cursor.clone())),
+                |projection| {
+                    projected_editor_edit(&current, projection, &next, previous_cursor.clone())
+                },
+            );
+            match edit {
+                Ok((range, replacement)) => {
+                    let caret_byte = range.start + replacement.len();
+                    if let Err(error) = self.workspace.as_mut().unwrap().edit_bytes(
+                        source,
+                        range.clone(),
+                        replacement,
+                    ) {
+                        self.error = Some(error.to_string());
+                    } else {
+                        self.error = None;
+                        // The TextEdit buffer was a compact projection. Its
+                        // character offsets are no longer valid after this
+                        // source mutation; restore it from the exact source
+                        // byte position on the next full render.
+                        let updated = self.workspace.as_ref().unwrap().text(source).to_owned();
+                        let updated_display = updated.replace("\r\n", "\n").replace('\r', "\n");
+                        let cursor = egui::text::CCursor::new(original_byte_to_normalized_chars(
+                            &updated,
+                            caret_byte.min(updated.len()),
+                        ));
+                        let mut state =
+                            egui::TextEdit::load_state(ui.ctx(), editor_id).unwrap_or_default();
+                        state
+                            .cursor
+                            .set_char_range(Some(egui::text::CCursorRange::one(cursor)));
+                        state.store(ui.ctx(), editor_id);
+                        self.editor_projection[side] = Some(EditorProjection {
+                            text: updated_display.clone(),
+                            source_lines: (0..text_segments(&updated_display).len()).collect(),
+                        });
+                        self.invalidate_diff();
+                    }
+                }
+                Err(error) => self.error = Some(error.into()),
             }
             // The gutter geometry was rendered for the previous text.
             pending_transfer = None;
             pending_context = None;
-            self.invalidate_diff();
         }
         if let Some(range) = pending_transfer {
             self.transfer(source, range);
@@ -2562,6 +2719,14 @@ impl InteractiveView {
         } else {
             TransferPlacement::Insert
         };
+        if self.filtered_merge_range_hidden(source, &range)
+            || (self.replace && self.filtered_merge_range_hidden(dest, &target))
+        {
+            self.error = Some(
+                "That transfer crosses hidden unchanged lines. Turn off Show only differences to transfer the full range.".into(),
+            );
+            return;
+        }
         let old_count = self.workspace.as_ref().unwrap().line_count(dest);
         match self
             .workspace
@@ -2587,6 +2752,24 @@ impl InteractiveView {
             }
             Err(e) => self.error = Some(e.to_string()),
         }
+    }
+    fn filtered_merge_range_hidden(&self, side: TwoWaySide, range: &Range<usize>) -> bool {
+        if range.is_empty() || !self.editing || !self.run_diff || !self.merge_options[0] {
+            return false;
+        }
+        let Some(diff) = &self.diff else {
+            return false;
+        };
+        let side = side_index(side);
+        range.clone().any(|line| {
+            !diff.rows.iter().any(|row| {
+                let source = if side == 0 { &row.left } else { &row.right };
+                source
+                    .as_ref()
+                    .is_some_and(|(number, _)| *number == line + 1)
+                    && row.state != DirectoryEntryState::Same
+            })
+        })
     }
     fn suggest_target(&mut self, source: TwoWaySide, range: Range<usize>) {
         let Some(diff) = &self.diff else {
@@ -2649,108 +2832,7 @@ impl InteractiveView {
             Err(e) => self.error = Some(e.to_string()),
         }
     }
-    fn prepare_auto_merge(&mut self) {
-        let Some(diff) = &self.diff else {
-            return;
-        };
-        let mut transfers = Vec::new();
-        let mut index = 0;
-        let mut right_line = 0;
-        while index < diff.rows.len() {
-            let row = &diff.rows[index];
-            if row.state != DirectoryEntryState::LeftOnly {
-                if let Some((number, _)) = &row.right {
-                    right_line = *number;
-                }
-                index += 1;
-                continue;
-            }
-            let first = index;
-            let Some((start, _)) = &row.left else {
-                index += 1;
-                continue;
-            };
-            let start = *start - 1;
-            let mut end = start;
-            while index < diff.rows.len()
-                && diff.rows[index].state == DirectoryEntryState::LeftOnly
-                && diff.rows[index]
-                    .left
-                    .as_ref()
-                    .is_some_and(|(number, _)| *number == end + 1)
-            {
-                end += 1;
-                index += 1;
-            }
-            let before = first == 0 || diff.rows[first - 1].state == DirectoryEntryState::Same;
-            let after =
-                index == diff.rows.len() || diff.rows[index].state == DirectoryEntryState::Same;
-            if before && after {
-                transfers.push((start..end, right_line..right_line));
-            }
-        }
-        if transfers.is_empty() {
-            self.status="No incoming-only sections have matching boundaries. Use the chunk arrows for manual choices.".into();
-            return;
-        }
-        self.pending_auto = Some(transfers);
-    }
-    fn auto_preview(&mut self, ctx: &egui::Context) {
-        let Some(transfers) = self.pending_auto.clone() else {
-            return;
-        };
-        let Some(workspace) = &self.workspace else {
-            self.pending_auto = None;
-            return;
-        };
-        let source = text_segments(workspace.text(TwoWaySide::Left));
-        let mut confirm = false;
-        let mut cancel = false;
-        egui::Modal::new(egui::Id::new("auto-merge-preview")).show(ctx,|ui|{
-            ui.heading("Auto Merge Non-Conflicts");ui.label("Review incoming insertions anchored by matching content. Existing Current lines are preserved.");
-            egui::ScrollArea::vertical().max_height(300.0).show(ui,|ui|{for(range,target)in &transfers{ui.label(format!("Left lines {}–{} → before Right line {}",range.start+1,range.end,target.start+1));let text=source[range.clone()].iter().map(|(text,ending)|format!("{text}{ending}")).collect::<String>();ui.label(RichText::new(text).monospace());}});
-            ui.horizontal(|ui|{cancel=ui.button("Cancel").clicked();confirm=ui.button("Apply insertions").clicked();});
-        });
-        if cancel {
-            self.pending_auto = None;
-        }
-        if confirm {
-            self.pending_auto = None;
-            let actions = transfers
-                .iter()
-                .map(|(from, to)| (from.clone(), to.clone(), TransferPlacement::Insert))
-                .collect();
-            match self
-                .workspace
-                .as_mut()
-                .unwrap()
-                .transfer_batch(TwoWaySide::Left, actions)
-            {
-                Ok(()) => {
-                    let mut transfers = transfers;
-                    transfers.sort_by_key(|(_, target)| std::cmp::Reverse(target.start));
-                    for (source, target) in transfers {
-                        self.selected[1] =
-                            remap_target(self.selected[1].clone(), target.clone(), source.len());
-                        let cursor = remap_target(
-                            self.destination[1]..self.destination[1],
-                            target,
-                            source.len(),
-                        );
-                        self.destination[1] = cursor.start;
-                    }
-                    self.activate_editor(1);
-                    self.invalidate_diff();
-                    self.error = None;
-                    self.status =
-                        "Auto merge applied to the Right working copy. Undo reverses the batch."
-                            .into();
-                }
-                Err(e) => self.error = Some(e.to_string()),
-            }
-        }
-    }
-    fn sync_editor_cursor(&self, side: usize) {
+    fn sync_editor_cursor(&mut self, side: usize) {
         let (Some(ctx), Some(workspace)) = (&self.editor_context, &self.workspace) else {
             return;
         };
@@ -2786,6 +2868,12 @@ impl InteractiveView {
             )));
         state.clear_undoer();
         state.store(ctx, id);
+        // These explicit targets are in the full source buffer. Record that
+        // coordinate space so the next filtered render maps them only once.
+        self.editor_projection[side] = Some(EditorProjection {
+            source_lines: (0..text_segments(&text).len()).collect(),
+            text,
+        });
     }
     fn activate_editor(&mut self, side: usize) {
         self.selected_side = side;
@@ -3221,6 +3309,258 @@ fn editor_byte_edit(
         .unwrap_or("\n");
     (range, edited[new].replace('\n', ending))
 }
+
+/// An editable view of changed source lines. The backing document is never
+/// filtered: each projected span remembers its original normalized byte range
+/// so a visible edit can be applied to the real working copy safely.
+#[derive(Clone, Debug)]
+struct MergeProjection {
+    text: String,
+    spans: Vec<ProjectionSpan>,
+}
+
+#[derive(Clone, Debug)]
+struct ProjectionSpan {
+    source_line: usize,
+    source: Range<usize>,
+    projected: Range<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct EditorProjection {
+    text: String,
+    source_lines: Vec<usize>,
+}
+
+fn merge_projection(
+    displayed: &str,
+    changed: &BTreeMap<usize, (DirectoryEntryState, Vec<Range<usize>>)>,
+) -> MergeProjection {
+    let mut projection = MergeProjection {
+        text: String::new(),
+        spans: Vec::new(),
+    };
+    let mut source_start = 0;
+    for (line, content) in displayed.split_inclusive('\n').enumerate() {
+        let source = source_start..source_start + content.len();
+        source_start = source.end;
+        if !changed
+            .get(&line)
+            .is_some_and(|(state, _)| *state != DirectoryEntryState::Same)
+        {
+            continue;
+        }
+        let projected_start = projection.text.len();
+        projection.text.push_str(content);
+        projection.spans.push(ProjectionSpan {
+            source_line: line,
+            source,
+            projected: projected_start..projection.text.len(),
+        });
+    }
+    // `split_inclusive` does not yield an empty final line. That line has no
+    // content to edit, so retaining it cannot expose a transfer or deletion.
+    projection
+}
+
+fn visible_chunk_runs(range: &Range<usize>, visible_lines: &[usize]) -> Vec<Range<usize>> {
+    let mut runs: Vec<Range<usize>> = Vec::new();
+    for line in visible_lines
+        .iter()
+        .copied()
+        .filter(|line| range.contains(line))
+    {
+        match runs.last_mut() {
+            Some(last) if last.end == line => last.end += 1,
+            _ => runs.push(line..line + 1),
+        }
+    }
+    runs
+}
+
+fn remap_projection_cursor(
+    cursor: egui::text::CCursorRange,
+    old: &EditorProjection,
+    new: &EditorProjection,
+) -> egui::text::CCursorRange {
+    let source_position = |projection: &EditorProjection, cursor: egui::text::CCursor| {
+        let index: usize = cursor.index.into();
+        let prefix: String = projection.text.chars().take(index).collect();
+        let display_line = prefix
+            .chars()
+            .filter(|character| *character == '\n')
+            .count();
+        let column = prefix.rsplit_once('\n').map_or_else(
+            || prefix.chars().count(),
+            |(_, column)| column.chars().count(),
+        );
+        let source_line = projection
+            .source_lines
+            .get(display_line)
+            .copied()
+            .or_else(|| projection.source_lines.last().map(|line| line + 1))
+            .unwrap_or(0);
+        (source_line, column)
+    };
+    let projected_cursor = |(source_line, column): (usize, usize)| {
+        let display_line = new
+            .source_lines
+            .iter()
+            .position(|line| *line == source_line)
+            .unwrap_or_else(|| {
+                new.source_lines
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, line)| line.abs_diff(source_line))
+                    .map(|(index, _)| index)
+                    .unwrap_or(0)
+            });
+        let line_start = new
+            .text
+            .split_inclusive('\n')
+            .take(display_line)
+            .map(|line| line.chars().count())
+            .sum::<usize>();
+        let line = new
+            .text
+            .split_inclusive('\n')
+            .nth(display_line)
+            .unwrap_or("");
+        egui::text::CCursor::new(
+            line_start + column.min(line.trim_end_matches('\n').chars().count()),
+        )
+    };
+    egui::text::CCursorRange::two(
+        projected_cursor(source_position(old, cursor.primary)),
+        projected_cursor(source_position(old, cursor.secondary)),
+    )
+}
+
+fn normalized_byte_to_original(original: &str, normalized: usize) -> usize {
+    let mut byte = 0;
+    let mut shown = 0;
+    while shown < normalized && byte < original.len() {
+        byte += if original.as_bytes()[byte] == b'\r'
+            && original.as_bytes().get(byte + 1) == Some(&b'\n')
+        {
+            2
+        } else {
+            1
+        };
+        shown += 1;
+    }
+    byte
+}
+
+fn original_byte_to_normalized_chars(original: &str, byte_offset: usize) -> usize {
+    let mut byte = 0;
+    let mut chars = 0;
+    while byte < byte_offset && byte < original.len() {
+        if original.as_bytes()[byte] == b'\r' && original.as_bytes().get(byte + 1) == Some(&b'\n') {
+            byte += 2;
+        } else {
+            let width = original[byte..].chars().next().map_or(1, char::len_utf8);
+            byte += width;
+        }
+        chars += 1;
+    }
+    chars
+}
+
+/// Translate an edit in the compact Merge projection back to the source
+/// working copy. It deliberately rejects edits that bridge an omitted run: a
+/// Backspace over that visual boundary must never erase hidden identical text.
+fn projected_editor_edit(
+    original: &str,
+    projection: &MergeProjection,
+    edited: &str,
+    selection: Option<Range<usize>>,
+) -> Result<(Range<usize>, String), &'static str> {
+    let (projected_range, replacement) = editor_byte_edit(&projection.text, edited, selection);
+    let first = projection
+        .spans
+        .iter()
+        .position(|span| {
+            span.projected.start <= projected_range.start
+                && (projected_range.start < span.projected.end
+                    || (projected_range.start == projection.text.len()
+                        && span.projected.end == projection.text.len()))
+        })
+        .ok_or("This edit is outside the visible changed lines.")?;
+    let last = if projected_range.is_empty() {
+        first
+    } else {
+        projection
+            .spans
+            .iter()
+            .position(|span| {
+                span.projected.start <= projected_range.end
+                    && projected_range.end <= span.projected.end
+            })
+            .ok_or("This edit crosses hidden unchanged lines. Turn off Show only differences to edit across them.")?
+    };
+    let start_span = &projection.spans[first];
+    let end_span = &projection.spans[last];
+    let normalized_original = original.replace("\r\n", "\n").replace('\r', "\n");
+    if projection.spans[first..=last]
+        .windows(2)
+        .any(|pair| pair[1].source_line != pair[0].source_line + 1)
+    {
+        return Err(
+            "This edit crosses hidden unchanged lines. Turn off Show only differences to edit across them.",
+        );
+    }
+    // A projected seam can sit immediately before omitted source lines. Do
+    // not allow deleting that newline, which would join a visible line to
+    // hidden content in the backing file.
+    if projection.spans[first..=last]
+        .iter()
+        .enumerate()
+        .any(|(offset, span)| {
+            let index = first + offset;
+            let next_is_hidden = projection
+                .spans
+                .get(index + 1)
+                .map_or(span.source.end < normalized_original.len(), |next| {
+                    next.source_line != span.source_line + 1
+                });
+            let newline = span
+                .projected
+                .end
+                .checked_sub(1)
+                .and_then(|index| projection.text.as_bytes().get(index))
+                == Some(&b'\n');
+            next_is_hidden
+                && newline
+                && projected_range.start <= span.projected.end - 1
+                && span.projected.end <= projected_range.end
+        })
+    {
+        return Err(
+            "This edit would join hidden unchanged lines. Turn off Show only differences to make that change.",
+        );
+    }
+    let normalized = start_span.source.start + (projected_range.start - start_span.projected.start)
+        ..end_span.source.start + (projected_range.end - end_span.projected.start);
+    let range = normalized_byte_to_original(original, normalized.start)
+        ..normalized_byte_to_original(original, normalized.end);
+    let mut offset = 0;
+    let ending = text_segments(original)
+        .iter()
+        .find_map(|(text, ending)| {
+            let end = offset + text.len() + ending.len();
+            let contains = range.start < end;
+            offset = end;
+            (contains && !ending.is_empty()).then_some(*ending)
+        })
+        .or_else(|| {
+            text_segments(original)
+                .iter()
+                .find_map(|(_, ending)| (!ending.is_empty()).then_some(*ending))
+        })
+        .unwrap_or("\n");
+    Ok((range, replacement.replace('\n', ending)))
+}
 #[cfg(test)]
 fn restore_line_endings(original: &str, edited: &str) -> String {
     let (range, replacement) = editor_byte_edit(original, edited, None);
@@ -3352,6 +3692,100 @@ mod tests {
             let edit = editor_byte_edit(original, edited, Some(cursor));
             assert_eq!(edit, (range, replacement.to_owned()));
         }
+    }
+
+    #[test]
+    fn filtered_merge_projection_edits_only_visible_source_lines_and_guards_hidden_seams() {
+        let mut changed = BTreeMap::new();
+        changed.insert(1, (DirectoryEntryState::Different, Vec::new()));
+        changed.insert(3, (DirectoryEntryState::Different, Vec::new()));
+        let original = "same\r\nold\r\nsame\r\nlater\r\ntrailing\r\n";
+        let displayed = original.replace("\r\n", "\n");
+        let projection = merge_projection(&displayed, &changed);
+        assert_eq!(projection.text, "old\nlater\n");
+        assert_eq!(
+            projection
+                .spans
+                .iter()
+                .map(|span| span.source_line)
+                .collect::<Vec<_>>(),
+            [1, 3]
+        );
+
+        // Typing at the start of the second visible block maps to its source
+        // line, rather than the preceding hidden seam.
+        let (range, replacement) =
+            projected_editor_edit(original, &projection, "old\n!later\n", None).unwrap();
+        assert_eq!(&original[range.clone()], "");
+        assert_eq!(replacement, "!");
+        let mut edited = original.to_owned();
+        edited.replace_range(range, &replacement);
+        assert_eq!(edited, "same\r\nold\r\nsame\r\n!later\r\ntrailing\r\n");
+
+        // Removing the newline before the omitted middle line must not join
+        // the visible and hidden text in the backing document.
+        assert!(projected_editor_edit(original, &projection, "oldlater\n", None).is_err());
+        // The final visible newline is also protected when the remainder of
+        // the source is hidden.
+        assert!(projected_editor_edit(original, &projection, "old\nlater", None).is_err());
+    }
+
+    #[test]
+    fn filtered_merge_chunk_runs_never_cross_hidden_source_lines() {
+        assert_eq!(
+            visible_chunk_runs(&(0..6), &[0, 2, 3, 5]),
+            vec![0..1, 2..4, 5..6]
+        );
+    }
+
+    #[test]
+    fn filtered_transfer_restores_the_destination_caret_before_further_typing() {
+        let left = "prefix\nold\nsame\nlater\nsuffix\n";
+        let right = "prefix\nnew\nsame\nlaterR\nsuffix\n";
+        let ctx = egui::Context::default();
+        set_theme(&ctx, egui::Theme::Dark);
+        let mut view = view(left, right);
+        view.editor_context = Some(ctx.clone());
+        view.run_diff = true;
+        view.merge_options = [true; 3];
+        view.diff = compare_loaded_text(
+            [left, right],
+            &AtomicBool::new(false),
+            &FileViewOptions::default(),
+            [&[], &[]],
+        )
+        .unwrap();
+        for _ in 0..3 {
+            frame(&mut view, &ctx, vec![]).drop_without_applying_deltas();
+        }
+        view.destination[1] = 3;
+        view.transfer(TwoWaySide::Left, 3..4);
+        frame(&mut view, &ctx, vec![egui::Event::Text("!".into())]).drop_without_applying_deltas();
+        assert_eq!(
+            view.working_text(1),
+            Some("prefix\nnew\nsame\nlater\n!laterR\nsuffix\n")
+        );
+        assert_eq!(view.working_text(0), Some(left));
+        view.move_history(false);
+        view.move_history(false);
+        assert_eq!(view.working_text(1), Some(right));
+    }
+
+    #[test]
+    fn cursor_remap_keeps_the_same_source_line_when_filtering_changes() {
+        let full = EditorProjection {
+            text: "same\nchanged\nsame\nlater\n".into(),
+            source_lines: vec![0, 1, 2, 3],
+        };
+        let filtered = EditorProjection {
+            text: "changed\nlater\n".into(),
+            source_lines: vec![1, 3],
+        };
+        let cursor = egui::text::CCursorRange::one(egui::text::CCursor::new(18));
+        let remapped = remap_projection_cursor(cursor, &full, &filtered);
+        assert_eq!(usize::from(remapped.primary.index), 8);
+        let restored = remap_projection_cursor(remapped, &filtered, &full);
+        assert_eq!(usize::from(restored.primary.index), 18);
     }
     #[test]
     fn folder_navigation_uses_changed_paths_without_comparing_text() {
@@ -4154,6 +4588,7 @@ mod tests {
                     .drop_without_applying_deltas();
                 let mut view = view("left\n", "right\n");
                 view.merge_options = [false, true, true];
+                view.merge_options_initialized = true;
                 view.diff_options = [true, false, true];
                 view.set_run_diff(true);
                 view.workspace
