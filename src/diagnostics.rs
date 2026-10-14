@@ -488,7 +488,7 @@ mod tests {
                 event: "comparison worker failed: sample error".into(),
             })
             .expect("queue event");
-        let contents = wait_for(&directory.0.join(LOG_FILE), "sample error");
+        let contents = wait_for(&directory.0.join("versus.log"), "sample error");
         assert!(contents.contains("session="));
         assert!(contents.contains("version="));
         assert!(contents.contains("pid="));

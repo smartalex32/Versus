@@ -85,8 +85,9 @@ press Escape, or use its close icon to dismiss it. The larger fields use muted,
 italic placeholders. Choose **LEFT**, **RIGHT**, or **BOTH**; the side colors match
 the pane labels. **Match Case**, **Match Whole Word**, and **Use Regular Expression**
 are tooltip-equipped VS Code icons inside the Find field. Search starts after
-500 ms without typing, and matches appear progressively in the right results
-panel. A separate **LEFT / RIGHT** toggle above that panel filters the displayed
+250 ms without typing, and matches appear progressively in the right results
+panel, which fills the right half by default with a centered empty-state hint.
+A neutral **LEFT / RIGHT** toggle spans that panel’s width and filters the displayed
 side without changing the search scope. Rows show the line number and matching
 text; hover over a row and use its **X** to exclude it from replacement.
 Undo, Redo, and Refresh sit beside the scope controls, with search status below.

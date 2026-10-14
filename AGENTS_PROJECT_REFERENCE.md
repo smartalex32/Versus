@@ -65,15 +65,16 @@ APIs and must fail cleanly when unavailable.
   roots without directory enumeration; folder searches retain recursive scope.
   The modal is centered, approximately half the initial app width, and dismisses
   on outside click or Escape. Controls occupy the left half; a scrollable result
-  list occupies the right half with a muted empty-state hint matching drop targets.
-  Search starts after 500 ms without typing; query, option, and scope changes
+  list fills the right half by default with a centered muted empty-state hint
+  matching drop targets.
+  Search starts after 250 ms without typing; query, option, and scope changes
   cancel stale workers and restart that delay. Empty queries and dismissal cancel
   pending searches. There is no separate Find action. Full-width fields have
   muted italic hints, colored LEFT/RIGHT/BOTH scope controls, inline search-option
   icons, and external Replace Next/All icons. Undo, Redo, and Refresh follow the
-  scope buttons, with search status below. A separate LEFT/RIGHT view toggle
-  filters results without changing scope. Results stream in batches while
-  searching; each virtualized row shows a line number, bounded highlighted text
+  scope buttons, with search status below. A neutral LEFT/RIGHT view toggle
+  spans the results column and filters results without changing scope. Results
+  stream in batches while searching; each virtualized row shows a line number, bounded highlighted text
   preview, and a hover X for exclusion. The empty-state hint is confined to the
   results panel. Refresh repopulates exclusions and rereads clean files from disk,
   while dirty working copies take precedence. Replace actions preview included

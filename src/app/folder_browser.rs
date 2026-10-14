@@ -1250,15 +1250,14 @@ impl FolderBrowser {
                         });
                     let right = &mut columns[1];
                     right.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 3.0;
                         let palette = Palette::for_context(ui.ctx());
-                        for (side, label, color) in [
-                            (0, "LEFT", palette.left_only),
-                            (1, "RIGHT", palette.right_only),
-                        ] {
+                        let width = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
+                        for (side, label) in [(0, "LEFT"), (1, "RIGHT")] {
                             if search_choice_button(
                                 ui,
                                 label,
-                                color,
+                                palette.text,
                                 self.results_side == side,
                                 egui::Id::new(("folder-search-view", side)),
                                 if side == 0 {
@@ -1266,6 +1265,7 @@ impl FolderBrowser {
                                 } else {
                                     "Show right results"
                                 },
+                                Some(width),
                             )
                             .clicked()
                             {
@@ -1330,6 +1330,7 @@ impl FolderBrowser {
             .corner_radius(6)
             .inner_margin(8)
             .show(ui, |ui| {
+                ui.set_width(ui.available_width());
                 ui.set_height((height - 18.0).max(0.0));
                 ui.interact(
                     ui.max_rect(),
@@ -1427,7 +1428,7 @@ impl FolderBrowser {
                 job.halign = egui::Align::Center;
                 let galley = ui.painter().layout_job(job);
                 ui.painter().with_clip_rect(rect).galley(
-                    rect.center() - galley.size() / 2.0,
+                    rect.center() - galley.rect.center().to_vec2(),
                     galley,
                     palette.muted,
                 );
@@ -1444,7 +1445,7 @@ impl FolderBrowser {
         self.preview = None;
         self.selected_hits.clear();
         self.error = None;
-        self.search_due_at = (!self.query.pattern.is_empty()).then_some(now + 0.5);
+        self.search_due_at = (!self.query.pattern.is_empty()).then_some(now + 0.25);
     }
     fn run_scheduled_search(&mut self, ctx: &egui::Context, view: &InteractiveView, now: f64) {
         if let Some(due) = self.search_due_at {
@@ -1672,6 +1673,7 @@ fn search_scope_button(
         selected,
         egui::Id::new(("folder-search-scope", label)),
         &format!("Search {label}"),
+        None,
     )
 }
 
@@ -1682,12 +1684,13 @@ fn search_choice_button(
     selected: bool,
     id: egui::Id,
     tooltip: &str,
+    width: Option<f32>,
 ) -> egui::Response {
     let text = ui
         .painter()
         .layout_no_wrap(label.into(), FontId::monospace(11.0), color);
     let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(text.size().x + 16.0, control_extent(ui)),
+        egui::vec2(width.unwrap_or(text.size().x + 16.0), control_extent(ui)),
         Sense::hover(),
     );
     let response = ui.interact(rect, id, Sense::click());
@@ -2246,11 +2249,42 @@ mod tests {
                 "next={next:?}, replacement={replacement:?}"
             );
             let palette = Palette::for_context(&ctx);
+            assert!(results.width() > modal.width() / 2.0 - 40.0);
+            assert!(results.height() > 300.0);
+            assert!(
+                output.shapes.iter().any(|shape| matches!(&shape.shape,
+                egui::Shape::Rect(frame) if frame.fill == palette.panel
+                    && frame.rect.contains_rect(results)
+                    && (frame.rect.width() - results.width() - 18.0).abs() < 1.0)),
+                "the painted panel must fill the right column even without results"
+            );
+            let left_view = ctx
+                .read_response(egui::Id::new(("folder-search-view", 0usize)))
+                .unwrap()
+                .rect;
+            let right_view = ctx
+                .read_response(egui::Id::new(("folder-search-view", 1usize)))
+                .unwrap()
+                .rect;
+            assert!((left_view.width() - right_view.width()).abs() < 1.0);
+            assert!((left_view.left() - (results.left() - 9.0)).abs() < 1.0);
+            assert!((right_view.right() - (results.right() + 9.0)).abs() < 1.0);
+            for label in ["LEFT", "RIGHT"] {
+                assert!(
+                    output.shapes.iter().any(|shape| matches!(&shape.shape,
+                    egui::Shape::Text(text) if text.galley.text() == label
+                        && text.fallback_color == palette.text
+                        && text.galley.rect.translate(text.pos.to_vec2()).center().y < results.top()
+                        && text.pos.x > modal.center().x)),
+                    "result view toggle must be neutral"
+                );
+            }
             assert!(output.shapes.iter().any(|shape| matches!(&shape.shape,
                 egui::Shape::Text(text) if text.galley.text() == "Search results will appear here"
                     && text.galley.job.sections[0].format.font_id == FontId::proportional(14.0)
                     && text.fallback_color == palette.muted
-                    && results.contains_rect(Rect::from_min_size(text.pos, text.galley.size())))));
+                    && results.contains_rect(text.galley.rect.translate(text.pos.to_vec2()))
+                    && text.galley.rect.translate(text.pos.to_vec2()).center().distance(results.center()) < 1.0)));
             for (label, color) in [("LEFT", palette.left_only), ("RIGHT", palette.right_only)] {
                 assert!(output.shapes.iter().any(|shape| matches!(&shape.shape,
                     egui::Shape::Text(text) if text.galley.text() == label && text.fallback_color == color)),
@@ -2659,12 +2693,12 @@ mod tests {
         browser.open_search();
         dialog_frame_at(&mut browser, &mut view, &ctx, vec![], Some(10.0))
             .drop_without_applying_deltas();
-        assert_eq!(browser.search_due_at, Some(10.5));
+        assert_eq!(browser.search_due_at, Some(10.25));
         assert!(browser.results.is_none());
     }
 
     #[test]
-    fn typing_search_waits_half_a_second_after_the_last_edit_and_lists_results_on_the_right() {
+    fn typing_search_waits_a_quarter_second_after_the_last_edit_and_lists_results_on_the_right() {
         let path =
             std::env::temp_dir().join(format!("versus-live-search-{}.txt", std::process::id()));
         std::fs::write(&path, "alpha beta\nother content\n").unwrap();
@@ -2686,21 +2720,21 @@ mod tests {
         )
         .drop_without_applying_deltas();
         assert_eq!(browser.query.pattern, "alpha");
-        assert_eq!(browser.search_due_at, Some(1.5));
+        assert_eq!(browser.search_due_at, Some(1.25));
         assert!(browser.search.is_none());
         dialog_frame_at(
             &mut browser,
             &mut view,
             &ctx,
             vec![egui::Event::Text(" beta".into())],
-            Some(1.3),
+            Some(1.2),
         )
         .drop_without_applying_deltas();
         assert_eq!(browser.query.pattern, "alpha beta");
-        dialog_frame_at(&mut browser, &mut view, &ctx, vec![], Some(1.79))
+        dialog_frame_at(&mut browser, &mut view, &ctx, vec![], Some(1.44))
             .drop_without_applying_deltas();
         assert!(browser.search.is_none(), "typing must reset the delay");
-        dialog_frame_at(&mut browser, &mut view, &ctx, vec![], Some(1.8))
+        dialog_frame_at(&mut browser, &mut view, &ctx, vec![], Some(1.45))
             .drop_without_applying_deltas();
         assert!(browser.search.is_some());
         assert_eq!(
@@ -2763,7 +2797,7 @@ mod tests {
             .drop_without_applying_deltas();
         assert_eq!(
             browser.search_due_at,
-            Some(3.0),
+            Some(2.75),
             "reopening resumes the pending query after a fresh delay"
         );
         assert!(browser.search.is_none());
@@ -2792,7 +2826,7 @@ mod tests {
             "old worker cannot publish results"
         );
         assert!(browser.results.is_none() && !browser.results_current());
-        browser.run_scheduled_search(&ctx, &view, 1.49);
+        browser.run_scheduled_search(&ctx, &view, 1.24);
         assert!(browser.search.is_none());
         browser.query.pattern.clear();
         browser.schedule_search(1.5);
