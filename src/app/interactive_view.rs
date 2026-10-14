@@ -1902,6 +1902,7 @@ impl InteractiveView {
                 self.destination[side] = at - 1;
             }
             ui.checkbox(&mut self.replace, "Replace selected target")
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
                 .on_hover_text("Requires an explicit nonempty selection in the destination pane");
         });
         ui.horizontal_wrapped(|ui| {
@@ -1949,7 +1950,7 @@ impl InteractiveView {
                 .unwrap()
                 .ignored_ranges(source)
                 .to_vec();
-            egui::Window::new(if side == 0 {
+            let window = egui::Window::new(if side == 0 {
                 "Left ignored ranges"
             } else {
                 "Right ignored ranges"
@@ -1985,6 +1986,9 @@ impl InteractiveView {
                     });
                 }
             });
+            if let Some(window) = window {
+                window_button_cursor(ui.ctx(), window.response.layer_id);
+            }
         }
         ui.memory_mut(|m| m.data.insert_temp(id, open));
     }
@@ -2492,7 +2496,25 @@ fn inline_action(
             palette.text
         },
     );
-    response.on_hover_text(label)
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(label)
+}
+
+fn window_button_cursor(ctx: &egui::Context, layer: egui::LayerId) {
+    // egui's built-in window close/collapse controls bypass interact_cursor.
+    // Limit this fallback to click-only controls so window dragging, resizing,
+    // and text editing retain their own cursors.
+    let hovered =
+        ctx.interaction_snapshot(|snapshot| snapshot.hovered.iter().copied().collect::<Vec<_>>());
+    for id in hovered {
+        if let Some(response) = ctx.read_response(id)
+            && response.layer_id == layer
+            && response.sense == Sense::click()
+        {
+            response.on_hover_cursor(egui::CursorIcon::PointingHand);
+        }
+    }
 }
 fn append_code_line(
     job: &mut egui::text::LayoutJob,
@@ -3086,6 +3108,53 @@ mod tests {
         assert_eq!(view.working_text(1), Some(result.as_str()));
     }
     #[test]
+    fn window_title_buttons_use_pointer_cursor() {
+        let ctx = egui::Context::default();
+        set_theme(&ctx, egui::Theme::Dark);
+        let mut open = true;
+        let mut frame = |position: Option<Pos2>| {
+            ctx.run_ui(
+                egui::RawInput {
+                    events: position
+                        .map(egui::Event::PointerMoved)
+                        .into_iter()
+                        .collect(),
+                    ..Default::default()
+                },
+                |_| {
+                    if let Some(window) = egui::Window::new("Ignored ranges")
+                        .open(&mut open)
+                        .resizable(false)
+                        .movable(false)
+                        .show(&ctx, |ui| {
+                            ui.label("Protected content");
+                        })
+                    {
+                        window_button_cursor(&ctx, window.response.layer_id);
+                    }
+                },
+            )
+        };
+        // Windows have an initial invisible sizing pass.
+        frame(None).drop_without_applying_deltas();
+        frame(None).drop_without_applying_deltas();
+        let buttons = ctx
+            .interactive_rects_last_pass()
+            .into_iter()
+            .filter(|rect| rect.width() < 30.0 && rect.height() < 30.0)
+            .collect::<Vec<_>>();
+        assert_eq!(buttons.len(), 2, "close and collapse buttons");
+        for button in buttons {
+            let output = frame(Some(button.center()));
+            assert_eq!(
+                output.platform_output.cursor_icon,
+                egui::CursorIcon::PointingHand
+            );
+            output.drop_without_applying_deltas();
+        }
+    }
+
+    #[test]
     fn actual_gutter_arrows_copy_chunks_and_lines_without_diff() {
         for theme in [egui::Theme::Dark, egui::Theme::Light] {
             let ctx = egui::Context::default();
@@ -3094,6 +3163,18 @@ mod tests {
             view.destination[1] = 1;
             frame(&mut view, &ctx, vec![]).drop_without_applying_deltas();
             let chunk = view.workspace.as_ref().unwrap().chunks(TwoWaySide::Left)[0].clone();
+            for id in [
+                egui::Id::new(("two-way-transfer", 0usize, chunk.id, chunk.range.start)),
+                egui::Id::new(("two-way-granularity", 0usize, chunk.id)),
+            ] {
+                let position = ctx.read_response(id).unwrap().rect.center();
+                let output = frame(&mut view, &ctx, vec![egui::Event::PointerMoved(position)]);
+                assert_eq!(
+                    output.platform_output.cursor_icon,
+                    egui::CursorIcon::PointingHand
+                );
+                output.drop_without_applying_deltas();
+            }
             click(
                 &mut view,
                 &ctx,

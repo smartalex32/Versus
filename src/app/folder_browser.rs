@@ -583,6 +583,11 @@ impl FolderBrowser {
                     ui.id().with(("merge-entry", side, &entry.relative_path)),
                     Sense::click(),
                 );
+                let response = if directory || file {
+                    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+                } else {
+                    response
+                };
                 let state = states
                     .get(&entry.relative_path)
                     .cloned()
@@ -1026,6 +1031,7 @@ impl FolderBrowser {
                                                     file.path.display()
                                                 ),
                                             )
+                                            .on_hover_cursor(egui::CursorIcon::PointingHand)
                                             .changed()
                                         {
                                             self.preview = None;
@@ -1049,6 +1055,7 @@ impl FolderBrowser {
                                                             hit.line, hit.matched
                                                         ),
                                                     )
+                                                    .on_hover_cursor(egui::CursorIcon::PointingHand)
                                                     .changed()
                                                 {
                                                     self.preview = None;
@@ -1084,7 +1091,9 @@ impl FolderBrowser {
                                                     RichText::new(&change.after).monospace(),
                                                 );
                                             });
-                                        });
+                                        })
+                                        .header_response
+                                        .on_hover_cursor(egui::CursorIcon::PointingHand);
                                     }
                                 });
                         }
@@ -1146,7 +1155,9 @@ impl FolderBrowser {
                                                         RichText::new(&file.text).monospace(),
                                                     );
                                                 });
-                                            });
+                                            })
+                                            .header_response
+                                            .on_hover_cursor(egui::CursorIcon::PointingHand);
                                     }
                                 });
                             ui.horizontal(|ui| {

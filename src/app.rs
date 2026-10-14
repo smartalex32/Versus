@@ -1914,6 +1914,7 @@ impl VersusApp {
                 let view = self.interactive.as_mut().unwrap();
                 if controls_ui
                     .checkbox(&mut enabled, "Run Diff")
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .on_hover_text("Compare loaded files to assist merging")
                     .changed()
                 {
@@ -5007,6 +5008,7 @@ fn set_theme(ctx: &egui::Context, theme: egui::Theme) {
     visuals.window_fill = palette.panel;
     visuals.extreme_bg_color = palette.background;
     visuals.override_text_color = Some(palette.text);
+    visuals.interact_cursor = Some(egui::CursorIcon::PointingHand);
     visuals.selection.bg_fill = palette.accent.gamma_multiply(0.3);
     visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, palette.border);
     ctx.set_visuals(visuals);
@@ -5624,6 +5626,79 @@ mod tests {
             .expect("Full selected path should wrap in the pane header");
         assert!(wrapped.pos.x + wrapped.galley.size().x < 450.0);
         assert!(text_positions(&output, "assembly")[0].y > wrapped.pos.y + wrapped.galley.size().y);
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn themed_buttons_use_pointer_cursor_without_overriding_disabled_or_text_fields() {
+        for theme in [egui::Theme::Light, egui::Theme::Dark] {
+            let ctx = egui::Context::default();
+            set_theme(&ctx, theme);
+            let mut text = String::from("editable text");
+            let mut rects = [Rect::NOTHING; 3];
+            let mut frame = |position: Option<Pos2>| {
+                ctx.run_ui(
+                    egui::RawInput {
+                        events: position
+                            .map(egui::Event::PointerMoved)
+                            .into_iter()
+                            .collect(),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        rects[0] = ui.button("Save").rect;
+                        rects[1] = ui.add_enabled(false, egui::Button::new("Unavailable")).rect;
+                        rects[2] = ui.text_edit_singleline(&mut text).rect;
+                    },
+                )
+            };
+            frame(None).drop_without_applying_deltas();
+            // Widget responses describe the previous pass; capture settled rectangles.
+            frame(None).drop_without_applying_deltas();
+            drop(frame);
+            for (index, expected) in [
+                egui::CursorIcon::PointingHand,
+                egui::CursorIcon::Default,
+                egui::CursorIcon::Text,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let output = ctx.run_ui(
+                    egui::RawInput {
+                        events: vec![egui::Event::PointerMoved(rects[index].center())],
+                        ..Default::default()
+                    },
+                    |ui| {
+                        let _ = ui.button("Save");
+                        ui.add_enabled(false, egui::Button::new("Unavailable"));
+                        ui.text_edit_singleline(&mut text);
+                    },
+                );
+                assert_eq!(
+                    output.platform_output.cursor_icon, expected,
+                    "{theme:?}, {index}"
+                );
+                output.drop_without_applying_deltas();
+            }
+        }
+    }
+
+    #[test]
+    fn merge_run_diff_checkbox_uses_pointer_cursor() {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut app = VersusApp::default();
+        app.set_workspace_merge(true);
+        let output = render(&mut app, &ctx, vec![]);
+        let position = text_centers(&output, "Run Diff")[0];
+        output.drop_without_applying_deltas();
+        let output = render(&mut app, &ctx, vec![egui::Event::PointerMoved(position)]);
+        assert_eq!(
+            output.platform_output.cursor_icon,
+            egui::CursorIcon::PointingHand
+        );
+        assert!(!app.interactive.as_ref().unwrap().run_diff_enabled());
         output.drop_without_applying_deltas();
     }
 
