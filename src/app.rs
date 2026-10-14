@@ -4252,8 +4252,7 @@ fn footer_guidance(ui: &mut egui::Ui, text: &str, dirty: bool) {
             egui::Id::new("workspace-guidance"),
             Sense::hover(),
         );
-        ui.add_sized(
-            available.size(),
+        ui.add(
             egui::Label::new(RichText::new(text).size(11.0).color(palette.muted))
                 .truncate()
                 .halign(egui::Align::LEFT),
@@ -5299,6 +5298,11 @@ mod tests {
                     .rect
                     .contains_rect(bounds)
             );
+            let guidance = ctx
+                .read_response(egui::Id::new("workspace-guidance"))
+                .unwrap()
+                .rect;
+            assert!((bounds.left() - guidance.left()).abs() < 1.0);
             assert!(
                 screen.shrink(10.0).contains_rect(bounds),
                 "Status outside window: {bounds:?}"
