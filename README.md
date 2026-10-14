@@ -33,10 +33,11 @@ folder workspaces. Zoom remains on the right. With Run Diff enabled, the compari
 the right of zoom, followed by difference navigation. A change count appears
 beside the left-side actions, using the same style as Diff. The legends are
 centered below the panes with full icons and text, including Conflict in Merge.
-The Merge legend shares its row with **Save Both** and **Unsaved Changes**.
-Turning Run Diff off hides the diff controls, change count, and normal legend
-entries while retaining the Merge settings. Each file and folder pane loads, expands, and
-scrolls independently; a single selected source opens immediately. Transfer
+The full legend stays visible regardless of Run Diff. It shares the footer with
+**Save Both** and **Unsaved Changes** in Merge; entries wrap within that footer
+when zoom or window width requires it. Turning Run Diff off hides the diff
+controls and change count while retaining the Merge settings. Each file and folder
+pane loads, expands, and scrolls independently; a single selected source opens immediately. Transfer
 controls and file comparison assistance become available once both files are open.
 
 Both panes show editable text, line numbers, and separate unsaved status. Select a
@@ -148,12 +149,14 @@ This keeps traversal within the selected roots and avoids loops or repeated
 comparisons when links point to ancestors or outside folders. Empty folders are
 included. Changing a path clears the prior result so it cannot be mistaken for
 the new selection.
-The status area is at the bottom right in both modes. It shows loading progress,
-saves, and source details. Errors appear as **1 error** or **N errors**; hover
-the summary to read the details. Moving or clicking inside either pane dismisses
-the errors. Long status messages are shortened on screen; hover for the complete
-text. Measured stages show percentage complete. Folder discovery and line alignment have no reliable
-total and show activity instead. Comparisons can be cancelled beside the
+The footer keeps updating guidance and completed-action messages on the left,
+with the legend in the middle. Action progress appears only while work is running,
+to the right of the legend in Diff and immediately left of **Save Both** in Merge.
+Errors appear in that area as **1 error** or **N errors**; hover the summary to
+read the details. Moving or clicking inside either pane dismisses the errors.
+Long messages are shortened on screen; hover for the complete text. Measured
+stages show percentage complete. Folder discovery and line alignment have no
+reliable total and show activity instead. Comparisons can be cancelled beside the
 progress status.
 The change count and current difference position stay beside + in the toolbar.
 

@@ -1054,10 +1054,12 @@ impl InteractiveView {
             .map(|index| format!("Change {} of {}", index + 1, self.diff_rows.len()))
             .unwrap_or_else(|| format!("{} changes", self.diff_rows.len()))
     }
-    pub(super) fn render_header_status(&mut self, ui: &mut egui::Ui) -> bool {
+    pub(super) fn render_activity_status(&mut self, ui: &mut egui::Ui) -> bool {
         let palette = Palette::for_context(ui.ctx());
         if let Some(job) = &self.diff_job {
-            ui.spinner();
+            if ui.available_width() > 2.0 * control_extent(ui) {
+                ui.spinner();
+            }
             let cancel_width = control_extent(ui) + ui.spacing().item_spacing.x;
             ui.allocate_ui_with_layout(
                 egui::vec2(
@@ -1078,26 +1080,42 @@ impl InteractiveView {
             header_status_label(ui, "Saving…", palette.muted);
             return true;
         }
-        if let Some(error) = &self.error {
-            header_status_label(ui, error, palette.error);
-            return true;
-        }
         if self.loading.is_some() || self.side_loading.iter().any(Option::is_some) {
             header_status_label(ui, "Loading selected files…", palette.muted);
             ui.ctx().request_repaint_after(Duration::from_millis(25));
             return true;
         }
-        if !self.status.is_empty() {
-            header_status_label(ui, &self.status, palette.muted);
-            return true;
-        }
         false
     }
-    pub(super) fn render_footer(&mut self, ui: &mut egui::Ui) {
-        self.footer(ui);
+    pub(super) fn render_footer(&mut self, ui: &mut egui::Ui) -> Rect {
+        self.footer(ui)
+    }
+    fn guidance_message(&self) -> &str {
+        if !self.has_actual_pair() {
+            return if self.side_has_file(0) || self.side_has_file(1) {
+                "Choose a file on the other side to begin."
+            } else {
+                "Choose a file on each side to begin."
+            };
+        }
+        if !self.status.is_empty()
+            && !self.status.starts_with("Loading")
+            && !self.status.starts_with("Saving")
+        {
+            &self.status
+        } else if self.editing {
+            "Select content and a destination to transfer."
+        } else {
+            "Inspect differences between the open files."
+        }
     }
     pub(super) fn footer_height(&self, ui: &egui::Ui) -> f32 {
-        control_extent(ui)
+        workspace_footer_height(
+            ui,
+            self.editing,
+            &self.footer_legend_icons(),
+            self.footer_legend_counts(),
+        )
     }
     pub(super) fn render_previews(&mut self, ctx: &egui::Context) {
         self.save_preview(ctx);
@@ -1122,7 +1140,7 @@ impl InteractiveView {
                 .unwrap_or_default();
             bottom_status_area(ui, |ui| {
                 if errors.is_empty() {
-                    self.render_header_status(ui);
+                    self.render_activity_status(ui);
                 } else {
                     error_summary(ui, &errors);
                 }
@@ -1139,8 +1157,7 @@ impl InteractiveView {
         ui.add_space(5.);
         let area = ui.available_rect_before_wrap();
         let footer_height = self.footer_height(ui);
-        let status_height = control_extent(ui);
-        let foot = footer_height + status_height + ui.spacing().item_spacing.y + 8.;
+        let foot = footer_height + 8.;
         let body = Rect::from_min_max(
             area.min,
             egui::pos2(area.right(), (area.bottom() - foot).max(area.top())),
@@ -1148,10 +1165,6 @@ impl InteractiveView {
         let footer = Rect::from_min_size(
             egui::pos2(area.left(), body.bottom() + 4.),
             egui::vec2(area.width(), footer_height),
-        );
-        let status = Rect::from_min_size(
-            egui::pos2(footer.left(), footer.bottom() + ui.spacing().item_spacing.y),
-            egui::vec2(area.width(), status_height),
         );
         let mut panes = split_rect(body);
         ui.scope_builder(egui::UiBuilder::new().max_rect(body), |ui| {
@@ -1162,9 +1175,11 @@ impl InteractiveView {
                 self.panes(ui);
             });
         });
-        ui.scope_builder(egui::UiBuilder::new().max_rect(footer), |ui| {
-            self.render_footer(ui)
-        });
+        let status = ui
+            .scope_builder(egui::UiBuilder::new().max_rect(footer), |ui| {
+                self.render_footer(ui)
+            })
+            .inner;
         self.render_previews(ui.ctx());
         (panes, status)
     }
@@ -1973,52 +1988,38 @@ impl InteractiveView {
         }
         ui.memory_mut(|m| m.data.insert_temp(id, open));
     }
-    fn footer(&mut self, ui: &mut egui::Ui) {
-        let p = Palette::for_context(ui.ctx());
+    fn footer(&mut self, ui: &mut egui::Ui) -> Rect {
         let icons = self.footer_legend_icons();
-        let save_enabled = self.editing
-            && self.workspace.is_some()
-            && self.side_has_file(0)
-            && self.side_has_file(1)
-            && !self.is_saving();
-        let row_height = control_extent(ui);
-        let (row, _) =
-            ui.allocate_exact_size(egui::vec2(ui.available_width(), row_height), Sense::hover());
-        let reserve = 126.0_f32.min(row.width() / 2.0);
-        let left = Rect::from_min_max(row.min, egui::pos2(row.left() + reserve, row.bottom()));
-        let center = Rect::from_min_max(
-            egui::pos2(left.right(), row.top()),
-            egui::pos2(row.right() - reserve, row.bottom()),
-        );
-        let right = Rect::from_min_max(egui::pos2(center.right(), row.top()), row.max);
-        ui.scope_builder(egui::UiBuilder::new().max_rect(left), |ui| {
-            if self.any_dirty() {
-                ui.label(RichText::new("Unsaved Changes").strong().color(p.changed));
-            }
+        let row = workspace_footer_layout(ui, self.editing, &icons, self.footer_legend_counts());
+        ui.scope_builder(egui::UiBuilder::new().max_rect(row.info), |ui| {
+            footer_guidance(ui, self.guidance_message(), self.any_dirty());
         });
-        ui.scope_builder(egui::UiBuilder::new().max_rect(center), |ui| {
-            bottom_legend_inline(ui, &icons, self.footer_legend_counts());
+        ui.scope_builder(egui::UiBuilder::new().max_rect(row.legend), |ui| {
+            bottom_legend(ui, &icons, self.footer_legend_counts());
         });
-        ui.scope_builder(
-            egui::UiBuilder::new()
-                .max_rect(right)
-                .layout(egui::Layout::right_to_left(egui::Align::Center)),
-            |ui| {
-                if ui
-                    .add_enabled(save_enabled, egui::Button::new("Save Both"))
-                    .clicked()
-                {
-                    self.request_save(vec![0, 1]);
-                }
-            },
-        );
+        if let Some(save) = row.save {
+            let enabled = self.workspace.is_some()
+                && self.side_has_file(0)
+                && self.side_has_file(1)
+                && !self.is_saving();
+            ui.scope_builder(
+                egui::UiBuilder::new()
+                    .max_rect(save)
+                    .layout(egui::Layout::right_to_left(egui::Align::Center)),
+                |ui| {
+                    if ui
+                        .add_enabled(enabled, egui::Button::new("Save Both"))
+                        .clicked()
+                    {
+                        self.request_save(vec![0, 1]);
+                    }
+                },
+            );
+        }
+        row.status
     }
     fn footer_legend_icons(&self) -> Vec<StatusIcon> {
-        let mut icons = if self.engine_enabled() {
-            DIFF_LEGEND_ICONS.to_vec()
-        } else {
-            Vec::new()
-        };
+        let mut icons = DIFF_LEGEND_ICONS.to_vec();
         if self.editing {
             icons.push(StatusIcon::Conflict);
         }
@@ -2680,20 +2681,33 @@ mod tests {
         assert!(!InteractiveView::default().run_diff_enabled())
     }
     #[test]
-    fn header_status_owns_busy_and_error_messages_outside_the_toolbar() {
+    fn activity_status_requires_a_running_action() {
         let ctx = egui::Context::default();
-        let mut view = InteractiveView::default();
-        view.status = "Loading file…".into();
-        let mut rendered = false;
-        ctx.run_ui(egui::RawInput::default(), |ui| {
-            rendered = view.render_header_status(ui);
-        })
-        .drop_without_applying_deltas();
-        assert!(rendered);
-        view.status.clear();
+        let mut view = view("left\n", "right\n");
+        view.status = "Saved 2 working copies.".into();
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            assert!(!view.render_activity_status(ui));
+        });
+        output.drop_without_applying_deltas();
+        assert_eq!(view.guidance_message(), "Saved 2 working copies.");
+        let (_sender, receiver) = mpsc::channel();
+        view.side_loading[0] = Some(SideLoad {
+            receiver,
+            path: "left.rs".into(),
+        });
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            assert!(view.render_activity_status(ui));
+        });
+        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape,
+            egui::Shape::Text(text) if text.galley.text() == "Loading selected files…")));
+        output.drop_without_applying_deltas();
+        view.side_loading[0] = None;
         view.error = Some("Load failed".into());
         ctx.run_ui(egui::RawInput::default(), |ui| {
-            assert!(view.render_header_status(ui));
+            assert!(
+                !view.render_activity_status(ui),
+                "errors are shown by the separate summary"
+            );
         })
         .drop_without_applying_deltas();
     }

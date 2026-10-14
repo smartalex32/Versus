@@ -503,11 +503,9 @@ impl FolderBrowser {
     }
     /// Draws one status in the bottom-right status area. Controls intentionally do
     /// not duplicate this text so narrow folder views retain usable actions.
-    pub(super) fn render_header_status(&self, ui: &mut egui::Ui) -> bool {
+    pub(super) fn render_activity_status(&self, ui: &mut egui::Ui) -> bool {
         let palette = Palette::for_context(ui.ctx());
-        if let Some(error) = &self.error {
-            header_status_label(ui, error, palette.error);
-        } else if let Some(save) = &self.save {
+        if let Some(save) = &self.save {
             let percent = if save.total == 0 {
                 100
             } else {

@@ -1141,10 +1141,6 @@ impl VersusApp {
 
     fn progress_indicator(&self, ui: &mut egui::Ui) {
         let palette = Palette::for_context(ui.ctx());
-        if let Some(message) = &self.drop_message {
-            header_status_label(ui, message, palette.error);
-            return;
-        }
         let file_job = self.file_view.as_ref().and_then(|view| view.job.as_ref());
         let job = file_job
             .map(|job| (&job.progress, &job.cancellation, "Cancel file comparison"))
@@ -1184,24 +1180,6 @@ impl VersusApp {
         } else if self.source_jobs.iter().any(Option::is_some) {
             header_status_label(ui, "Opening selected sources…", palette.text);
             ui.ctx().request_repaint_after(Duration::from_millis(60));
-        } else if let Some(error) = self
-            .file_view
-            .as_ref()
-            .and_then(|view| view.error.as_ref())
-            .or(self.error.as_ref())
-        {
-            header_status_label(ui, error, palette.error);
-        } else if self.merge_mode {
-            // Merge loaders report their own status. The legacy selection
-            // message must not keep saying "Opening" after they finish.
-        } else if let Some(path) = self
-            .selected
-            .as_ref()
-            .filter(|_| self.tree.is_some() && self.file_view.is_none())
-        {
-            header_status_label(ui, &path.display().to_string(), palette.muted);
-        } else {
-            header_status_label(ui, &self.message, palette.muted);
         }
     }
 
@@ -1351,10 +1329,12 @@ impl VersusApp {
                 self.legend(ui);
                 ui.add_space(5.0);
                 let available = ui.available_rect_before_wrap();
-                let footer_height =
-                    bottom_legend_height(ui, &DIFF_LEGEND_ICONS, self.comparison_counts())
-                        + ui.spacing().item_spacing.y
-                        + control_extent(ui);
+                let footer_height = workspace_footer_height(
+                    ui,
+                    false,
+                    &DIFF_LEGEND_ICONS,
+                    self.comparison_counts(),
+                );
                 let footer_rect = Rect::from_min_max(
                     egui::pos2(
                         available.left(),
@@ -1670,8 +1650,7 @@ impl VersusApp {
         }
         ui.add_space(5.0);
         let area = ui.available_rect_before_wrap();
-        let footer_height =
-            view.footer_height(ui) + ui.spacing().item_spacing.y + control_extent(ui) + 4.0;
+        let footer_height = view.footer_height(ui) + 4.0;
         let body = Rect::from_min_max(
             area.min,
             egui::pos2(
@@ -1743,9 +1722,10 @@ impl VersusApp {
         }
         self.merge_file_open = self.merge_file_sides.iter().any(|open| *open);
         ui.scope_builder(egui::UiBuilder::new().max_rect(footer), |ui| {
-            view.render_footer(ui);
-            ui.add_space(ui.spacing().item_spacing.y);
-            self.render_bottom_status(ui, Some(&mut view));
+            let status = view.render_footer(ui);
+            ui.scope_builder(egui::UiBuilder::new().max_rect(status), |ui| {
+                self.render_bottom_status(ui, Some(&mut view));
+            });
         });
         view.render_previews(ui.ctx());
         if self.merge_folders.is_none() {
@@ -2991,7 +2971,7 @@ impl VersusApp {
                         ComparisonMode::File => "Choose files to compare",
                     }
                 };
-                empty_display(ui, body_height, title, &self.message);
+                empty_display(ui, body_height, title, "");
             }
         });
         if let Some((path, present, type_mismatch)) = open {
@@ -3132,18 +3112,31 @@ impl VersusApp {
                 && self
                     .merge_folders
                     .as_ref()
-                    .is_some_and(|browser| browser.render_header_status(ui))
+                    .is_some_and(|browser| browser.render_activity_status(ui))
             {
-            } else if view.is_none_or(|view| !view.render_header_status(ui)) {
+            } else if view.is_none_or(|view| !view.render_activity_status(ui)) {
                 self.progress_indicator(ui);
             }
         });
     }
 
     fn footer(&mut self, ui: &mut egui::Ui) {
-        bottom_legend(ui, &DIFF_LEGEND_ICONS, self.comparison_counts());
-        ui.add_space(ui.spacing().item_spacing.y);
-        self.render_bottom_status(ui, None);
+        let row = workspace_footer_layout(ui, false, &DIFF_LEGEND_ICONS, self.comparison_counts());
+        let guidance = self
+            .selected
+            .as_ref()
+            .filter(|_| self.tree.is_some() && self.file_view.is_none())
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| self.message.clone());
+        ui.scope_builder(egui::UiBuilder::new().max_rect(row.info), |ui| {
+            footer_guidance(ui, &guidance, false);
+        });
+        ui.scope_builder(egui::UiBuilder::new().max_rect(row.legend), |ui| {
+            bottom_legend(ui, &DIFF_LEGEND_ICONS, self.comparison_counts());
+        });
+        ui.scope_builder(egui::UiBuilder::new().max_rect(row.status), |ui| {
+            self.render_bottom_status(ui, None);
+        });
     }
 
     fn merge_exit_dialog(&mut self, ctx: &egui::Context) {
@@ -4045,11 +4038,20 @@ fn legend_rows(
     icons: &[StatusIcon],
     counts: Option<[usize; 6]>,
 ) -> Vec<Vec<(StatusIcon, String, f32)>> {
+    legend_rows_in_width(ui, icons, counts, ui.available_width())
+}
+
+fn legend_rows_in_width(
+    ui: &egui::Ui,
+    icons: &[StatusIcon],
+    counts: Option<[usize; 6]>,
+    available: f32,
+) -> Vec<Vec<(StatusIcon, String, f32)>> {
     let mut rows = Vec::new();
     let mut row = Vec::new();
     let mut width = 0.0;
     let gap = ui.spacing().item_spacing.x;
-    let available = ui.available_width().max(1.0);
+    let available = available.max(1.0);
     for icon in icons {
         let label = legend_label(*icon, counts);
         let text_width = ui
@@ -4125,42 +4127,6 @@ fn bottom_legend(ui: &mut egui::Ui, icons: &[StatusIcon], counts: Option<[usize;
     height
 }
 
-fn bottom_legend_inline(
-    ui: &mut egui::Ui,
-    icons: &[StatusIcon],
-    counts: Option<[usize; 6]>,
-) -> f32 {
-    let gap = ui.spacing().item_spacing.x;
-    let width = icons
-        .iter()
-        .map(|icon| {
-            14.0 + gap
-                + 5.0
-                + ui.painter()
-                    .layout_no_wrap(
-                        legend_label(*icon, counts),
-                        FontId::proportional(10.0),
-                        Palette::for_context(ui.ctx()).text,
-                    )
-                    .size()
-                    .x
-        })
-        .sum::<f32>()
-        + icons.len().saturating_sub(1) as f32 * gap;
-    let available = ui.available_width();
-    let height = control_extent(ui);
-    egui::ScrollArea::horizontal()
-        .id_salt("merge-footer-legend")
-        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-        .auto_shrink([false, false])
-        .max_height(height)
-        .show(ui, |ui| {
-            ui.set_width(width.max(available));
-            bottom_legend(ui, icons, counts);
-        });
-    height
-}
-
 fn error_summary(ui: &mut egui::Ui, errors: &[String]) {
     let label = format!(
         "{} error{}",
@@ -4182,6 +4148,117 @@ fn error_summary(ui: &mut egui::Ui, errors: &[String]) {
             Sense::hover(),
         )
         .on_hover_text(errors.join("\n\n"));
+    });
+}
+
+struct WorkspaceFooterLayout {
+    info: Rect,
+    legend: Rect,
+    status: Rect,
+    save: Option<Rect>,
+}
+
+fn footer_side_width(width: f32, with_save: bool) -> f32 {
+    (width * 0.20)
+        .max(if with_save { 160.0 } else { 128.0 })
+        .min(260.0)
+        .min(width / 2.0)
+}
+
+fn workspace_footer_height(
+    ui: &egui::Ui,
+    with_save: bool,
+    icons: &[StatusIcon],
+    counts: Option<[usize; 6]>,
+) -> f32 {
+    let width = ui.available_width();
+    let legend_width = width - 2.0 * footer_side_width(width, with_save);
+    let rows = legend_rows_in_width(ui, icons, counts, legend_width)
+        .len()
+        .max(1);
+    rows as f32 * control_extent(ui) + rows.saturating_sub(1) as f32 * ui.spacing().item_spacing.y
+}
+
+fn workspace_footer_layout(
+    ui: &mut egui::Ui,
+    with_save: bool,
+    icons: &[StatusIcon],
+    counts: Option<[usize; 6]>,
+) -> WorkspaceFooterLayout {
+    let height = workspace_footer_height(ui, with_save, icons, counts);
+    let extent = control_extent(ui);
+    let (row, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), height), Sense::hover());
+    // Symmetric side areas keep the legend centered. At high zoom its entries
+    // wrap inside this same footer, with guidance, activity and Save alongside.
+    let side = footer_side_width(row.width(), with_save);
+    let line_top = row.center().y - extent / 2.0;
+    let line_bottom = line_top + extent;
+    let info = Rect::from_min_max(
+        egui::pos2(row.left(), line_top),
+        egui::pos2(row.left() + side, line_bottom),
+    );
+    let legend = Rect::from_min_max(
+        egui::pos2(info.right(), row.top()),
+        egui::pos2(row.right() - side, row.bottom()),
+    );
+    ui.interact(legend, egui::Id::new("workspace-legend"), Sense::hover());
+    let save = with_save.then(|| {
+        let width = ui
+            .painter()
+            .layout_no_wrap(
+                "Save Both".into(),
+                egui::TextStyle::Button.resolve(ui.style()),
+                Color32::WHITE,
+            )
+            .size()
+            .x
+            + 2.0 * ui.spacing().button_padding.x;
+        Rect::from_min_max(
+            egui::pos2(row.right() - width.min(side), line_top),
+            egui::pos2(row.right(), line_bottom),
+        )
+    });
+    let status = Rect::from_min_max(
+        egui::pos2(legend.right(), line_top),
+        egui::pos2(
+            save.map_or(row.right(), |save| {
+                save.left() - ui.spacing().item_spacing.x
+            }),
+            line_bottom,
+        ),
+    );
+    WorkspaceFooterLayout {
+        info,
+        legend,
+        status,
+        save,
+    }
+}
+
+fn footer_guidance(ui: &mut egui::Ui, text: &str, dirty: bool) {
+    let palette = Palette::for_context(ui.ctx());
+    ui.set_clip_rect(ui.clip_rect().intersect(ui.max_rect()));
+    ui.horizontal(|ui| {
+        if dirty {
+            ui.label(
+                RichText::new("Unsaved Changes")
+                    .strong()
+                    .color(palette.changed),
+            );
+        }
+        let available = ui.available_rect_before_wrap();
+        ui.interact(
+            available,
+            egui::Id::new("workspace-guidance"),
+            Sense::hover(),
+        );
+        ui.add_sized(
+            available.size(),
+            egui::Label::new(RichText::new(text).size(11.0).color(palette.muted))
+                .truncate()
+                .halign(egui::Align::LEFT),
+        )
+        .on_hover_text(text);
     });
 }
 
@@ -5153,7 +5230,7 @@ mod tests {
     }
 
     #[test]
-    fn selected_item_status_is_visible_at_bottom_right() {
+    fn selected_item_guidance_is_visible_at_bottom_left() {
         for (width, height) in [(900.0, 650.0), (1200.0, 800.0)] {
             let ctx = egui::Context::default();
             apply_theme(&ctx);
@@ -5213,11 +5290,11 @@ mod tests {
                     }
                     _ => None,
                 })
-                .expect("Clicked item should appear in bottom status");
+                .expect("Clicked item should appear in bottom guidance");
             let bounds = Rect::from_min_size(text.pos, text.galley.size());
             assert!(bounds.top() >= app.pane_rects[0].bottom());
             assert!(
-                ctx.read_response(egui::Id::new("workspace-status"))
+                ctx.read_response(egui::Id::new("workspace-guidance"))
                     .unwrap()
                     .rect
                     .contains_rect(bounds)
@@ -7200,17 +7277,17 @@ mod tests {
                     let ctx = egui::Context::default();
                     set_theme(&ctx, theme);
                     ctx.set_zoom_factor(zoom);
+                    // Apply the pending scale before rendering fixed physical bounds.
+                    ctx.run_ui(egui::RawInput::default(), |_| {})
+                        .drop_without_applying_deltas();
                     let mut app = VersusApp::default();
                     app.set_workspace_merge(merge);
                     if merge {
                         app.interactive.as_mut().unwrap().set_run_diff(run_diff);
                     }
+                    render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
                     let output = render(&mut app, &ctx, vec![]);
-                    let mut icons = if !merge || run_diff {
-                        DIFF_LEGEND_ICONS.to_vec()
-                    } else {
-                        Vec::new()
-                    };
+                    let mut icons = DIFF_LEGEND_ICONS.to_vec();
                     if merge {
                         icons.push(StatusIcon::Conflict);
                     }
@@ -7234,11 +7311,19 @@ mod tests {
                                 .shapes
                                 .iter()
                                 .any(|shape| rect.intersects(shape.shape.visual_bounding_rect())
-                                    && !matches!(shape.shape, egui::Shape::Text(_)))
+                                    && !matches!(shape.shape, egui::Shape::Text(_))),
+                            "icon={} merge={merge} zoom={zoom} rect={rect:?}",
+                            icon.label()
                         );
                         bounds = bounds.union(rect);
                     }
-                    assert!((bounds.center().x - ctx.viewport_rect().center().x).abs() < 1.0);
+                    let legend = ctx
+                        .read_response(egui::Id::new("workspace-legend"))
+                        .unwrap()
+                        .rect;
+                    assert!((legend.center().x - ctx.viewport_rect().center().x).abs() < 1.0);
+                    assert!(legend.contains_rect(bounds));
+                    assert!((bounds.center().x - legend.center().x).abs() < 1.0);
                     assert!(bounds.bottom() <= ctx.viewport_rect().bottom());
                     if merge {
                         let save = text_centers(&output, "Save Both")[0];
@@ -7247,10 +7332,97 @@ mod tests {
                     if merge && !run_diff {
                         assert!(
                             ctx.read_response(egui::Id::new(("legend", "Different")))
-                                .is_none()
+                                .is_some()
                         );
                         assert!(text_positions(&output, "0 changes").is_empty());
                     }
+                    output.drop_without_applying_deltas();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn footer_guidance_and_activity_share_the_legend_row_in_both_modes() {
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            for zoom in [1.0, 2.0] {
+                for merge in [false, true] {
+                    let ctx = egui::Context::default();
+                    set_theme(&ctx, theme);
+                    ctx.set_zoom_factor(zoom);
+                    // Apply the pending scale before rendering fixed physical bounds.
+                    ctx.run_ui(egui::RawInput::default(), |_| {})
+                        .drop_without_applying_deltas();
+                    let mut app = VersusApp::default();
+                    app.switch_comparison_mode(ComparisonMode::File);
+                    app.set_workspace_merge(merge);
+                    render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+                    let output = render(&mut app, &ctx, vec![]);
+                    let info = ctx
+                        .read_response(egui::Id::new("workspace-guidance"))
+                        .unwrap()
+                        .rect;
+                    let legend = ctx
+                        .read_response(egui::Id::new("workspace-legend"))
+                        .unwrap()
+                        .rect;
+                    let status = ctx
+                        .read_response(egui::Id::new("workspace-status"))
+                        .unwrap()
+                        .rect;
+                    let guidance = text_centers(&output, "Choose a file on each side to begin.")[0];
+                    assert!(
+                        info.contains(guidance),
+                        "merge={merge} zoom={zoom} info={info:?} label={guidance:?}"
+                    );
+                    assert!(info.right() <= legend.left());
+                    assert!(legend.right() <= status.left());
+                    assert!((info.center().y - legend.center().y).abs() < 1.0);
+                    assert!((status.center().y - legend.center().y).abs() < 1.0);
+                    if merge {
+                        let save = text_centers(&output, "Save Both")[0];
+                        assert!(status.right() < save.x);
+                        assert!((save.y - status.center().y).abs() < 1.0);
+                        assert!(!app.interactive.as_ref().unwrap().run_diff_enabled());
+                    }
+                    assert!(
+                        output.shapes.iter().all(|shape| match &shape.shape {
+                            egui::Shape::Text(text) => !status.contains(text.pos),
+                            _ => true,
+                        }),
+                        "idle status area should be empty"
+                    );
+                    output.drop_without_applying_deltas();
+                    let panes = app.pane_rects;
+                    let (_sender, receiver) = mpsc::channel();
+                    let progress = Arc::new(ComparisonProgress::default());
+                    progress.begin(ProgressStage::ComparingFiles, Some(100));
+                    progress.advance(25);
+                    let cancellation = Arc::new(AtomicBool::new(false));
+                    app.job = Some(ComparisonJob {
+                        receiver,
+                        cancellation,
+                        progress,
+                        started: Instant::now(),
+                        roots: ["left".into(), "right".into()],
+                    });
+                    let output = render(&mut app, &ctx, vec![]);
+                    assert_eq!(app.pane_rects, panes);
+                    let cancel = ctx
+                        .read_response(egui::Id::new("Cancel folder comparison"))
+                        .unwrap()
+                        .rect;
+                    assert!(
+                        status.contains_rect(cancel),
+                        "cancel={cancel:?}, status={status:?}"
+                    );
+                    assert!(output.shapes.iter().any(|shape| matches!(&shape.shape,
+                        egui::Shape::Text(text) if status.contains(text.pos)
+                            && text.galley.text().contains("25% complete"))));
+                    assert_eq!(
+                        text_positions(&output, "Choose a file on each side to begin.").len(),
+                        1
+                    );
                     output.drop_without_applying_deltas();
                 }
             }
@@ -7988,10 +8160,15 @@ mod tests {
                         .read_response(egui::Id::new("workspace-status"))
                         .unwrap()
                         .rect;
+                    let info = ctx
+                        .read_response(egui::Id::new("workspace-guidance"))
+                        .unwrap()
+                        .rect;
                     let status_text = text_centers(&output, &app.message)[0];
                     assert!(status.top() >= panes[0].bottom());
                     assert!((status.right() - (size.x - 10.0)).abs() < 1.0);
-                    assert!((status_text.x - status.center().x).abs() < 1.0);
+                    assert!(info.contains(status_text));
+                    assert!(info.right() < status.left());
                     assert!((status_text.y - status.center().y).abs() < 1.0);
                     output.drop_without_applying_deltas();
                     let progress = Arc::new(ComparisonProgress::default());
