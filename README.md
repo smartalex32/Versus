@@ -84,13 +84,20 @@ Find and Replace opens a compact dialog centered on the app; click outside,
 press Escape, or use its close icon to dismiss it. The larger fields use muted,
 italic placeholders. Choose **LEFT**, **RIGHT**, or **BOTH**; the side colors match
 the pane labels. **Match Case**, **Match Whole Word**, and **Use Regular Expression**
-are tooltip-equipped VS Code icons inside the Find field. Press Enter in Find or
-use the Find action to search. The **Replace Next** and **Replace All** icons beside
-the Replace field preview the next selected match or all selected matches;
-unchecked matches and files stay excluded. Apply the preview to update working
+are tooltip-equipped VS Code icons inside the Find field. Search starts after
+500 ms without typing, and matches appear progressively in the right results
+panel. A separate **LEFT / RIGHT** toggle above that panel filters the displayed
+side without changing the search scope. Rows show the line number and matching
+text; hover over a row and use its **X** to exclude it from replacement.
+Undo, Redo, and Refresh sit beside the scope controls, with search status below.
+**Refresh** repopulates excluded results and rereads files to include external
+changes, while preserving unsaved working copies. The **Replace Next** and
+**Replace All** icons beside the Replace field preview the next included match
+or all included matches. Apply the preview to update working
 copies as an undoable batch. Remaining original matches advance after each apply,
 so repeated Replace Next actions stay accurate when replacement lengths change.
-Use Find again after undo or changing the search options to refresh the results.
+Use Refresh after undo to refresh the results; changing search options restarts
+the search automatically.
 With Run Diff enabled, folder statuses include staged working copies and ignored
 ranges. The up/down controls jump to changed files and reveal their parent folders.
 

@@ -5,6 +5,7 @@ mod folder_browser;
 mod interactive_view;
 #[cfg(test)]
 mod operating_mode_tests;
+mod search_result_rows;
 mod search_session;
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 use folder_browser::FolderBrowser;

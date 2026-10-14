@@ -697,11 +697,18 @@ impl InteractiveView {
         let mut prepared = Vec::new();
         let mut unique = std::collections::BTreeSet::new();
         for change in &preview.changes {
-            let key = preview
+            let base = preview
                 .bases
                 .get(&change.path)
-                .map(WorkingFile::identity_key)
-                .unwrap_or_else(|| self.key_for(&change.path));
+                .ok_or_else(|| "Replacement preview is missing a file snapshot.".to_owned())?;
+            let key = base.identity_key();
+            let existing_key = self.key_for(&change.path);
+            if self.documents.contains_key(&existing_key) && existing_key != key {
+                return Err(format!(
+                    "{} now resolves to a different file. Reopen the workspace before replacing it.",
+                    change.path.display()
+                ));
+            }
             if !unique.insert(key.clone()) {
                 return Err(
                     "Replacement preview contains duplicate file identities. Run Find again."
@@ -712,8 +719,33 @@ impl InteractiveView {
                 .documents
                 .get(&key)
                 .cloned()
-                .or_else(|| preview.bases.get(&change.path).cloned().map(retained_file))
-                .ok_or_else(|| "Replacement preview is missing a file snapshot.".to_owned())?;
+                .unwrap_or_else(|| retained_file(base.clone()));
+            if retained.document.text() != base.text
+                || retained.file.fingerprint != base.fingerprint
+                || retained.file.encoding != base.encoding
+            {
+                let mut working = retained.file.clone();
+                working.text = retained.document.text().into();
+                if retained.document.is_dirty() || working.is_dirty() || base.is_dirty() {
+                    return Err(format!(
+                        "{} changed after preview. Refresh search before replacing it.",
+                        change.path.display()
+                    ));
+                }
+                // Refresh only the staged clone. All participants must pass
+                // their protected-range and preview checks before publication.
+                // A separate history entry makes batch Undo return to fresh
+                // disk text while retaining older editor history.
+                if let Some(edit) = external_refresh_edit(retained.document.text(), &base.text) {
+                    retained.document.apply_byte_edits(
+                        HistoryTag::Local(retained.document.revision()), vec![edit],
+                    ).map_err(|error| format!("{} cannot refresh protected content: {error}. Adjust the ignored ranges before replacing it.", change.path.display()))?;
+                }
+                retained.document.mark_saved_text(base.text.clone());
+                let native_path = retained.file.path.clone();
+                retained.file = base.clone();
+                retained.file.path = native_path.or_else(|| Some(change.path.clone()));
+            }
             if retained.document.text() != change.before {
                 return Err(format!(
                     "{} changed after preview. Run Find again.",
@@ -2460,6 +2492,38 @@ impl InteractiveView {
         }
     }
 }
+/// A bounded text splice for reconciling a clean cache with fresh disk bytes.
+/// This does not run the diff engine. Conservative overlap checks are delegated
+/// to the document, preserving protected content and history.
+fn external_refresh_edit(before: &str, after: &str) -> Option<(Range<usize>, String)> {
+    if before == after {
+        return None;
+    }
+    let mut start = before
+        .bytes()
+        .zip(after.bytes())
+        .take_while(|(a, b)| a == b)
+        .count();
+    while !before.is_char_boundary(start) || !after.is_char_boundary(start) {
+        start -= 1;
+    }
+    let mut suffix = before[start..]
+        .bytes()
+        .rev()
+        .zip(after[start..].bytes().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    while !before.is_char_boundary(before.len() - suffix)
+        || !after.is_char_boundary(after.len() - suffix)
+    {
+        suffix -= 1;
+    }
+    Some((
+        start..before.len() - suffix,
+        after[start..after.len() - suffix].into(),
+    ))
+}
+
 fn retained_file(file: WorkingFile) -> RetainedFile {
     let mut document = InteractiveDocument::new(file.text.clone());
     document.mark_saved_text(file.baseline_text().unwrap_or_default());
@@ -3570,6 +3634,136 @@ mod tests {
             bases,
             skipped: Vec::new(),
         }
+    }
+    fn refreshed_preview(
+        view: &InteractiveView,
+        updates: &[(&str, &str)],
+    ) -> versus::SearchPreview {
+        let mut bases = view.export_working_files();
+        let mut changes = Vec::new();
+        for (path, text) in updates {
+            let path = PathBuf::from(path);
+            let base = bases.get_mut(&path).unwrap();
+            base.text = (*text).into();
+            base.fingerprint = versus::FileFingerprint::Bytes(text.as_bytes().to_vec());
+            let start = text.find("match").unwrap();
+            let range = start..start + 5;
+            let mut after = (*text).to_owned();
+            after.replace_range(range.clone(), "found");
+            changes.push(SearchChange {
+                path,
+                before: (*text).into(),
+                after,
+                hit_ids: vec![changes.len() as u64 + 1],
+                ranges: vec![range.clone()],
+                edits: vec![(range, "found".into())],
+            });
+        }
+        versus::SearchPreview {
+            changes,
+            bases,
+            skipped: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn refreshed_replacement_preserves_history_and_remaps_protected_manual_ranges() {
+        let mut view = view("before match\nkept\n", "right\n");
+        view.workspace
+            .as_mut()
+            .unwrap()
+            .set_text(TwoWaySide::Left, "old match\nkept\n");
+        view.invalidate_diff();
+        let mut saved = view.export_working_files();
+        saved
+            .get_mut(&PathBuf::from("left.rs"))
+            .unwrap()
+            .fingerprint = versus::FileFingerprint::Bytes(b"old match\nkept\n".to_vec());
+        view.update_saved_files(&saved);
+        let workspace = view.workspace.as_mut().unwrap();
+        workspace.add_ignored_range(TwoWaySide::Left, 1..2).unwrap();
+        let chunk = workspace.create_chunk(TwoWaySide::Left, 1..2).unwrap();
+        view.invalidate_diff();
+        let preview = refreshed_preview(&view, &[("left.rs", "new\nold match\nkept\n")]);
+        view.apply_search_preview(&preview).unwrap();
+        assert_eq!(view.working_text(0), Some("new\nold found\nkept\n"));
+        let workspace = view.workspace.as_ref().unwrap();
+        assert_eq!(workspace.ignored_ranges(TwoWaySide::Left), &[2..3]);
+        assert_eq!(
+            workspace
+                .chunks(TwoWaySide::Left)
+                .iter()
+                .find(|item| item.id == chunk)
+                .unwrap()
+                .range,
+            2..3
+        );
+        view.undo_batch(false).unwrap();
+        assert_eq!(view.working_text(0), Some("new\nold match\nkept\n"));
+        view.selected_side = 0;
+        view.move_history(false);
+        assert_eq!(view.working_text(0), Some("old match\nkept\n"));
+        assert_eq!(
+            view.workspace
+                .as_ref()
+                .unwrap()
+                .ignored_ranges(TwoWaySide::Left),
+            &[1..2]
+        );
+        for _ in 0..3 {
+            view.move_history(false);
+        }
+        assert_eq!(view.working_text(0), Some("before match\nkept\n"));
+        assert!(!view.run_diff_enabled());
+    }
+
+    #[test]
+    fn refreshed_replacement_rejects_dirty_or_protected_documents_atomically() {
+        for dirty in [true, false] {
+            let mut view = view("left match\n", "right match\n");
+            let preview = refreshed_preview(
+                &view,
+                &[
+                    ("left.rs", "new left match\n"),
+                    ("right.rs", "new right match\n"),
+                ],
+            );
+            if dirty {
+                view.workspace
+                    .as_mut()
+                    .unwrap()
+                    .set_text(TwoWaySide::Right, "unsaved match\n");
+            } else {
+                view.workspace
+                    .as_mut()
+                    .unwrap()
+                    .add_ignored_range(TwoWaySide::Right, 0..1)
+                    .unwrap();
+            }
+            view.invalidate_diff();
+            let before = view.export_working_files();
+            let revision = view.folder_revision_signature();
+            assert!(view.apply_search_preview(&preview).is_err());
+            assert_eq!(view.export_working_files(), before);
+            assert_eq!(view.folder_revision_signature(), revision);
+            assert!(!view.can_undo_batch());
+        }
+    }
+
+    #[test]
+    fn external_refresh_splice_is_utf8_safe_and_preserves_exact_line_endings() {
+        for (before, after) in [
+            ("é match\r\n", "ê match\r\n"),
+            ("a\r\n", "a\n"),
+            ("", "文"),
+            ("文", ""),
+        ] {
+            let (range, replacement) = external_refresh_edit(before, after).unwrap();
+            let mut text = before.to_owned();
+            text.replace_range(range, &replacement);
+            assert_eq!(text, after);
+        }
+        assert_eq!(external_refresh_edit("same", "same"), None);
     }
     #[test]
     fn folder_batch_and_file_history_undo_and_redo_in_transaction_order() {

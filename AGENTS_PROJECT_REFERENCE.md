@@ -70,9 +70,15 @@ APIs and must fail cleanly when unavailable.
   cancel stale workers and restart that delay. Empty queries and dismissal cancel
   pending searches. There is no separate Find action. Full-width fields have
   muted italic hints, colored LEFT/RIGHT/BOTH scope controls, inline search-option
-  icons, and external Replace Next/All icons. These actions preview selected
-  targets before applying
-  an undoable working-copy batch; unchecked matches remain excluded. Applied
+  icons, and external Replace Next/All icons. Undo, Redo, and Refresh follow the
+  scope buttons, with search status below. A separate LEFT/RIGHT view toggle
+  filters results without changing scope. Results stream in batches while
+  searching; each virtualized row shows a line number, bounded highlighted text
+  preview, and a hover X for exclusion. The empty-state hint is confined to the
+  results panel. Refresh repopulates exclusions and rereads clean files from disk,
+  while dirty working copies take precedence. Replace actions preview included
+  targets before applying an undoable working-copy batch. Partial, cancelled,
+  failed, and stale searches cannot authorize replacements. Applied
   replacements advance the original result set using exact byte edits, without
   re-searching replacement text. Search option/scope changes and undo invalidate
   stale targets. It supports plain text/regex, case, and whole-word matching. Batch
@@ -89,6 +95,14 @@ APIs and must fail cleanly when unavailable.
 - `src/app/search_session.rs` prepares Next/All previews and remaps remaining
   original search hits after apply, preserving aliases, selections and byte anchors.
   It neither starts searches or diffs nor modifies files.
+- Applying a refreshed search preview reconciles stale clean editor documents
+  only on staged clones, through an undoable protected text splice, then applies
+  the replacement batch. All participants validate before publication. Batch
+  Undo returns to refreshed disk text; earlier editor history remains available.
+  Dirty documents, identity changes, and protected overlap fail safely. Preview
+  alone does not update editor state; saves retain the refreshed byte fingerprint.
+- `src/app/search_result_rows.rs` paints bounded text previews and hover removal
+  controls without loading files or modifying search data.
 - `src/app/find_icons.rs` embeds the official Codicons font for the five find/replace
   controls in a dedicated font family. Body fonts are unchanged. Attribution and
   the CC BY 4.0 license are included under `assets/codicons/` and copied into Windows
@@ -108,8 +122,11 @@ APIs and must fail cleanly when unavailable.
   history and save deduplication. Original native paths are retained as write
   destinations.
 - `src/core/search_replace.rs` owns recursive text search and replacement previews.
-  It avoids following symlinks and skips binary/oversized files; selected results
-  are applied to working copies and are never written until an explicit save.
+  It interleaves directory enumeration with cancellable, batched matching and
+  avoids following symlinks. Clean cached files are refreshed from disk; dirty
+  files retain their unsaved content and original save fingerprint. It skips
+  binary/oversized files; included results are applied to working copies and are
+  never written until an explicit save.
 - `src/core/merge.rs` owns traditional three-way merge calculation and conflict
   markers. `src/main.rs` executes the CLI request, writes its output, returns 0
   when clean, 1 when conflicts were written, and 2 on argument, IO, or merge error.
