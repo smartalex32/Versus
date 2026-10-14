@@ -167,6 +167,14 @@ with the legend in the middle. Action progress appears only while work is runnin
 to the right of the legend in Diff and immediately left of **Save Both** in Merge.
 Errors appear in that area as **1 error** or **N errors**; hover the summary to
 read the details. Moving or clicking inside either pane dismisses the errors.
+
+Desktop diagnostics are written to **versus.log** beside the executable (beside
+the outer AppImage on Linux). The log records comparison progress, folder-cache
+timing, paths, and failures without recording compared file contents. It rotates
+at 5 MiB and keeps **versus.log.1** as the previous log. If that folder is not
+writable, the status error area reports the logging failure. Comparing a folder
+with itself is supported and finishes with zero changes; worker failures stop
+the operation and appear in the same error area.
 Long messages are shortened on screen; hover for the complete text. Measured
 stages show percentage complete. Folder discovery and line alignment have no
 reliable total and show activity instead. Comparisons can be cancelled beside the

@@ -25,6 +25,15 @@ struct OverlayJob {
     /// the cache once the worker completes for the current generation.
     signatures: BTreeMap<PathBuf, u64>,
 }
+
+/// The merged directory state is independent of the visible rows.  Keeping it
+/// behind an `Arc` means both folder panes and difference navigation can reuse
+/// one aggregation without cloning every path on each frame.
+struct MergedFolderCache {
+    tree_key: Option<usize>,
+    states: Arc<BTreeMap<PathBuf, DirectoryEntryState>>,
+    difference_paths: Arc<Vec<PathBuf>>,
+}
 impl Drop for OverlayJob {
     fn drop(&mut self) {
         self.cancel.store(true, Ordering::Relaxed);
@@ -56,6 +65,7 @@ pub(super) struct FolderBrowser {
     listings: [BTreeMap<PathBuf, Vec<LazyDirectoryItem>>; 2],
     jobs: [BTreeMap<PathBuf, ListingJob>; 2],
     overlays: BTreeMap<PathBuf, DirectoryEntryState>,
+    merged_cache: Option<MergedFolderCache>,
     /// Every path that has had a working-copy overlay.  Retaining it lets a
     /// save or ignored-range removal restore the disk-backed folder state.
     overlay_paths: BTreeSet<PathBuf>,
@@ -105,6 +115,7 @@ impl FolderBrowser {
             listings: std::array::from_fn(|_| BTreeMap::new()),
             jobs: std::array::from_fn(|_| BTreeMap::new()),
             overlays: BTreeMap::new(),
+            merged_cache: None,
             overlay_paths: BTreeSet::new(),
             overlay_cache: BTreeMap::new(),
             overlay_token: None,
@@ -138,6 +149,11 @@ impl FolderBrowser {
     pub(super) fn set_sources(&mut self, sources: [Option<PathBuf>; 2]) {
         self.set_sources_internal(sources, true);
     }
+    /// Drops the cached projection of a comparison tree and working-copy
+    /// overlays. The owner calls this when it installs or clears the base tree.
+    pub(super) fn invalidate_comparison_cache(&mut self) {
+        self.merged_cache = None;
+    }
     pub(super) fn set_search_sources(&mut self, sources: [Option<PathBuf>; 2]) {
         self.set_sources_internal(sources, false);
     }
@@ -168,6 +184,7 @@ impl FolderBrowser {
         self.overlay_token = None;
         self.overlay_not_before = None;
         self.overlays.clear();
+        self.invalidate_comparison_cache();
         self.overlay_paths.clear();
         self.overlay_cache.clear();
         self.search = None;
@@ -351,12 +368,14 @@ impl FolderBrowser {
             self.overlay_paths.clear();
             self.overlay_cache.clear();
             self.overlays.clear();
+            self.invalidate_comparison_cache();
             return;
         }
         // A folder diff has meaning only with two real directory sources.
         // Single-source navigation remains fully available without it.
         let Some(roots) = self.paired_roots() else {
             self.overlays.clear();
+            self.invalidate_comparison_cache();
             self.overlay_paths.clear();
             self.overlay_cache.clear();
             return;
@@ -394,6 +413,7 @@ impl FolderBrowser {
                     // freshly reused active-editor comparison beside it.
                     self.overlays.extend(results);
                     self.overlay_cache.extend(job.signatures.clone());
+                    self.invalidate_comparison_cache();
                 }
                 Ok((_, Err(error))) => self.error = Some(error),
                 Ok(_) => {}
@@ -467,6 +487,7 @@ impl FolderBrowser {
                         modified.contains(left),
                     );
                     self.overlay_cache.insert(left.to_path_buf(), signature);
+                    self.invalidate_comparison_cache();
                 }
             }
         }
@@ -495,8 +516,9 @@ impl FolderBrowser {
         let worker_cancel = cancel.clone();
         let (sender, receiver) = mpsc::channel();
         std::thread::spawn(move || {
-            let result =
-                compare_overlay_files(roots, requested, loaded, ignored, options, &worker_cancel);
+            let result = crate::diagnostics::catch_worker("Merge working-copy comparison", || {
+                compare_overlay_files(roots, requested, loaded, ignored, options, &worker_cancel)
+            });
             let _ = sender.send((generation, result));
         });
         self.overlay_job = Some(OverlayJob {
@@ -510,26 +532,16 @@ impl FolderBrowser {
             .retain_mut(|job| matches!(job.receiver.try_recv(), Err(TryRecvError::Empty)));
     }
     pub(super) fn difference_paths(
-        &self,
+        &mut self,
         base: &FolderTree,
         view: &InteractiveView,
-    ) -> Vec<PathBuf> {
+    ) -> Arc<Vec<PathBuf>> {
         if !view.run_diff_enabled() {
-            return Vec::new();
+            return Arc::new(Vec::new());
         }
-        let states = merged_folder_states(Some(base), &self.overlays);
-        base.all_rows()
-            .into_iter()
-            .filter(|row| !row.node.is_directory())
-            .filter(|row| {
-                row.node.left.kind == Some(DirectoryEntryKind::File)
-                    || row.node.right.kind == Some(DirectoryEntryKind::File)
-            })
-            .filter_map(|row| {
-                (states.get(&row.node.relative_path) != Some(&DirectoryEntryState::Same))
-                    .then_some(row.node.relative_path.clone())
-            })
-            .collect()
+        self.merged_folder_cache(Some(base))
+            .difference_paths
+            .clone()
     }
     pub(super) fn render_controls(&mut self, ui: &mut egui::Ui, view: &mut InteractiveView) {
         self.poll(ui.ctx());
@@ -577,9 +589,9 @@ impl FolderBrowser {
         let root = self.sources[side].clone()?;
         let palette = Palette::for_context(ui.ctx());
         let states = if view.run_diff_enabled() && self.paired_roots().is_some() {
-            merged_folder_states(compared, &self.overlays)
+            self.merged_folder_cache(compared).states.clone()
         } else {
-            BTreeMap::new()
+            Arc::new(BTreeMap::new())
         };
         let mut rows = Vec::new();
         self.rows_for_side(side, std::path::Path::new(""), 0, &mut rows);
@@ -1631,59 +1643,107 @@ fn overlay_signature(
     hasher.finish()
 }
 
-fn merged_folder_states(
+impl FolderBrowser {
+    /// Returns a projection that includes working-copy comparisons.  It is
+    /// rebuilt only when a comparison tree or overlay changes, never while the
+    /// user merely scrolls, expands, or paints either pane.
+    fn merged_folder_cache(&mut self, tree: Option<&FolderTree>) -> &MergedFolderCache {
+        let tree_key = tree.map(|tree| std::ptr::from_ref(tree.root()) as usize);
+        let stale = self
+            .merged_cache
+            .as_ref()
+            .is_none_or(|cache| cache.tree_key != tree_key);
+        if stale {
+            let started = Instant::now();
+            let cache = build_merged_folder_cache(tree, &self.overlays, tree_key);
+            crate::diagnostics::info(format!(
+                "Merge folder state cache rebuilt: {} entries, {} differences in {:.3}s",
+                cache.states.len(),
+                cache.difference_paths.len(),
+                started.elapsed().as_secs_f64()
+            ));
+            self.merged_cache = Some(cache);
+        }
+        self.merged_cache
+            .as_ref()
+            .expect("cache was just populated")
+    }
+}
+
+fn build_merged_folder_cache(
     tree: Option<&FolderTree>,
     overlays: &BTreeMap<PathBuf, DirectoryEntryState>,
-) -> BTreeMap<PathBuf, DirectoryEntryState> {
-    let Some(tree) = tree else {
-        return overlays.clone();
-    };
-    let rows = tree.all_rows();
-    let mut states: BTreeMap<_, _> = rows
-        .iter()
-        .map(|row| (row.node.relative_path.clone(), row.node.state.clone()))
-        .collect();
-    states.extend(
-        overlays
-            .iter()
-            .map(|(path, state)| (path.clone(), state.clone())),
-    );
+    tree_key: Option<usize>,
+) -> MergedFolderCache {
+    let mut states = BTreeMap::new();
+    let mut differences = Vec::new();
+    if let Some(tree) = tree {
+        merge_node_states(tree.root(), overlays, &mut states, &mut differences);
+        // Overlay paths are normally leaves from this tree. Keep any that are
+        // temporarily absent from a refreshed tree so callers retain the old
+        // behavior until the next comparison tree is installed.
+        for (path, state) in overlays {
+            states.entry(path.clone()).or_insert_with(|| state.clone());
+        }
+    } else {
+        states.extend(
+            overlays
+                .iter()
+                .map(|(path, state)| (path.clone(), state.clone())),
+        );
+    }
+    MergedFolderCache {
+        tree_key,
+        states: Arc::new(states),
+        difference_paths: Arc::new(differences),
+    }
+}
 
-    // FolderTree owns the baseline directory aggregation. Reapply it after
-    // replacing a leaf with its unsaved working-copy comparison so parent
-    // badges continue to describe their visible descendants.
-    let mut directories: Vec<_> = rows
-        .iter()
-        .filter(|row| row.node.is_directory())
-        .map(|row| row.node.relative_path.clone())
-        .collect();
-    directories.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
-    for directory in directories {
-        let Some(state) = states.get(&directory).cloned() else {
-            continue;
-        };
-        if matches!(
-            state,
+/// Aggregates from direct children rather than repeatedly scanning the complete
+/// state map for every directory. This is linear in the tree size after the
+/// underlying ordered-map inserts, and lets overlays restore a previously
+/// changed parent to `Same` when all of its visible children are clean.
+fn merge_node_states(
+    node: &TreeNode,
+    overlays: &BTreeMap<PathBuf, DirectoryEntryState>,
+    states: &mut BTreeMap<PathBuf, DirectoryEntryState>,
+    differences: &mut Vec<PathBuf>,
+) -> DirectoryEntryState {
+    let mut child_is_different = false;
+    for child in &node.children {
+        let state = merge_node_states(child, overlays, states, differences);
+        child_is_different |= state != DirectoryEntryState::Same;
+    }
+    let direct = overlays
+        .get(&node.relative_path)
+        .cloned()
+        .unwrap_or_else(|| node.state.clone());
+    let state = if node.is_directory()
+        && !matches!(
+            direct,
             DirectoryEntryState::Error(_)
                 | DirectoryEntryState::TypeMismatch
                 | DirectoryEntryState::LeftOnly
                 | DirectoryEntryState::RightOnly
         ) {
-            continue;
+        if child_is_different {
+            DirectoryEntryState::Different
+        } else {
+            DirectoryEntryState::Same
         }
-        let different_child = states.iter().any(|(path, child)| {
-            path.parent() == Some(directory.as_path()) && *child != DirectoryEntryState::Same
-        });
-        states.insert(
-            directory,
-            if different_child {
-                DirectoryEntryState::Different
-            } else {
-                DirectoryEntryState::Same
-            },
-        );
+    } else {
+        direct
+    };
+    if !node.relative_path.as_os_str().is_empty() {
+        if (node.left.kind == Some(DirectoryEntryKind::File)
+            || node.right.kind == Some(DirectoryEntryKind::File))
+            && state != DirectoryEntryState::Same
+        {
+            differences.push(node.relative_path.clone());
+        }
+        states.insert(node.relative_path.clone(), state.clone());
     }
-    states
+    state
 }
 
 fn pending_save_files(
@@ -1741,6 +1801,33 @@ mod tests {
     use super::*;
     use versus::{FileFingerprint, TextEncoding};
 
+    fn tree_entry(
+        path: &str,
+        kind: DirectoryEntryKind,
+        state: DirectoryEntryState,
+    ) -> versus::DirectoryEntry {
+        let left_exists = !matches!(state, DirectoryEntryState::RightOnly);
+        let right_exists = !matches!(state, DirectoryEntryState::LeftOnly);
+        versus::DirectoryEntry {
+            relative_path: PathBuf::from(path),
+            left_exists,
+            right_exists,
+            left_kind: left_exists.then(|| kind.clone()),
+            right_kind: right_exists.then(|| kind.clone()),
+            left_size: None,
+            right_size: None,
+            kind,
+            state,
+        }
+    }
+
+    fn folder_tree(entries: Vec<versus::DirectoryEntry>) -> FolderTree {
+        FolderTree::from_diff(&versus::DirectoryDiff {
+            entries,
+            cancelled: false,
+        })
+    }
+
     fn dialog_frame(
         browser: &mut FolderBrowser,
         view: &mut InteractiveView,
@@ -1765,6 +1852,138 @@ mod tests {
             },
             |_| browser.search_window(ctx, view),
         )
+    }
+
+    #[test]
+    fn merged_states_reaggregate_nested_parents_and_preserve_intrinsic_states() {
+        let mut mixed_type = tree_entry(
+            "file-folder",
+            DirectoryEntryKind::File,
+            DirectoryEntryState::TypeMismatch,
+        );
+        mixed_type.left_kind = Some(DirectoryEntryKind::Directory);
+        mixed_type.left_size = None;
+        let tree = folder_tree(vec![
+            mixed_type,
+            tree_entry(
+                "src",
+                DirectoryEntryKind::Directory,
+                DirectoryEntryState::Same,
+            ),
+            tree_entry(
+                "src/changed.rs",
+                DirectoryEntryKind::File,
+                DirectoryEntryState::Different,
+            ),
+            tree_entry(
+                "src/clean.rs",
+                DirectoryEntryKind::File,
+                DirectoryEntryState::Same,
+            ),
+            tree_entry(
+                "only-left",
+                DirectoryEntryKind::Directory,
+                DirectoryEntryState::LeftOnly,
+            ),
+            tree_entry(
+                "mismatch",
+                DirectoryEntryKind::File,
+                DirectoryEntryState::TypeMismatch,
+            ),
+            tree_entry(
+                "only-right.txt",
+                DirectoryEntryKind::File,
+                DirectoryEntryState::RightOnly,
+            ),
+            tree_entry(
+                "unreadable",
+                DirectoryEntryKind::Directory,
+                DirectoryEntryState::Error(CompareError::io(
+                    "unreadable",
+                    std::io::Error::other("denied"),
+                )),
+            ),
+        ]);
+        let mut overlays = BTreeMap::new();
+        overlays.insert(PathBuf::from("src/changed.rs"), DirectoryEntryState::Same);
+        let cache = build_merged_folder_cache(Some(&tree), &overlays, Some(1));
+        assert_eq!(
+            cache.states[std::path::Path::new("src")],
+            DirectoryEntryState::Same,
+            "a clean overlay must restore all nested parent badges"
+        );
+        assert_eq!(
+            cache.states[std::path::Path::new("only-left")],
+            DirectoryEntryState::LeftOnly
+        );
+        assert_eq!(
+            cache.states[std::path::Path::new("mismatch")],
+            DirectoryEntryState::TypeMismatch
+        );
+        assert_eq!(
+            cache.states[std::path::Path::new("only-right.txt")],
+            DirectoryEntryState::RightOnly
+        );
+        assert!(matches!(
+            cache.states[std::path::Path::new("unreadable")],
+            DirectoryEntryState::Error(_)
+        ));
+        assert_eq!(
+            cache.difference_paths.as_slice(),
+            [
+                PathBuf::from("file-folder"),
+                PathBuf::from("mismatch"),
+                PathBuf::from("only-right.txt")
+            ]
+        );
+        for terminal in [
+            DirectoryEntryState::TypeMismatch,
+            DirectoryEntryState::LeftOnly,
+            DirectoryEntryState::RightOnly,
+            DirectoryEntryState::Error(CompareError::io(
+                "src",
+                std::io::Error::other("overlay failed"),
+            )),
+        ] {
+            overlays.insert(PathBuf::from("src"), terminal.clone());
+            let cache = build_merged_folder_cache(Some(&tree), &overlays, Some(1));
+            assert_eq!(
+                cache.states[std::path::Path::new("src")],
+                terminal,
+                "a direct terminal overlay must survive parent aggregation"
+            );
+        }
+    }
+
+    #[test]
+    fn merged_state_cache_is_reused_for_large_identical_trees_until_invalidated() {
+        let mut entries = Vec::new();
+        for index in 0..8_000 {
+            entries.push(tree_entry(
+                &format!("dir-{index}"),
+                DirectoryEntryKind::Directory,
+                DirectoryEntryState::Same,
+            ));
+            entries.push(tree_entry(
+                &format!("dir-{index}/file.txt"),
+                DirectoryEntryKind::File,
+                DirectoryEntryState::Same,
+            ));
+        }
+        let tree = folder_tree(entries);
+        let mut browser = FolderBrowser::new_search([None, None]);
+        let first = browser.merged_folder_cache(Some(&tree)).states.clone();
+        let first_paths = browser
+            .merged_folder_cache(Some(&tree))
+            .difference_paths
+            .clone();
+        let second = browser.merged_folder_cache(Some(&tree));
+        assert!(Arc::ptr_eq(&first, &second.states));
+        assert!(Arc::ptr_eq(&first_paths, &second.difference_paths));
+        assert!(second.difference_paths.is_empty());
+        browser.invalidate_comparison_cache();
+        let rebuilt = browser.merged_folder_cache(Some(&tree));
+        assert!(!Arc::ptr_eq(&first, &rebuilt.states));
     }
 
     #[test]

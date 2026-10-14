@@ -77,7 +77,7 @@ pub(super) struct InteractiveView {
     diff_dirty: bool,
     diff_rows: Vec<usize>,
     folder_overview: bool,
-    folder_differences: Vec<PathBuf>,
+    folder_differences: Arc<Vec<PathBuf>>,
     folder_difference_index: Option<usize>,
     folder_jump: Option<PathBuf>,
     expanded: [Vec<u64>; 2],
@@ -1128,11 +1128,15 @@ impl InteractiveView {
         self.save_preview(ctx);
         self.auto_preview(ctx);
     }
-    pub(super) fn set_folder_differences(&mut self, differences: Vec<PathBuf>) {
+    pub(super) fn set_folder_differences(&mut self, differences: impl Into<Arc<Vec<PathBuf>>>) {
+        let differences = differences.into();
+        if Arc::ptr_eq(&self.folder_differences, &differences) {
+            return;
+        }
         if self.folder_differences != differences {
-            self.folder_differences = differences;
             self.folder_difference_index = None;
         }
+        self.folder_differences = differences;
     }
     pub(super) fn take_folder_jump(&mut self) -> Option<PathBuf> {
         self.folder_jump.take()
@@ -2703,6 +2707,18 @@ mod tests {
     use super::*;
     use versus::SearchChange;
     #[test]
+    fn equal_folder_difference_results_adopt_the_new_cache_without_resetting_navigation() {
+        let mut view = InteractiveView::default();
+        let original = Arc::new(vec![PathBuf::from("changed.txt")]);
+        view.set_folder_differences(original);
+        view.folder_difference_index = Some(0);
+        let refreshed = Arc::new(vec![PathBuf::from("changed.txt")]);
+        view.set_folder_differences(refreshed.clone());
+        assert!(Arc::ptr_eq(&view.folder_differences, &refreshed));
+        assert_eq!(view.folder_difference_index, Some(0));
+    }
+
+    #[test]
     fn diff_starts_disabled() {
         assert!(!InteractiveView::default().run_diff_enabled())
     }
@@ -2742,7 +2758,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut view = InteractiveView::default();
         view.folder_overview = true;
-        view.folder_differences = vec![PathBuf::from("one"), PathBuf::from("two")];
+        view.folder_differences = Arc::new(vec![PathBuf::from("one"), PathBuf::from("two")]);
         assert_eq!(view.change_label(), "2 changes");
         view.jump_diff(true, &ctx);
         assert_eq!(view.change_label(), "Change 1 of 2");

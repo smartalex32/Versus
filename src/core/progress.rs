@@ -7,6 +7,7 @@ pub enum ProgressStage {
     ComparingFiles,
     ComparingLines,
     Highlighting,
+    BuildingTree,
     Finished,
 }
 

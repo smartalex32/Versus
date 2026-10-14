@@ -89,6 +89,8 @@ struct ComparisonJob {
     roots: [PathBuf; 2],
     started: Instant,
     progress: Arc<ComparisonProgress>,
+    logged_progress: Option<(ProgressStage, u64, Option<u64>)>,
+    last_progress_log: Instant,
 }
 
 struct FileJob {
@@ -215,6 +217,7 @@ pub struct VersusApp {
     merge_file_open: bool,
     merge_file_sides: [bool; 2],
     folder_diff_settings: Option<[bool; 3]>,
+    logged_errors: Vec<String>,
     pending_merge_exit: Option<MergeExit>,
     comparison_mode: ComparisonMode,
     file_view: Option<FileView>,
@@ -274,6 +277,7 @@ impl Default for VersusApp {
             merge_file_open: false,
             merge_file_sides: [false; 2],
             folder_diff_settings: None,
+            logged_errors: Vec::new(),
             pending_merge_exit: None,
             comparison_mode: ComparisonMode::Folder,
             file_view: None,
@@ -316,6 +320,9 @@ impl Default for VersusApp {
 }
 
 impl VersusApp {
+    pub(super) fn report_startup_error(&mut self, error: String) {
+        self.error = Some(error);
+    }
     pub fn new(
         cc: &eframe::CreationContext<'_>,
         launch: Option<crate::cli::LaunchRequest>,
@@ -456,6 +463,9 @@ impl VersusApp {
     }
 
     fn invalidate(&mut self) {
+        if let Some(browser) = &mut self.merge_folders {
+            browser.invalidate_comparison_cache();
+        }
         self.file_view = None;
         if let Some(job) = self.job.take() {
             job.cancellation.store(true, Ordering::Relaxed);
@@ -776,19 +786,46 @@ impl VersusApp {
         let worker_progress = progress.clone();
         let ignore_whitespace = self.ignore_whitespace;
         let ignore_line_endings = self.ignore_line_endings;
+        crate::diagnostics::info(format!(
+            "Folder comparison started: left={} right={} ignore_whitespace={ignore_whitespace} ignore_line_endings={ignore_line_endings}",
+            roots[0].display(),
+            roots[1].display()
+        ));
         std::thread::spawn(move || {
-            let result = versus::compare_directories(
-                &worker_roots[0],
-                &worker_roots[1],
-                &DirectoryCompareOptions {
-                    cancellation: Some(worker_cancellation),
-                    ignore_whitespace,
-                    ignore_line_endings,
-                    progress: Some(worker_progress),
-                    ..Default::default()
-                },
-            )
-            .map(|diff| FolderTree::from_diff(&diff));
+            let result = crate::diagnostics::catch_worker("Folder comparison", || {
+                let diff = versus::compare_directories(
+                    &worker_roots[0],
+                    &worker_roots[1],
+                    &DirectoryCompareOptions {
+                        cancellation: Some(worker_cancellation.clone()),
+                        ignore_whitespace,
+                        ignore_line_endings,
+                        progress: Some(worker_progress.clone()),
+                        ..Default::default()
+                    },
+                )?;
+                crate::diagnostics::info(format!(
+                    "Folder content comparison finished: {} entries; cancelled={}; building tree",
+                    diff.entries.len(),
+                    diff.cancelled
+                ));
+                worker_progress.begin(ProgressStage::BuildingTree, None);
+                if worker_cancellation.load(Ordering::Relaxed) {
+                    return Ok(FolderTree::from_diff(&versus::DirectoryDiff {
+                        entries: vec![],
+                        cancelled: true,
+                    }));
+                }
+                let tree = FolderTree::from_diff(&diff);
+                worker_progress.begin(ProgressStage::Finished, Some(diff.entries.len() as u64));
+                worker_progress.advance(diff.entries.len() as u64);
+                Ok::<_, CompareError>(tree)
+            })
+            .map_err(|message| CompareError {
+                path: None,
+                kind: versus::CompareErrorKind::Io,
+                message,
+            });
             let _ = sender.send(result);
         });
         self.job = Some(ComparisonJob {
@@ -797,15 +834,36 @@ impl VersusApp {
             roots,
             started: Instant::now(),
             progress,
+            logged_progress: None,
+            last_progress_log: Instant::now(),
         });
         self.error = None;
         self.message = "Scanning folders and comparing file contents…".into();
     }
 
     fn poll_comparison(&mut self, ctx: &egui::Context) {
-        let Some(job) = &self.job else {
+        let Some(job) = &mut self.job else {
             return;
         };
+        let snapshot = job.progress.snapshot();
+        let state = (snapshot.stage, snapshot.completed, snapshot.total);
+        if job.logged_progress != Some(state)
+            && (job
+                .logged_progress
+                .is_none_or(|last| last.0 != snapshot.stage)
+                || job.last_progress_log.elapsed() >= Duration::from_secs(1))
+        {
+            crate::diagnostics::info(format!(
+                "Folder comparison progress: {:?} {}/{}",
+                snapshot.stage,
+                snapshot.completed,
+                snapshot
+                    .total
+                    .map_or_else(|| "unknown".into(), |total| total.to_string())
+            ));
+            job.logged_progress = Some(state);
+            job.last_progress_log = Instant::now();
+        }
         let result = match job.receiver.try_recv() {
             Ok(result) => Some(result.map_err(|error| error.to_string())),
             Err(TryRecvError::Disconnected) => Some(Err(
@@ -816,11 +874,16 @@ impl VersusApp {
         if let Some(result) = result {
             let job = self.job.take().unwrap();
             if job.cancellation.load(Ordering::Relaxed) {
+                crate::diagnostics::info("Folder comparison cancelled");
                 self.message = "Comparison cancelled.".into();
                 return;
             }
             match result {
                 Ok(mut tree) => {
+                    crate::diagnostics::info(format!(
+                        "Folder comparison result received after {:.3}s",
+                        job.started.elapsed().as_secs_f64()
+                    ));
                     let same_roots = self.roots.as_ref() == Some(&job.roots);
                     if same_roots {
                         let anchor = self.tree.as_ref().and_then(|previous| {
@@ -878,11 +941,15 @@ impl VersusApp {
                         .collect();
                     self.counts = count_entries(&tree);
                     self.tree = Some(tree);
+                    if let Some(browser) = &mut self.merge_folders {
+                        browser.invalidate_comparison_cache();
+                    }
                     self.roots = Some(job.roots);
                     self.elapsed = Some(job.started.elapsed());
                     self.message = "Comparison complete.".into();
                 }
                 Err(error) => {
+                    crate::diagnostics::error(format!("Folder comparison failed: {error}"));
                     self.error = Some(error);
                     self.message =
                         "Comparison failed. Check the folder paths and access permissions.".into();
@@ -1462,6 +1529,10 @@ impl VersusApp {
         if merge {
             if self.merge_folders.is_some() {
                 self.tree = None;
+                self.merge_folders
+                    .as_mut()
+                    .unwrap()
+                    .invalidate_comparison_cache();
             }
             if let Some(job) = self.job.take() {
                 job.cancellation.store(true, Ordering::Relaxed);
@@ -1639,9 +1710,9 @@ impl VersusApp {
         } else {
             if let Some(view) = &mut self.interactive {
                 view.set_from_folders(false);
-                let differences = match (&self.tree, &self.merge_folders) {
+                let differences = match (&self.tree, &mut self.merge_folders) {
                     (Some(tree), Some(browser)) => browser.difference_paths(tree, view),
-                    _ => Vec::new(),
+                    _ => Arc::new(Vec::new()),
                 };
                 view.set_folder_differences(differences);
                 view.render_toolbar(ui);
@@ -1705,9 +1776,9 @@ impl VersusApp {
             ],
         );
         view.set_from_folders(self.merge_folders.is_some());
-        let differences = match (&self.tree, &self.merge_folders) {
+        let differences = match (&self.tree, &mut self.merge_folders) {
             (Some(tree), Some(browser)) => browser.difference_paths(tree, &view),
-            _ => Vec::new(),
+            _ => Arc::new(Vec::new()),
         };
         view.set_folder_differences(differences);
         view.render_workspace_toolbar(ui, !self.merge_file_sides.iter().any(|open| *open));
@@ -1850,7 +1921,12 @@ impl VersusApp {
                 job.cancellation.store(true, Ordering::Relaxed);
             }
             self.folder_diff_settings = None;
-            self.tree = None;
+            if self.tree.take().is_some() {
+                self.merge_folders
+                    .as_mut()
+                    .unwrap()
+                    .invalidate_comparison_cache();
+            }
             return;
         }
         let settings = view.merge_options();
@@ -3194,6 +3270,12 @@ impl VersusApp {
 
     fn render_bottom_status(&mut self, ui: &mut egui::Ui, view: Option<&mut InteractiveView>) {
         let errors = self.error_details(view.as_deref());
+        for error in &errors {
+            if !self.logged_errors.contains(error) {
+                crate::diagnostics::error(format!("Status error: {error}"));
+            }
+        }
+        self.logged_errors = errors.clone();
         bottom_status_area(ui, |ui| {
             if !errors.is_empty() {
                 error_summary(ui, &errors);
@@ -3341,6 +3423,9 @@ impl eframe::App for VersusApp {
             .to_normalized_gamma_f32()
     }
     fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        if let Some(error) = crate::diagnostics::take_error() {
+            self.error = Some(error);
+        }
         self.poll_recent(ctx);
         self.poll_sources(ctx);
         self.poll_comparison(ctx);
@@ -3916,6 +4001,7 @@ fn progress_text(snapshot: versus::ProgressSnapshot) -> String {
         ProgressStage::ComparingFiles => "Comparing files",
         ProgressStage::ComparingLines => "Comparing lines",
         ProgressStage::Highlighting => "Highlighting differences",
+        ProgressStage::BuildingTree => "Finalizing folder tree",
         ProgressStage::Finished => "Preparing comparison",
     };
     if let Some(fraction) = snapshot.fraction() {
@@ -6336,6 +6422,8 @@ mod tests {
             cancellation: Arc::new(AtomicBool::new(false)),
             roots: ["new-left".into(), "new-right".into()],
             started: Instant::now(),
+            logged_progress: None,
+            last_progress_log: Instant::now(),
             progress: Arc::new(ComparisonProgress::default()),
         });
         sender
@@ -6350,6 +6438,68 @@ mod tests {
         assert!(flag.load(Ordering::Relaxed));
         assert!(app.job.is_none() && app.tree.is_none() && app.roots.is_none());
         assert!(sender.send(Ok(fixture())).is_err());
+    }
+
+    #[test]
+    fn same_folder_merge_diff_finishes_without_changes_and_keeps_browsing() {
+        let fixture = SourceFixture::new();
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut app = VersusApp::default();
+        app.set_workspace_merge(true);
+        for side in 0..2 {
+            app.select_path(side, fixture.path("left"));
+        }
+        settle_sources(&mut app, &ctx);
+        app.interactive.as_mut().unwrap().set_run_diff(true);
+        render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+        assert!(app.job.is_some());
+        settle_sources(&mut app, &ctx);
+        assert!(app.tree.is_some() && app.error.is_none());
+        assert_eq!(app.counts[1..], [0; 5]);
+        for _ in 0..3 {
+            let output = render(&mut app, &ctx, vec![]);
+            assert_eq!(text_positions(&output, "0 changes").len(), 1);
+            assert_eq!(text_positions(&output, "model.txt").len(), 2);
+            assert_eq!(
+                app.interactive.as_ref().unwrap().change_label(),
+                "0 changes"
+            );
+            output.drop_without_applying_deltas();
+        }
+    }
+
+    #[test]
+    fn folder_worker_panic_becomes_a_status_error_and_releases_the_job() {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut app = loaded_app();
+        let sender = attach_job(&mut app);
+        std::thread::spawn(move || {
+            let result = crate::diagnostics::catch_worker(
+                "Folder comparison",
+                || -> Result<FolderTree, &'static str> {
+                    panic!("test comparison failure");
+                },
+            )
+            .map_err(|message| CompareError {
+                path: None,
+                kind: versus::CompareErrorKind::Io,
+                message,
+            });
+            sender.send(result).unwrap();
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.job.is_some() {
+            app.poll_comparison(&ctx);
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(app.error.as_ref().unwrap().contains("worker panicked"));
+        let output = render(&mut app, &ctx, vec![]);
+        assert_eq!(text_positions(&output, "1 error").len(), 1);
+        assert!(app.tree.is_some(), "failure keeps the previous tree usable");
+        output.drop_without_applying_deltas();
     }
 
     #[test]
@@ -7826,6 +7976,8 @@ mod tests {
                         cancellation,
                         progress,
                         started: Instant::now(),
+                        logged_progress: None,
+                        last_progress_log: Instant::now(),
                         roots: ["left".into(), "right".into()],
                     });
                     let output = render(&mut app, &ctx, vec![]);
@@ -8613,6 +8765,8 @@ mod tests {
                             cancellation: cancellation.clone(),
                             progress,
                             started: Instant::now(),
+                            logged_progress: None,
+                            last_progress_log: Instant::now(),
                             roots: app.roots.clone().unwrap(),
                         });
                         (Some(sender), None)

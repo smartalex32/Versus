@@ -82,6 +82,10 @@ APIs and must fail cleanly when unavailable.
   cancellable per-file comparisons overlay staged content and protected ranges on
   the folder results; unchanged working-copy results are reused. Difference jumps
   reveal the target using only shallow ancestor listings.
+  Merge folder status uses a cached bottom-up tree traversal. Both panes and
+  navigation share the same state and difference-path snapshots; unchanged frames
+  do not rebuild them. Tree replacement and working-copy overlays invalidate the
+  cache. Identical folder roots are valid and produce no differences.
 - `src/app/search_session.rs` prepares Next/All previews and remaps remaining
   original search hits after apply, preserving aliases, selections and byte anchors.
   It neither starts searches or diffs nor modifies files.
@@ -187,6 +191,15 @@ APIs and must fail cleanly when unavailable.
 - `src/core/progress.rs` publishes synchronized stage snapshots. Measured stages
   show percentage complete for the current measured stage; scanning and line
   alignment show activity without an invented total. Time estimates are removed.
+  Folder comparisons explicitly show tree finalization before reporting complete.
+- `src/diagnostics.rs` writes desktop diagnostics to `versus.log` beside the
+  executable (beside the outer AppImage on Linux). A bounded queue keeps writes
+  off the UI thread; logs rotate at 5 MiB with one `versus.log.1` backup. Events
+  include version, timestamps, process/session IDs, folder paths, progress,
+  cache rebuild timing, and errors, without logging compared file contents.
+  Logging setup/write failures appear in the existing status error area. Folder
+  comparison and working-copy comparison workers convert panics to errors rather
+  than leaving active jobs stuck. Shutdown flush waits for at most 500 ms.
 - `tests/` covers externally observable comparison and filesystem behavior.
 - `.cargo/config.toml` replaces crates.io with the checked-in `vendor/` tree and
   forces Cargo offline.

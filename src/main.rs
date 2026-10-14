@@ -2,6 +2,7 @@
 
 mod app;
 mod cli;
+mod diagnostics;
 mod logo;
 #[cfg(windows)]
 mod native_drop;
@@ -28,7 +29,17 @@ fn main() -> std::process::ExitCode {
             return std::process::ExitCode::from(2);
         }
     };
-    match run(launch) {
+    let (log_guard, logging_error) = match diagnostics::initialize() {
+        Ok(guard) => (Some(guard), None),
+        Err(error) => (None, Some(error)),
+    };
+    let result = run(launch, logging_error);
+    if let Err(error) = &result {
+        diagnostics::error(format!("Application failed: {error}"));
+    }
+    diagnostics::info("Application closed");
+    drop(log_guard);
+    match result {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
             attach_parent_console();
@@ -77,7 +88,7 @@ fn run_merge(request: cli::MergeRequest) -> std::process::ExitCode {
     }
 }
 
-fn run(launch: Option<cli::LaunchRequest>) -> eframe::Result {
+fn run(launch: Option<cli::LaunchRequest>, logging_error: Option<String>) -> eframe::Result {
     let viewport = eframe::egui::ViewportBuilder::default()
         .with_title("Versus — Compare")
         .with_icon(logo::themed_icon(true))
@@ -107,7 +118,13 @@ fn run(launch: Option<cli::LaunchRequest>) -> eframe::Result {
         options,
         // Keep this process alive for the window's lifetime. Git may remove
         // temporary inputs as soon as its diff-tool child exits.
-        Box::new(move |cc| Ok(Box::new(app::VersusApp::new(cc, launch)))),
+        Box::new(move |cc| {
+            let mut app = app::VersusApp::new(cc, launch);
+            if let Some(error) = logging_error {
+                app.report_startup_error(error);
+            }
+            Ok(Box::new(app))
+        }),
     )
 }
 
