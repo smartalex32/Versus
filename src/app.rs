@@ -209,6 +209,9 @@ pub struct VersusApp {
     interactive: Option<InteractiveView>,
     merge_mode: bool,
     merge_folders: Option<FolderBrowser>,
+    /// Find/replace has its own lightweight owner for direct file merge sessions.
+    /// It deliberately never enumerates sources, so files keep their editor view.
+    merge_file_search: Option<FolderBrowser>,
     merge_file_open: bool,
     merge_file_sides: [bool; 2],
     folder_diff_settings: Option<[bool; 3]>,
@@ -267,6 +270,7 @@ impl Default for VersusApp {
             interactive: None,
             merge_mode: false,
             merge_folders: None,
+            merge_file_search: None,
             merge_file_open: false,
             merge_file_sides: [false; 2],
             folder_diff_settings: None,
@@ -366,7 +370,41 @@ impl VersusApp {
         }
     }
 
+    /// The editor is the source of truth for direct-file merge dirtiness. Keep
+    /// the search owner's cached save snapshot current once ordinary editing has
+    /// returned to a clean state, without cloning buffers on every keystroke.
+    fn sync_file_search_when_clean(&mut self) {
+        let Some(view) = self.interactive.as_ref().filter(|view| !view.any_dirty()) else {
+            return;
+        };
+        if let Some(browser) = &mut self.merge_file_search {
+            browser.sync_working_files(view);
+        }
+    }
+
+    fn poll_merge_save_owners(&mut self, ctx: &egui::Context) {
+        if let (Some(browser), Some(view)) = (&mut self.merge_folders, &mut self.interactive) {
+            browser.poll_save(view, ctx);
+        }
+        if let (Some(browser), Some(view)) = (&mut self.merge_file_search, &mut self.interactive) {
+            browser.poll_save(view, ctx);
+        }
+        self.sync_file_search_when_clean();
+        let external_save_busy = self
+            .merge_folders
+            .as_ref()
+            .is_some_and(FolderBrowser::is_saving)
+            || self
+                .merge_file_search
+                .as_ref()
+                .is_some_and(FolderBrowser::is_saving);
+        if let Some(view) = &mut self.interactive {
+            view.set_external_save_busy(external_save_busy);
+        }
+    }
+
     fn open_recent(&mut self, entry: RecentComparison) {
+        self.sync_file_search_when_clean();
         if self
             .interactive
             .as_ref()
@@ -375,6 +413,10 @@ impl VersusApp {
                 .merge_folders
                 .as_ref()
                 .is_some_and(|browser| browser.any_dirty() || browser.is_saving())
+            || self
+                .merge_file_search
+                .as_ref()
+                .is_some_and(FolderBrowser::is_saving)
         {
             self.pending_merge_exit = Some(MergeExit::Recent(entry));
             return;
@@ -506,6 +548,7 @@ impl VersusApp {
     }
 
     fn switch_comparison_mode(&mut self, mode: ComparisonMode) {
+        self.sync_file_search_when_clean();
         if self.merge_mode
             && mode == ComparisonMode::Folder
             && self.merge_folders.is_some()
@@ -527,7 +570,11 @@ impl VersusApp {
                 || self
                     .merge_folders
                     .as_ref()
-                    .is_some_and(|browser| browser.any_dirty() || browser.is_saving()))
+                    .is_some_and(|browser| browser.any_dirty() || browser.is_saving())
+                || self
+                    .merge_file_search
+                    .as_ref()
+                    .is_some_and(FolderBrowser::is_saving))
         {
             self.pending_merge_exit = Some(MergeExit::Mode(mode));
             return;
@@ -557,12 +604,17 @@ impl VersusApp {
     }
 
     fn new_comparison(&mut self) {
+        self.sync_file_search_when_clean();
         if self
             .interactive
             .as_ref()
             .is_some_and(InteractiveView::is_saving)
             || self
                 .merge_folders
+                .as_ref()
+                .is_some_and(FolderBrowser::is_saving)
+            || self
+                .merge_file_search
                 .as_ref()
                 .is_some_and(FolderBrowser::is_saving)
             || self
@@ -579,6 +631,7 @@ impl VersusApp {
         }
         self.interactive = self.merge_mode.then(InteractiveView::default);
         self.merge_folders = None;
+        self.merge_file_search = None;
         self.merge_file_open = false;
         self.merge_file_sides = [false; 2];
         self.folder_diff_settings = None;
@@ -1449,6 +1502,7 @@ impl VersusApp {
     }
 
     fn open_interactive_sources(&mut self) {
+        self.sync_file_search_when_clean();
         let folder_sources: [Option<PathBuf>; 2] = std::array::from_fn(|side| {
             (self.source_kinds[side] == Some(SourceKind::Folder))
                 .then(|| self.source_paths[side].clone())
@@ -1488,8 +1542,20 @@ impl VersusApp {
             } else {
                 self.merge_folders = Some(FolderBrowser::new_with_sources(folder_sources.clone()));
             }
+            // A file-search save owns a receiver and must be allowed to drain
+            // even if the workspace changes into a folder merge. Retire an idle
+            // owner, but retain pending saves and errors for status reporting.
+            if self.merge_file_search.as_ref().is_some_and(|browser| {
+                !browser.is_saving() && !browser.any_dirty() && browser.error_details().is_empty()
+            }) {
+                self.merge_file_search = None;
+            }
         } else {
             self.merge_folders = None;
+            let sources = view.current_sources();
+            if let Some(browser) = &mut self.merge_file_search {
+                browser.set_search_sources(sources);
+            }
         }
         self.roots = match folder_sources.clone() {
             [Some(left), Some(right)] => Some([left, right]),
@@ -1508,7 +1574,11 @@ impl VersusApp {
         let saving = self
             .merge_folders
             .as_ref()
-            .is_some_and(FolderBrowser::is_saving);
+            .is_some_and(FolderBrowser::is_saving)
+            || self
+                .merge_file_search
+                .as_ref()
+                .is_some_and(FolderBrowser::is_saving);
         let prefs = [
             self.show_only_differences,
             self.ignore_whitespace,
@@ -1620,7 +1690,11 @@ impl VersusApp {
         view.set_external_save_busy(
             self.merge_folders
                 .as_ref()
-                .is_some_and(FolderBrowser::is_saving),
+                .is_some_and(FolderBrowser::is_saving)
+                || self
+                    .merge_file_search
+                    .as_ref()
+                    .is_some_and(FolderBrowser::is_saving),
         );
         view.set_editing(
             true,
@@ -1640,7 +1714,20 @@ impl VersusApp {
         if view.take_search_requested() {
             if let Some(browser) = &mut self.merge_folders {
                 browser.open_search();
+            } else {
+                let sources = view.current_sources();
+                let browser = self
+                    .merge_file_search
+                    .get_or_insert_with(|| FolderBrowser::new_search(sources.clone()));
+                browser.set_search_sources(sources);
+                browser.open_search();
             }
+        }
+        if self.merge_folders.is_none()
+            && let Some(browser) = &mut self.merge_file_search
+        {
+            browser.set_search_sources(view.current_sources());
+            browser.render_search_controls(ui, &mut view);
         }
         if let (Some(path), Some(browser)) = (view.take_folder_jump(), &mut self.merge_folders) {
             browser.reveal_difference(path);
@@ -3057,6 +3144,9 @@ impl VersusApp {
         if let Some(browser) = &self.merge_folders {
             errors.extend(browser.error_details());
         }
+        if let Some(browser) = &self.merge_file_search {
+            errors.extend(browser.error_details());
+        }
         errors.sort();
         errors.dedup();
         errors
@@ -3096,6 +3186,9 @@ impl VersusApp {
             if let Some(browser) = &mut self.merge_folders {
                 browser.clear_error();
             }
+            if let Some(browser) = &mut self.merge_file_search {
+                browser.clear_error();
+            }
         }
     }
 
@@ -3112,6 +3205,12 @@ impl VersusApp {
             } else if self.merge_mode
                 && self
                     .merge_folders
+                    .as_ref()
+                    .is_some_and(|browser| browser.render_activity_status(ui))
+            {
+            } else if self.merge_mode
+                && self
+                    .merge_file_search
                     .as_ref()
                     .is_some_and(|browser| browser.render_activity_status(ui))
             {
@@ -3141,6 +3240,7 @@ impl VersusApp {
     }
 
     fn merge_exit_dialog(&mut self, ctx: &egui::Context) {
+        self.sync_file_search_when_clean();
         if ctx.input(|input| input.viewport().close_requested())
             && (self
                 .interactive
@@ -3157,6 +3257,10 @@ impl VersusApp {
                 || self
                     .merge_folders
                     .as_ref()
+                    .is_some_and(FolderBrowser::is_saving)
+                || self
+                    .merge_file_search
+                    .as_ref()
                     .is_some_and(FolderBrowser::is_saving))
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
@@ -3171,6 +3275,10 @@ impl VersusApp {
             .is_some_and(InteractiveView::is_saving)
             || self
                 .merge_folders
+                .as_ref()
+                .is_some_and(FolderBrowser::is_saving)
+            || self
+                .merge_file_search
                 .as_ref()
                 .is_some_and(FolderBrowser::is_saving);
         let mut discard = false;
@@ -3195,6 +3303,7 @@ impl VersusApp {
             self.pending_merge_exit = None;
             self.interactive = None;
             self.merge_folders = None;
+            self.merge_file_search = None;
             self.merge_file_open = false;
             self.merge_file_sides = [false; 2];
             match destination {
@@ -3239,13 +3348,14 @@ impl eframe::App for VersusApp {
         if let Some(view) = &mut self.interactive {
             view.poll(ctx);
         }
+        self.sync_file_search_when_clean();
         if let Some(browser) = &mut self.merge_folders {
             browser.poll(ctx);
         }
-        if let (Some(browser), Some(view)) = (&mut self.merge_folders, &mut self.interactive) {
-            browser.poll_save(view, ctx);
-            view.set_external_save_busy(browser.is_saving());
+        if let Some(browser) = &mut self.merge_file_search {
+            browser.poll(ctx);
         }
+        self.poll_merge_save_owners(ctx);
         self.sync_folder_merge_diff();
         self.sync_working_folder_diff(ctx);
     }
@@ -7382,7 +7492,7 @@ mod tests {
         );
         click_action(&mut app, &ctx, "Find and replace");
         let output = render(&mut app, &ctx, vec![]);
-        assert_eq!(text_positions(&output, "Folder Find and Replace").len(), 1);
+        assert_eq!(text_positions(&output, "Find and Replace").len(), 1);
         output.drop_without_applying_deltas();
         app.interactive.as_mut().unwrap().set_run_diff(true);
         let output = render(&mut app, &ctx, vec![]);
@@ -7394,6 +7504,120 @@ mod tests {
         assert!(refresh.left() > run.x);
         assert!(refresh.top() < app.pane_rects[0].top());
         output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn file_merge_search_opens_without_creating_a_folder_browser() {
+        let fixture = SourceFixture::new();
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut app = VersusApp::default();
+        app.comparison_mode = ComparisonMode::File;
+        app.set_workspace_merge(true);
+
+        // Search remains available before files are chosen, then tracks an
+        // independently loaded side without replacing its editor with a tree.
+        render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+        assert!(
+            ctx.read_response(egui::Id::new("Find and replace"))
+                .is_some()
+        );
+        click_action(&mut app, &ctx, "Find and replace");
+        let output = render(&mut app, &ctx, vec![]);
+        assert_eq!(text_positions(&output, "Find and Replace").len(), 1);
+        assert!(app.merge_folders.is_none());
+        assert_eq!(
+            app.merge_file_search.as_ref().unwrap().source_roots(),
+            [None, None]
+        );
+        output.drop_without_applying_deltas();
+
+        app.select_path(0, fixture.path("left/model.txt"));
+        settle_merge_file(&mut app, &ctx, 0, "common\nold\n");
+        render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+        assert!(app.merge_folders.is_none());
+        assert!(app.merge_file_open);
+        assert_eq!(
+            app.merge_file_search.as_ref().unwrap().source_roots(),
+            [Some(fixture.path("left/model.txt")), None]
+        );
+    }
+
+    #[test]
+    fn editor_save_clears_the_file_search_snapshot_before_leave_guards() {
+        let fixture = SourceFixture::new();
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut app = VersusApp::default();
+        app.comparison_mode = ComparisonMode::File;
+        app.set_workspace_merge(true);
+        app.select_path(0, fixture.path("left/model.txt"));
+        settle_merge_file(&mut app, &ctx, 0, "common\nold\n");
+
+        render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+        let editor = egui::pos2(
+            app.pane_rects[0].left() + 65.0,
+            app.pane_rects[0].top() + 8.0,
+        );
+        click(&mut app, &ctx, editor);
+        render(&mut app, &ctx, vec![egui::Event::Text("edited ".into())])
+            .drop_without_applying_deltas();
+        assert!(app.interactive.as_ref().unwrap().any_dirty());
+
+        click_action(&mut app, &ctx, "Find and replace");
+        render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+        assert!(app.merge_file_search.as_ref().unwrap().any_dirty());
+        click_action(&mut app, &ctx, "Close Find and Replace");
+
+        click_action(&mut app, &ctx, "Save Left");
+        render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+        let output = render(&mut app, &ctx, vec![]);
+        let save = text_centers(&output, "Save")[0];
+        output.drop_without_applying_deltas();
+        click(&mut app, &ctx, save);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.interactive.as_ref().unwrap().is_saving() {
+            app.interactive.as_mut().unwrap().poll(&ctx);
+            assert!(Instant::now() < deadline, "editor save did not finish");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        app.sync_file_search_when_clean();
+        assert!(!app.interactive.as_ref().unwrap().any_dirty());
+        assert!(!app.merge_file_search.as_ref().unwrap().any_dirty());
+        app.new_comparison();
+        assert!(app.pending_merge_exit.is_none());
+    }
+
+    #[test]
+    fn file_search_owner_is_retained_while_folder_merge_opens() {
+        let fixture = SourceFixture::new();
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut app = VersusApp::default();
+        app.comparison_mode = ComparisonMode::File;
+        app.set_workspace_merge(true);
+        app.select_path(0, fixture.path("left/model.txt"));
+        settle_merge_file(&mut app, &ctx, 0, "common\nold\n");
+
+        render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+        let editor = egui::pos2(
+            app.pane_rects[0].left() + 65.0,
+            app.pane_rects[0].top() + 8.0,
+        );
+        click(&mut app, &ctx, editor);
+        render(&mut app, &ctx, vec![egui::Event::Text("edited ".into())])
+            .drop_without_applying_deltas();
+        click_action(&mut app, &ctx, "Find and replace");
+        render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+        assert!(app.merge_file_search.as_ref().unwrap().any_dirty());
+
+        app.select_path(0, fixture.path("left"));
+        settle_sources(&mut app, &ctx);
+        assert!(app.merge_folders.is_some());
+        assert!(
+            app.merge_file_search.is_some(),
+            "a pending file-search save or working snapshot must survive the source transition"
+        );
     }
 
     #[test]

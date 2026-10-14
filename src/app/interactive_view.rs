@@ -373,6 +373,13 @@ impl InteractiveView {
     pub(super) fn working_text(&self, side: usize) -> Option<&str> {
         self.workspace.as_ref().map(|w| w.text(side_of(side)))
     }
+    #[cfg(test)]
+    pub(super) fn set_working_text_for_test(&mut self, side: usize, text: &str) {
+        self.workspace
+            .as_mut()
+            .expect("loaded test file has a workspace")
+            .set_text(side_of(side), text);
+    }
     fn key_for(&self, path: &std::path::Path) -> PathBuf {
         self.aliases
             .get(path)
@@ -1220,7 +1227,6 @@ impl InteractiveView {
                     self.new_requested = true;
                 }
                 if self.editing
-                    && self.from_folders
                     && icon_button(ui, ToolbarIcon::Search, true, "Find and replace").clicked()
                 {
                     self.search_requested = true;
@@ -3338,7 +3344,7 @@ mod tests {
     fn merge_toolbar_uses_search_after_new_without_a_global_back_button() {
         let ctx = egui::Context::default();
         let mut view = view("left\n", "right\n");
-        view.from_folders = true;
+        view.from_folders = false;
         frame(&mut view, &ctx, vec![]).drop_without_applying_deltas();
         let new = ctx
             .read_response(egui::Id::new("New comparison"))

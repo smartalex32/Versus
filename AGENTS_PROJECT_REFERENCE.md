@@ -60,10 +60,18 @@ APIs and must fail cleanly when unavailable.
   without comparing file contents. Each Merge side enumerates, expands, and scrolls
   its own tree, including when only one root is selected. Expanding a directory
   requests that side’s listing; opening a file loads its working copy independently
-  of the other pane. The recursive Find and Replace modal is centered and
-  dismisses on outside click or Escape. Full-width fields have muted italic hints,
-  colored LEFT/RIGHT/BOTH scope controls, inline search-option icons, and external
-  Replace Next/All icons. These actions preview selected targets before applying
+  of the other pane. Find and Replace is available from the magnifying glass in
+  both File Merge and Folder Merge. File searches use only the selected file
+  roots without directory enumeration; folder searches retain recursive scope.
+  The modal is centered, approximately half the initial app width, and dismisses
+  on outside click or Escape. Controls occupy the left half; a scrollable result
+  list occupies the right half with a muted empty-state hint matching drop targets.
+  Search starts after 500 ms without typing; query, option, and scope changes
+  cancel stale workers and restart that delay. Empty queries and dismissal cancel
+  pending searches. There is no separate Find action. Full-width fields have
+  muted italic hints, colored LEFT/RIGHT/BOTH scope controls, inline search-option
+  icons, and external Replace Next/All icons. These actions preview selected
+  targets before applying
   an undoable working-copy batch; unchecked matches remain excluded. Applied
   replacements advance the original result set using exact byte edits, without
   re-searching replacement text. Search option/scope changes and undo invalidate
