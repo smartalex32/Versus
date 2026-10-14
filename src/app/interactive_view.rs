@@ -2007,9 +2007,7 @@ impl InteractiveView {
                     .max_rect(save)
                     .layout(egui::Layout::right_to_left(egui::Align::Center)),
                 |ui| {
-                    if ui
-                        .add_enabled(enabled, egui::Button::new("Save Both"))
-                        .clicked()
+                    if captioned_icon_button(ui, ToolbarIcon::Save, enabled, "Save Both").clicked()
                     {
                         self.request_save(vec![0, 1]);
                     }
@@ -3177,6 +3175,84 @@ mod tests {
             assert!(left.top() >= 0.0);
         }
     }
+    #[test]
+    fn save_both_matches_toolbar_feedback_and_still_opens_a_preview() {
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            let ctx = egui::Context::default();
+            set_theme(&ctx, theme);
+            let mut view = view("left\n", "right\n");
+            let output = frame(&mut view, &ctx, vec![]);
+            let button = ctx.read_response(egui::Id::new("Save Both")).unwrap().rect;
+            let caption = output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.text() == "Save Both" => Some(text),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(caption.galley.job.sections[0].format.font_id.size, 11.0);
+            assert!(output.shapes.iter().any(|shape| matches!(&shape.shape,
+                egui::Shape::Rect(rect) if button.contains_rect(rect.rect)
+                    && rect.rect.width() == 14.0 && rect.rect.right() < caption.pos.x)));
+            assert!(!output.shapes.iter().any(|shape| matches!(&shape.shape,
+                egui::Shape::Rect(rect) if rect.rect == button && rect.fill != Color32::TRANSPARENT)));
+            output.drop_without_applying_deltas();
+            let pos = button.center();
+            let output = frame(
+                &mut view,
+                &ctx,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: Default::default(),
+                    },
+                ],
+            );
+            assert!(
+                view.pending_save.is_none(),
+                "press feedback must precede activation"
+            );
+            assert!(output.shapes.iter().any(|shape| matches!(&shape.shape,
+                egui::Shape::Rect(rect) if rect.rect == button
+                    && rect.fill == Palette::for_context(&ctx).accent.gamma_multiply(0.35))));
+            output.drop_without_applying_deltas();
+            frame(
+                &mut view,
+                &ctx,
+                vec![egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: Default::default(),
+                }],
+            )
+            .drop_without_applying_deltas();
+            assert_eq!(view.pending_save, Some(vec![0, 1]));
+            assert!(
+                view.save_job.is_none(),
+                "Save Both must preview before writing"
+            );
+            assert_eq!(view.working_text(0), Some("left\n"));
+            assert_eq!(view.working_text(1), Some("right\n"));
+            view.pending_save = None;
+            view.set_external_save_busy(true);
+            for _ in 0..2 {
+                frame(&mut view, &ctx, vec![]).drop_without_applying_deltas();
+            }
+            assert!(
+                !ctx.read_response(egui::Id::new("Save Both"))
+                    .unwrap()
+                    .enabled()
+            );
+            click(&mut view, &ctx, egui::Id::new("Save Both"));
+            assert!(view.pending_save.is_none());
+        }
+    }
+
     #[test]
     fn merge_toolbar_uses_search_after_new_without_a_global_back_button() {
         let ctx = egui::Context::default();

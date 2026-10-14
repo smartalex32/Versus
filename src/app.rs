@@ -4201,16 +4201,7 @@ fn workspace_footer_layout(
     );
     ui.interact(legend, egui::Id::new("workspace-legend"), Sense::hover());
     let save = with_save.then(|| {
-        let width = ui
-            .painter()
-            .layout_no_wrap(
-                "Save Both".into(),
-                egui::TextStyle::Button.resolve(ui.style()),
-                Color32::WHITE,
-            )
-            .size()
-            .x
-            + 2.0 * ui.spacing().button_padding.x;
+        let width = captioned_icon_width(ui, "Save Both");
         Rect::from_min_max(
             egui::pos2(row.right() - width.min(side), line_top),
             egui::pos2(row.right(), line_bottom),
@@ -4348,10 +4339,38 @@ fn icon_button_state(
     selected: bool,
     label: &str,
 ) -> egui::Response {
+    icon_button_content(ui, icon, enabled, selected, label, None)
+}
+
+fn captioned_icon_width(ui: &egui::Ui, label: &str) -> f32 {
+    let text =
+        ui.painter()
+            .layout_no_wrap(label.into(), FontId::proportional(11.0), Color32::WHITE);
+    control_extent(ui) + ui.spacing().item_spacing.x + text.size().x + ui.spacing().button_padding.x
+}
+
+fn captioned_icon_button(
+    ui: &mut egui::Ui,
+    icon: ToolbarIcon,
+    enabled: bool,
+    label: &str,
+) -> egui::Response {
+    icon_button_content(ui, icon, enabled, false, label, Some(label))
+}
+
+fn icon_button_content(
+    ui: &mut egui::Ui,
+    icon: ToolbarIcon,
+    enabled: bool,
+    selected: bool,
+    label: &str,
+    caption: Option<&str>,
+) -> egui::Response {
     let palette = Palette::for_context(ui.ctx());
     ui.add_enabled_ui(enabled, |ui| {
         let extent = control_extent(ui);
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(extent, extent), Sense::hover());
+        let width = caption.map_or(extent, |text| captioned_icon_width(ui, text));
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(width, extent), Sense::hover());
         let response = ui.interact(rect, egui::Id::new(label), Sense::click());
         response.widget_info(|| {
             egui::WidgetInfo::selected(egui::WidgetType::Button, enabled, selected, label)
@@ -4387,7 +4406,7 @@ fn icon_button_state(
                 egui::StrokeKind::Inside,
             );
         }
-        let center = rect.center();
+        let center = egui::pos2(rect.left() + extent / 2.0, rect.center().y);
         let point = |x, y| center + egui::vec2(x, y);
         let stroke = Stroke::new(1.4, color);
         match icon {
@@ -4645,6 +4664,16 @@ fn icon_button_state(
                 ui.painter()
                     .line_segment([point(-4.0, 4.0), point(4.0, -4.0)], stroke);
             }
+        }
+        if let Some(caption) = caption {
+            let text =
+                ui.painter()
+                    .layout_no_wrap(caption.into(), FontId::proportional(11.0), color);
+            let position = egui::pos2(
+                rect.left() + extent + ui.spacing().item_spacing.x,
+                rect.center().y - text.size().y / 2.0,
+            );
+            ui.painter().galley(position, text, color);
         }
         response
             .on_hover_cursor(egui::CursorIcon::PointingHand)
