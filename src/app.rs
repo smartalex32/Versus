@@ -1,5 +1,6 @@
 use crate::recent::{RecentComparison, RecentComparisons};
 use crate::selection::{self, ComparisonMode, SelectionMode, SourceKind};
+mod file_style;
 mod find_icons;
 mod folder_browser;
 mod interactive_view;
@@ -488,7 +489,7 @@ impl VersusApp {
 
     fn select_path(&mut self, side: usize, path: PathBuf) {
         self.invalidate();
-        if self.merge_mode {
+        if self.merge_mode || (self.merge_file_open && self.interactive.is_some()) {
             self.merge_file_sides[side] = false;
             self.merge_file_open = self.merge_file_sides.iter().any(|open| *open);
             if let Some(view) = &mut self.interactive {
@@ -697,7 +698,11 @@ impl VersusApp {
                 };
             }
         }
-        if self.merge_mode {
+        let retained_file_session = self.merge_file_open
+            && self.interactive.is_some()
+            && self.merge_folders.is_none()
+            && selection::selection_mode(self.source_kinds) == SelectionMode::File;
+        if self.merge_mode || retained_file_session {
             let recent_mode = match selection::selection_mode(self.source_kinds) {
                 SelectionMode::File
                     if self
@@ -722,6 +727,10 @@ impl VersusApp {
             }
             self.open_interactive_sources();
             return;
+        }
+        if self.merge_file_open && self.merge_folders.is_none() {
+            self.merge_file_open = false;
+            self.merge_file_sides = [false; 2];
         }
         match selection::selection_mode(self.source_kinds) {
             SelectionMode::File => {
@@ -1585,7 +1594,7 @@ impl VersusApp {
             .interactive
             .get_or_insert_with(InteractiveView::default);
         view.set_editing(
-            true,
+            self.merge_mode,
             [
                 self.show_only_differences,
                 self.ignore_whitespace,
@@ -1663,11 +1672,14 @@ impl VersusApp {
         if self.merge_file_open {
             if let Some(mut view) = self.interactive.take() {
                 view.set_from_folders(self.merge_folders.is_some());
+                let folder_file_paths = self.merge_folders.as_ref().map(|_| view.current_sources());
                 let (panes, status) = view.render_with_sources(ui, |ui| {
                     if self.merge_folders.is_none() {
                         self.folder_inputs(ui);
-                        paint_panel_divider(ui);
+                    } else if let Some([Some(left), Some(right)]) = &folder_file_paths {
+                        file_path_headers(ui, &[left.clone(), right.clone()]);
                     }
+                    paint_panel_divider(ui);
                 });
                 self.pane_rects = panes;
                 ui.scope_builder(egui::UiBuilder::new().max_rect(status), |ui| {
@@ -2064,7 +2076,8 @@ impl VersusApp {
                     && icon_button(
                         &mut controls_ui,
                         ToolbarIcon::Refresh,
-                        true,
+                        self.interactive.as_ref().unwrap().can_refresh_diff()
+                            || self.merge_folders.is_some(),
                         "Refresh comparison",
                     )
                     .clicked()
@@ -2072,7 +2085,7 @@ impl VersusApp {
                     if let Some(browser) = &mut self.merge_folders {
                         browser.refresh_listing();
                     }
-                    self.interactive.as_mut().unwrap().invalidate_diff();
+                    self.interactive.as_mut().unwrap().refresh_diff();
                     self.folder_diff_settings = None;
                 }
                 let view = self.interactive.as_mut().unwrap();
@@ -2083,6 +2096,18 @@ impl VersusApp {
                     .changed()
                 {
                     view.set_run_diff(enabled);
+                }
+            } else {
+                let view = self.interactive.as_mut().unwrap();
+                if icon_button(
+                    &mut controls_ui,
+                    ToolbarIcon::Refresh,
+                    view.can_refresh_diff(),
+                    "Refresh comparison",
+                )
+                .clicked()
+                {
+                    view.refresh_diff();
                 }
             }
         } else {
@@ -2622,29 +2647,7 @@ impl VersusApp {
                     return;
                 };
                 if from_folders {
-                    let (header, _) = ui.allocate_exact_size(
-                        egui::vec2(ui.available_width(), 38.0_f32.max(row_height + 14.0)),
-                        Sense::hover(),
-                    );
-                    for (side, half) in split_rect(header).into_iter().enumerate() {
-                        let rect = half.shrink(7.0);
-                        let painter = ui.painter().with_clip_rect(rect);
-                        paint_side_label(&painter, rect, side, palette);
-                        let path = view.paths[side].display().to_string();
-                        let path_rect =
-                            Rect::from_min_max(rect.min + egui::vec2(40.0, 0.0), rect.max);
-                        let galley =
-                            left_elided_path(&painter, &path, path_rect.width(), palette.text);
-                        let position =
-                            egui::pos2(path_rect.left(), rect.center().y - galley.size().y / 2.0);
-                        painter.galley(position, galley, palette.text);
-                        ui.interact(path_rect, ui.id().with(("file-path", side)), Sense::hover())
-                            .on_hover_text(path);
-                    }
-                    ui.painter().line_segment(
-                        [header.center_top(), header.center_bottom()],
-                        Stroke::new(1.0, palette.border),
-                    );
+                    file_path_headers(ui, &view.paths);
                 }
                 let (divider, _) =
                     ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), Sense::hover());
@@ -3777,6 +3780,33 @@ fn paint_side_label(painter: &egui::Painter, rect: Rect, side: usize, palette: P
     );
 }
 
+fn file_path_headers(ui: &mut egui::Ui, paths: &[PathBuf; 2]) {
+    let palette = Palette::for_context(ui.ctx());
+    let (header, _) = ui.allocate_exact_size(
+        egui::vec2(
+            ui.available_width(),
+            38.0_f32.max(comparison_row_height(ui) + 14.0),
+        ),
+        Sense::hover(),
+    );
+    for (side, half) in split_rect(header).into_iter().enumerate() {
+        let rect = half.shrink(7.0);
+        let painter = ui.painter().with_clip_rect(rect);
+        paint_side_label(&painter, rect, side, palette);
+        let path = paths[side].display().to_string();
+        let path_rect = Rect::from_min_max(rect.min + egui::vec2(40.0, 0.0), rect.max);
+        let galley = left_elided_path(&painter, &path, path_rect.width(), palette.text);
+        let position = egui::pos2(path_rect.left(), rect.center().y - galley.size().y / 2.0);
+        painter.galley(position, galley, palette.text);
+        ui.interact(path_rect, ui.id().with(("file-path", side)), Sense::hover())
+            .on_hover_text(path);
+    }
+    ui.painter().line_segment(
+        [header.center_top(), header.center_bottom()],
+        Stroke::new(1.0, palette.border),
+    );
+}
+
 fn left_elided_path(
     painter: &egui::Painter,
     path: &str,
@@ -3833,25 +3863,7 @@ fn paint_file_line(
     let palette = Palette::for_context(painter.ctx());
     let painter = painter.with_clip_rect(rect);
     let color = state_color(state, palette);
-    painter.rect_filled(
-        rect,
-        0,
-        if alternate {
-            palette.alternate
-        } else {
-            palette.panel
-        },
-    );
-    if selected {
-        painter.rect_filled(rect, 0, palette.accent.gamma_multiply(0.13));
-    }
-    if *state != DirectoryEntryState::Same {
-        painter.rect_filled(
-            Rect::from_min_size(rect.min, egui::vec2(3.0, rect.height())),
-            0,
-            color,
-        );
-    }
+    file_style::paint_background(&painter, rect, state, alternate, selected);
     let Some((number, text)) = line else {
         painter.text(
             rect.left_center() + egui::vec2(66.0, 0.0),
@@ -3862,86 +3874,24 @@ fn paint_file_line(
         );
         return;
     };
-    painter.text(
-        rect.left_center() + egui::vec2(42.0, 0.0),
-        Align2::RIGHT_CENTER,
-        number.to_string(),
-        FontId::monospace(10.0),
-        palette.muted,
-    );
-    if let Some(icon) = status_icon(state) {
-        paint_status_icon(&painter, rect.left_center() + egui::vec2(54.0, 0.0), icon);
-    }
+    file_style::paint_gutter(&painter, rect, *number, state);
     let mut job = egui::text::LayoutJob::default();
-    let mut start = 0;
-    for range in changed {
-        if range.start < start
-            || range.end > text.len()
-            || !text.is_char_boundary(range.start)
-            || !text.is_char_boundary(range.end)
-        {
-            continue;
-        }
-        append_file_text(
-            &mut job,
-            &text[start..range.start],
-            color,
-            Color32::TRANSPARENT,
-            comparison_font(painter.ctx()),
-        );
-        append_file_text(
-            &mut job,
-            &text[range.clone()],
-            palette.text,
-            color.gamma_multiply(0.3),
-            comparison_font(painter.ctx()),
-        );
-        start = range.end;
-    }
-    append_file_text(
+    file_style::append_text(
         &mut job,
-        &text[start..],
-        color,
-        Color32::TRANSPARENT,
+        text,
+        state,
+        changed,
+        palette,
         comparison_font(painter.ctx()),
+        None,
     );
     let galley = painter.layout_job(job);
     let position = egui::pos2(rect.left() + 68.0, rect.center().y - galley.size().y / 2.0);
     let end_x = position.x + galley.size().x;
     painter.galley(position, galley, color);
     if let Some(ending) = ending {
-        let badge = Rect::from_min_size(
-            egui::pos2(end_x + 8.0, rect.top() + 3.0),
-            egui::vec2(58.0, 16.0),
-        );
-        painter.rect_filled(badge, 2, color.gamma_multiply(0.3));
-        painter.text(
-            badge.center(),
-            Align2::CENTER_CENTER,
-            ending.label(),
-            FontId::monospace(9.0),
-            palette.text,
-        );
+        file_style::paint_ending(&painter, rect, end_x, ending, state);
     }
-}
-
-fn append_file_text(
-    job: &mut egui::text::LayoutJob,
-    text: &str,
-    color: Color32,
-    background: Color32,
-    font: FontId,
-) {
-    job.append(
-        &text.replace('\t', "    "),
-        0.0,
-        egui::TextFormat {
-            font_id: font,
-            color,
-            background,
-            ..Default::default()
-        },
-    );
 }
 
 fn file_line_anchor(view: &FileView, index: Option<usize>) -> [Option<usize>; 2] {
@@ -7706,10 +7656,12 @@ mod tests {
         settle_merge_file(&mut app, &ctx, 0, "common\nold\n");
 
         render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
-        let editor = egui::pos2(
-            app.pane_rects[0].left() + 65.0,
-            app.pane_rects[0].top() + 8.0,
-        );
+        let editor = ctx
+            .read_response(app.interactive.as_ref().unwrap().editor_id(0))
+            .expect("loaded merge editor")
+            .rect
+            .left_top()
+            + egui::vec2(8.0, 8.0);
         click(&mut app, &ctx, editor);
         render(&mut app, &ctx, vec![egui::Event::Text("edited ".into())])
             .drop_without_applying_deltas();
@@ -7751,10 +7703,12 @@ mod tests {
         settle_merge_file(&mut app, &ctx, 0, "common\nold\n");
 
         render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
-        let editor = egui::pos2(
-            app.pane_rects[0].left() + 65.0,
-            app.pane_rects[0].top() + 8.0,
-        );
+        let editor = ctx
+            .read_response(app.interactive.as_ref().unwrap().editor_id(0))
+            .expect("loaded merge editor")
+            .rect
+            .left_top()
+            + egui::vec2(8.0, 8.0);
         click(&mut app, &ctx, editor);
         render(&mut app, &ctx, vec![egui::Event::Text("edited ".into())])
             .drop_without_applying_deltas();

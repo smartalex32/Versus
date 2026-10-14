@@ -46,6 +46,18 @@ struct SideLoad {
     path: PathBuf,
 }
 
+/// Derived geometry for the read-only, File Diff-style renderer.  The loaded
+/// comparison is immutable while it is displayed, so calculating this once per
+/// comparison/preference/font update avoids doing work proportional to every
+/// file line on every frame.
+struct ReadonlyPresentation {
+    rows: Vec<usize>,
+    content_widths: [f32; 2],
+    preferences: [bool; 3],
+    font: FontId,
+    row_height: f32,
+}
+
 #[derive(Default)]
 pub(super) struct InteractiveView {
     workspace: Option<TwoWayWorkspace>,
@@ -68,6 +80,8 @@ pub(super) struct InteractiveView {
     retired_diffs: Vec<DiffJob>,
     diff_not_before: Option<Instant>,
     diff: Option<FileComparison>,
+    readonly_presentation: Option<ReadonlyPresentation>,
+    readonly_pending_anchor: Option<([Option<usize>; 2], f32)>,
     save_job: Option<SaveJob>,
     external_save_busy: bool,
     editing: bool,
@@ -107,6 +121,7 @@ impl InteractiveView {
         }
         self.publish_active();
         self.cache_active();
+        self.readonly_pending_anchor = None;
         self.invalidate_diff();
         self.side_sources = [Some(paths[0].clone()), Some(paths[1].clone())];
         self.loading = None;
@@ -159,6 +174,7 @@ impl InteractiveView {
             return;
         }
         self.publish_active();
+        self.readonly_pending_anchor = None;
         self.invalidate_diff();
         if let Some(files) = self.files.take() {
             for (index, file) in files.into_iter().enumerate() {
@@ -217,6 +233,9 @@ impl InteractiveView {
         let changed =
             self.editing != editing || (!editing && self.diff_options != diff_preferences);
         self.editing = editing;
+        if editing {
+            self.readonly_pending_anchor = None;
+        }
         self.diff_options = diff_preferences;
         if changed {
             self.invalidate_diff();
@@ -227,6 +246,19 @@ impl InteractiveView {
             self.run_diff = enabled;
             self.invalidate_diff();
         }
+    }
+    /// A refresh only recomputes the current retained working copies.  It must
+    /// never reload the paths, because a Merge workspace may contain edits that
+    /// have not been saved yet.
+    pub(super) fn refresh_diff(&mut self) {
+        self.invalidate_diff();
+        self.diff_not_before = None;
+    }
+    pub(super) fn can_refresh_diff(&self) -> bool {
+        self.has_actual_pair()
+            && self.loading.is_none()
+            && self.side_loading.iter().all(Option::is_none)
+            && self.diff_job.is_none()
     }
     fn engine_enabled(&self) -> bool {
         !self.editing || self.run_diff
@@ -372,6 +404,11 @@ impl InteractiveView {
     #[cfg(test)]
     pub(super) fn working_text(&self, side: usize) -> Option<&str> {
         self.workspace.as_ref().map(|w| w.text(side_of(side)))
+    }
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(super) fn editor_id(&self, side: usize) -> egui::Id {
+        egui::Id::new(("two-way-edit", self.side_generation[side], side))
     }
     #[cfg(test)]
     pub(super) fn set_working_text_for_test(&mut self, side: usize, text: &str) {
@@ -885,6 +922,21 @@ impl InteractiveView {
     pub(super) fn invalidate_diff(&mut self) {
         self.publish_active();
         self.pending_auto = None;
+        if !self.editing {
+            if let (Some(cached), Some(diff)) = (&self.readonly_presentation, &self.diff) {
+                let top = (self.scroll[0] / cached.row_height).floor() as usize;
+                if let Some(row) = cached.rows.get(top).and_then(|index| diff.rows.get(*index)) {
+                    self.readonly_pending_anchor = Some((
+                        [
+                            row.left.as_ref().map(|line| line.0),
+                            row.right.as_ref().map(|line| line.0),
+                        ],
+                        self.scroll[0] % cached.row_height,
+                    ));
+                }
+            }
+        }
+        self.readonly_presentation = None;
         if let Some(job) = self.diff_job.take() {
             job.cancel.store(true, Ordering::Relaxed);
             self.retired_diffs.push(job);
@@ -977,12 +1029,14 @@ impl InteractiveView {
         if !self.engine_enabled() {
             self.diff_job = None;
             self.diff = None;
+            self.readonly_presentation = None;
             return;
         }
         if self.files.is_none() && !self.side_files.iter().all(Option::is_some) {
             self.diff_job = None;
             self.diff = None;
             self.diff_rows.clear();
+            self.readonly_presentation = None;
             return;
         }
         if self.diff_dirty && self.diff_job.is_none() && self.retired_diffs.is_empty() {
@@ -1055,6 +1109,7 @@ impl InteractiveView {
                         })
                         .collect();
                     self.diff = Some(comparison);
+                    self.readonly_presentation = None;
                 }
                 Ok(None) => {}
                 Err(error) => self.error = Some(error),
@@ -1492,13 +1547,23 @@ impl InteractiveView {
             }
         };
         ctx.memory_mut(|m| m.data.insert_temp(id, next));
-        let row = &diff.rows[self.diff_rows[next]];
+        let row_index = self.diff_rows[next];
+        let row = &diff.rows[row_index];
         let font = comparison_font(ctx);
-        let row_height = ctx.fonts_mut(|fonts| fonts.row_height(&font));
-        for (side, line) in [&row.left, &row.right].into_iter().enumerate() {
-            if let Some((number, _)) = line {
-                self.scroll[side] = number.saturating_sub(1) as f32 * row_height;
+        let row_height =
+            super::ROW_HEIGHT.max(ctx.fonts_mut(|fonts| fonts.row_height(&font)).ceil() + 8.0);
+        if self.editing {
+            // Merge scroll positions refer to source line numbers, so its two
+            // independent editors keep their established behavior.
+            for (side, line) in [&row.left, &row.right].into_iter().enumerate() {
+                if let Some((number, _)) = line {
+                    self.scroll[side] = number.saturating_sub(1) as f32 * row_height;
+                }
             }
+        } else if let Some(display_index) = self.readonly_display_index(row_index) {
+            // Diff panes are aligned rows, including when the differences-only
+            // preference filters out equal rows.
+            self.scroll = [display_index as f32 * row_height; 2];
         }
         ctx.request_repaint();
     }
@@ -1515,11 +1580,48 @@ impl InteractiveView {
     }
     fn panes(&mut self, ui: &mut egui::Ui) {
         let height = ui.available_height().max(1.);
+        if !self.editing && self.diff.is_some() {
+            self.ensure_readonly_presentation(ui);
+            let diff = self.diff.as_ref().unwrap();
+            if let Some(message) = &diff.message {
+                ui.label(RichText::new(message).color(Palette::for_context(ui.ctx()).muted));
+                return;
+            }
+            if diff.rows.is_empty() {
+                empty_display(
+                    ui,
+                    height,
+                    "Both files are empty",
+                    "There are no lines to compare.",
+                );
+                return;
+            }
+            if self
+                .readonly_presentation
+                .as_ref()
+                .is_some_and(|cached| cached.rows.is_empty())
+            {
+                empty_display(
+                    ui,
+                    height,
+                    "No differences",
+                    "No differences with the current options.",
+                );
+                return;
+            }
+        }
         let clip = ui.clip_rect().intersect(ui.available_rect_before_wrap());
+        let active_side = usize::from(
+            ui.input(|input| input.pointer.hover_pos())
+                .is_some_and(|position| position.x > ui.available_rect_before_wrap().center().x),
+        );
         ui.scope(|ui| {
             ui.set_clip_rect(clip);
             ui.columns(2, |columns| {
-                for side in 0..2 {
+                // Process the hovered pane first.  Scroll input is consumed
+                // during layout, so this makes a wheel event over the right
+                // pane update the shared read-only alignment in this frame.
+                for side in [active_side, 1 - active_side] {
                     self.render_side(&mut columns[side], side, height);
                 }
             });
@@ -1542,61 +1644,292 @@ impl InteractiveView {
             paint_empty_drop_target(ui, rect, side, true);
             return;
         }
+        if !self.editing {
+            self.readonly_editor(ui, side, height);
+            return;
+        }
         egui::ScrollArea::vertical()
             .id_salt(("merge-pane-controls", self.side_generation[side], side))
             .max_height(height)
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                if !self.editing {
-                    self.header(ui, side);
-                    ui.separator();
-                    self.editor(ui, side, height - 35.);
-                } else {
-                    self.editor(ui, side, height);
-                }
+                self.editor(ui, side, height);
             });
     }
-    fn header(&self, ui: &mut egui::Ui, side: usize) {
-        let p = Palette::for_context(ui.ctx());
-        let name = if side == 0 {
-            "LEFT (Incoming)"
-        } else {
-            "RIGHT (Current)"
-        };
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(name).monospace().color(if side == 0 {
-                p.left_only
-            } else {
-                p.right_only
-            }));
-            if let Some(path) = self.side_sources[side]
-                .as_ref()
-                .or_else(|| self.paths.as_ref().map(|paths| &paths[side]))
-            {
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(path.display().to_string())
-                            .small()
-                            .color(p.muted),
-                    )
-                    .truncate(),
-                )
-                .on_hover_text(path.display().to_string());
-            }
-            if self
-                .workspace
-                .as_ref()
-                .is_some_and(|w| w.is_dirty(side_of(side)))
-            {
-                ui.label(RichText::new("Unsaved Changes").strong().color(p.changed));
-            }
+    fn ensure_readonly_presentation(&mut self, ui: &egui::Ui) {
+        let font = comparison_font(ui.ctx());
+        let stale = self
+            .readonly_presentation
+            .as_ref()
+            .is_none_or(|cached| cached.preferences != self.diff_options || cached.font != font);
+        if !stale {
+            return;
+        }
+        let previous = self.readonly_presentation.take();
+        let row_height = super::comparison_row_height(ui);
+        let previous_fraction = self.scroll[0] % row_height;
+        let previous_anchor = previous.as_ref().and_then(|cached| {
+            cached
+                .rows
+                .get((self.scroll[0] / row_height).floor() as usize)
+                .copied()
         });
+        let Some(diff) = self.diff.as_ref() else {
+            return;
+        };
+        let mut rows = Vec::with_capacity(diff.rows.len());
+        // Cache only intrinsic line widths. Each pane applies its own viewport
+        // minimum when it renders, so resizing cannot leave a full-body width
+        // stuck on a short file.
+        let mut content_widths = [0.0_f32; 2];
+        for (index, row) in diff.rows.iter().enumerate() {
+            if !self.diff_options[0] || row.state != DirectoryEntryState::Same {
+                rows.push(index);
+            }
+            for (side, line) in [&row.left, &row.right].into_iter().enumerate() {
+                if let Some((_, text)) = line {
+                    // This is deliberately the same conservative width budget
+                    // as native File Diff: tabs occupy four character slots.
+                    let expanded =
+                        text.len() + text.bytes().filter(|byte| *byte == b'\t').count() * 3;
+                    content_widths[side] =
+                        content_widths[side].max(96.0 + expanded as f32 * font.size);
+                }
+            }
+        }
+        self.readonly_presentation = Some(ReadonlyPresentation {
+            rows,
+            content_widths,
+            preferences: self.diff_options,
+            font,
+            row_height,
+        });
+        if let Some((anchor, fraction)) = self.readonly_pending_anchor.take() {
+            let rows = &self.readonly_presentation.as_ref().unwrap().rows;
+            let top = rows
+                .iter()
+                .position(|index| {
+                    let row = &diff.rows[*index];
+                    [
+                        row.left.as_ref().map(|line| line.0),
+                        row.right.as_ref().map(|line| line.0),
+                    ]
+                    .iter()
+                    .enumerate()
+                    .any(|(side, number)| number.is_some() && *number == anchor[side])
+                })
+                .unwrap_or_else(|| rows.len().saturating_sub(1));
+            self.scroll = [top as f32 * row_height + fraction; 2];
+        } else if let Some(anchor) = previous_anchor {
+            let rows = &self.readonly_presentation.as_ref().unwrap().rows;
+            let top = rows
+                .iter()
+                .position(|row| *row >= anchor)
+                .unwrap_or_else(|| rows.len().saturating_sub(1));
+            self.scroll = [top as f32 * row_height + previous_fraction; 2];
+        }
+    }
+    fn readonly_display_index(&self, row_index: usize) -> Option<usize> {
+        self.readonly_presentation
+            .as_ref()
+            .and_then(|cached| cached.rows.iter().position(|index| *index == row_index))
+            .or_else(|| {
+                if self.diff_options[0] {
+                    self.diff_rows.iter().position(|index| *index == row_index)
+                } else {
+                    self.diff
+                        .as_ref()
+                        .and_then(|diff| (row_index < diff.rows.len()).then_some(row_index))
+                }
+            })
+    }
+    /// Read-only Diff mode deliberately bypasses TextEdit.  It uses the same
+    /// aligned row model and row primitives as File Diff, while retained merge
+    /// documents remain untouched for a later switch back to Merge.
+    fn readonly_editor(&mut self, ui: &mut egui::Ui, side: usize, height: f32) {
+        if self.diff.is_none() {
+            if self.diff_job.is_some() || self.diff_dirty {
+                ui.centered_and_justified(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Loading file comparison…");
+                    });
+                });
+            }
+            return;
+        }
+        self.ensure_readonly_presentation(ui);
+        let Some(diff) = self.diff.as_ref() else {
+            return;
+        };
+        if let Some(message) = &diff.message {
+            ui.label(RichText::new(message).color(Palette::for_context(ui.ctx()).muted));
+            return;
+        }
+        let (visible_len, content_width) = self
+            .readonly_presentation
+            .as_ref()
+            .map(|cached| (cached.rows.len(), cached.content_widths[side]))
+            .unwrap_or_default();
+        if visible_len == 0 {
+            ui.centered_and_justified(|ui| {
+                ui.label(
+                    RichText::new("No differences with the current options.")
+                        .color(Palette::for_context(ui.ctx()).muted),
+                );
+            });
+            return;
+        }
+        let row_height = super::comparison_row_height(ui);
+        let palette = Palette::for_context(ui.ctx());
+        let output = egui::ScrollArea::both()
+            .id_salt(("two-way-readonly", self.side_generation[side], side))
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
+            .auto_shrink([false, false])
+            .max_height(height)
+            .vertical_scroll_offset(self.scroll[side])
+            .show_viewport(ui, |ui, _| {
+                ui.set_min_size(egui::vec2(
+                    ui.available_width().max(content_width),
+                    row_height * visible_len as f32,
+                ));
+            });
+        // File Diff keeps aligned rows together.  Merge's editable renderer
+        // below intentionally retains its independent per-side offsets.
+        self.scroll = [output.state.offset.y; 2];
+        let viewport = output.inner_rect;
+        let painter = ui.painter().with_clip_rect(viewport);
+        let first = (self.scroll[side] / row_height).floor() as usize;
+        let last = ((self.scroll[side] + viewport.height()) / row_height).ceil() as usize;
+        let navigation = ui
+            .ctx()
+            .memory(|memory| {
+                memory
+                    .data
+                    .get_temp::<usize>(egui::Id::new("interactive-diff-navigation"))
+            })
+            .and_then(|index| self.diff_rows.get(index).copied());
+        for display_index in first..last.min(visible_len) {
+            let row_index = self.readonly_presentation.as_ref().unwrap().rows[display_index];
+            let row = &diff.rows[row_index];
+            let changed = if side == 0 {
+                &row.left_changed
+            } else {
+                &row.right_changed
+            };
+            let ending = if side == 0 {
+                row.left_ending
+            } else {
+                row.right_ending
+            };
+            let ending_diff = !self.diff_options[2] && row.left_ending != row.right_ending;
+            let rect = Rect::from_min_size(
+                egui::pos2(
+                    viewport.left() - output.state.offset.x,
+                    viewport.top() + display_index as f32 * row_height - self.scroll[side],
+                ),
+                egui::vec2(viewport.width().max(content_width), row_height),
+            );
+            super::paint_file_line(
+                &painter,
+                rect,
+                if side == 0 {
+                    row.left.as_ref()
+                } else {
+                    row.right.as_ref()
+                },
+                &row.state,
+                display_index % 2 == 1,
+                changed,
+                ending_diff.then_some(ending).flatten(),
+                navigation == Some(row_index),
+            );
+            let line = if side == 0 { &row.left } else { &row.right };
+            ui.interact(
+                rect.intersect(viewport),
+                ui.id().with(("interactive-readonly-line", side, row_index)),
+                Sense::hover(),
+            )
+            .widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::Label,
+                    true,
+                    super::file_line_accessible_label(side, line.as_ref(), &row.state),
+                )
+            });
+        }
+        let pane = ui.interact(
+            viewport,
+            egui::Id::new((
+                "interactive-readonly-pane",
+                self.side_generation[side],
+                side,
+            )),
+            Sense::click(),
+        );
+        pane.widget_info(|| {
+            egui::WidgetInfo::labeled(
+                egui::WidgetType::Panel,
+                true,
+                format!(
+                    "{} file comparison pane. Use Up and Down Arrow to scroll lines, Page Up or Page Down for pages, Home or End for the first or last line.",
+                    super::side_name(side)
+                ),
+            )
+        });
+        if pane.clicked() {
+            pane.request_focus();
+        }
+        if pane.has_focus() {
+            ui.memory_mut(|memory| {
+                memory.set_focus_lock_filter(
+                    pane.id,
+                    egui::EventFilter {
+                        horizontal_arrows: true,
+                        vertical_arrows: true,
+                        ..Default::default()
+                    },
+                )
+            });
+            let delta = ui.input(|input| {
+                if input.key_pressed(egui::Key::ArrowDown) {
+                    row_height
+                } else if input.key_pressed(egui::Key::ArrowUp) {
+                    -row_height
+                } else if input.key_pressed(egui::Key::PageDown) {
+                    viewport.height()
+                } else if input.key_pressed(egui::Key::PageUp) {
+                    -viewport.height()
+                } else if input.key_pressed(egui::Key::Home) {
+                    -self.scroll[side]
+                } else if input.key_pressed(egui::Key::End) {
+                    row_height * visible_len as f32 - self.scroll[side]
+                } else {
+                    0.0
+                }
+            });
+            if delta != 0.0 {
+                let next = (self.scroll[side] + delta).clamp(
+                    0.0,
+                    (row_height * visible_len as f32 - viewport.height()).max(0.0),
+                );
+                self.scroll = [next; 2];
+                ui.ctx().request_repaint();
+            }
+            ui.painter().rect_stroke(
+                viewport.shrink(1.0),
+                4.0,
+                Stroke::new(2.0, palette.accent),
+                egui::StrokeKind::Inside,
+            );
+        }
     }
     fn editor(&mut self, ui: &mut egui::Ui, side: usize, height: f32) {
         let palette = Palette::for_context(ui.ctx());
         let source = side_of(side);
         let current = self.workspace.as_ref().unwrap().text(source).to_owned();
         let displayed = current.replace("\r\n", "\n").replace('\r', "\n");
+        let displayed_lines: Vec<_> = displayed.lines().collect();
         let mut next = displayed.clone();
         let editor_id = egui::Id::new(("two-way-edit", self.side_generation[side], side));
         let previous_cursor = egui::TextEdit::load_state(ui.ctx(), editor_id)
@@ -1606,7 +1939,7 @@ impl InteractiveView {
                 usize::from(range.start)..usize::from(range.end)
             });
         let font = comparison_font(ui.ctx());
-        let row_height = ui.fonts_mut(|fonts| fonts.row_height(&font));
+        let row_height = super::comparison_row_height(ui);
         let count = self.workspace.as_ref().unwrap().line_count(source);
         let chunks = self.workspace.as_ref().unwrap().chunks(source);
         let ignored = self
@@ -1615,7 +1948,7 @@ impl InteractiveView {
             .unwrap()
             .ignored_ranges(source)
             .to_vec();
-        let changed: BTreeMap<usize, DirectoryEntryState> = self
+        let changed: BTreeMap<usize, (DirectoryEntryState, Vec<Range<usize>>)> = self
             .diff
             .as_ref()
             .map(|diff| {
@@ -1623,8 +1956,32 @@ impl InteractiveView {
                     .iter()
                     .filter_map(|row| {
                         let line = if side == 0 { &row.left } else { &row.right };
+                        let ranges = if side == 0 {
+                            &row.left_changed
+                        } else {
+                            &row.right_changed
+                        };
                         line.as_ref()
-                            .map(|(number, _)| (number - 1, row.state.clone()))
+                            .map(|(number, _)| (number - 1, (row.state.clone(), ranges.clone())))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let ending_differences: BTreeMap<usize, versus::DisplayLineEnding> = self
+            .diff
+            .as_ref()
+            .map(|diff| {
+                diff.rows
+                    .iter()
+                    .filter_map(|row| {
+                        let line = if side == 0 { &row.left } else { &row.right };
+                        let ending = if side == 0 {
+                            row.left_ending
+                        } else {
+                            row.right_ending
+                        };
+                        (!self.merge_options[2] && row.left_ending != row.right_ending)
+                            .then_some((line.as_ref()?.0 - 1, ending?))
                     })
                     .collect()
             })
@@ -1663,8 +2020,8 @@ impl InteractiveView {
             .max_height(text_height)
             .vertical_scroll_offset(self.scroll[side])
             .show(ui, |ui| {
-                let number_width = 45.0;
-                let gutter_width = if merge_controls { 50.0 } else { 0.0 };
+                let number_width = 64.0;
+                let gutter_width = if merge_controls { 58.0 } else { 0.0 };
                 let width = ui.available_width().max(180.0);
                 let text_width = (width - number_width - gutter_width - 12.0).max(80.0);
                 let origin = ui.cursor().min;
@@ -1690,32 +2047,78 @@ impl InteractiveView {
                     egui::pos2(text_x, origin.y),
                     egui::vec2(text_width, content_height),
                 );
+                // The editable surface still owns its TextEdit/history, but
+                // while comparison assistance is present its row decoration is
+                // deliberately the same as File Diff.
+                for line in 0..count.max(1) {
+                    let state = changed
+                        .get(&line)
+                        .map(|(state, _)| state)
+                        .unwrap_or(&DirectoryEntryState::Same);
+                    let row_rect = Rect::from_min_size(
+                        egui::pos2(origin.x, origin.y + line as f32 * row_height),
+                        egui::vec2(width, row_height),
+                    );
+                    super::file_style::paint_background(
+                        ui.painter(),
+                        row_rect,
+                        state,
+                        line % 2 == 1,
+                        false,
+                    );
+                    super::file_style::paint_gutter(
+                        ui.painter(),
+                        Rect::from_min_size(egui::pos2(numbers_x, row_rect.top()), row_rect.size()),
+                        line + 1,
+                        state,
+                    );
+                }
+                let mut text_scroll_x = 0.0;
+                let mut text_clip = text_rect.intersect(ui.clip_rect());
                 ui.scope_builder(egui::UiBuilder::new().max_rect(text_rect), |ui| {
                     let mut layouter = |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, _: f32| {
                         let mut job = egui::text::LayoutJob::default();
                         job.wrap.max_width = f32::INFINITY;
                         for (index, line) in buffer.as_str().split_inclusive('\n').enumerate() {
                             let protected = ignored.iter().any(|r| r.contains(&index));
-                            let state = changed.get(&index);
-                            let background = if protected {
-                                palette.muted.gamma_multiply(0.15)
-                            } else if state.is_some_and(|s| *s != DirectoryEntryState::Same) {
-                                palette.changed.gamma_multiply(0.13)
+                            if protected {
+                                job.append(
+                                    line,
+                                    0.0,
+                                    egui::TextFormat {
+                                        font_id: font.clone(),
+                                        color: palette.muted,
+                                        background: palette.muted.gamma_multiply(0.15),
+                                        line_height: Some(row_height),
+                                        ..Default::default()
+                                    },
+                                );
+                            } else if let Some((state, ranges)) = changed.get(&index) {
+                                super::file_style::append_text(
+                                    &mut job,
+                                    line,
+                                    state,
+                                    ranges,
+                                    palette,
+                                    font.clone(),
+                                    Some(row_height),
+                                );
+                            } else if self.diff.is_some() {
+                                super::file_style::append_text(
+                                    &mut job,
+                                    line,
+                                    &DirectoryEntryState::Same,
+                                    &[],
+                                    palette,
+                                    font.clone(),
+                                    Some(row_height),
+                                );
                             } else {
-                                Color32::TRANSPARENT
-                            };
-                            let format = egui::TextFormat {
-                                font_id: font.clone(),
-                                color: if protected {
-                                    palette.muted
-                                } else {
-                                    palette.text
-                                },
-                                background,
-                                line_height: Some(row_height),
-                                ..Default::default()
-                            };
-                            append_code_line(&mut job, line, format, syntax, palette);
+                                append_code_line(&mut job, line, egui::TextFormat {
+                                    font_id: font.clone(), color: palette.text,
+                                    line_height: Some(row_height), ..Default::default()
+                                }, syntax, palette);
+                            }
                         }
                         if job.text.is_empty() {
                             job.append(
@@ -1729,16 +2132,25 @@ impl InteractiveView {
                         }
                         ui.fonts_mut(|fonts| fonts.layout_job(job))
                     };
-                    let edit = egui::ScrollArea::horizontal().id_salt(("interactive-horizontal",self.side_generation[side],side)).auto_shrink([false,true]).max_width(text_width).show(ui,|ui|egui::TextEdit::multiline(&mut next)
-                        .id(editor_id)
-                        .font(font.clone())
-                        .code_editor()
-                        .interactive(self.editing)
-                        .desired_width(text_width)
-                        .desired_rows(1)
-                        .frame(egui::Frame::NONE)
-                        .layouter(&mut layouter)
-                        .show(ui)).inner;
+                    let horizontal = egui::ScrollArea::horizontal()
+                        .id_salt(("interactive-horizontal", self.side_generation[side], side))
+                        .auto_shrink([false, true])
+                        .max_width(text_width)
+                        .show(ui, |ui| {
+                            egui::TextEdit::multiline(&mut next)
+                                .id(editor_id)
+                                .font(font.clone())
+                                .code_editor()
+                                .interactive(self.editing)
+                                .desired_width(text_width)
+                                .desired_rows(1)
+                                .frame(egui::Frame::NONE)
+                                .layouter(&mut layouter)
+                                .show(ui)
+                        });
+                    text_scroll_x = horizontal.state.offset.x;
+                    text_clip = horizontal.inner_rect.intersect(ui.clip_rect());
+                    let edit = horizontal.inner;
                     if edit.response.has_focus() {
                         self.selected_side = side;
                         if let Some(cursor) = edit.cursor_range {
@@ -1769,13 +2181,6 @@ impl InteractiveView {
                 });
                 for line in 0..count.max(1) {
                     let y = origin.y + line as f32 * row_height;
-                    ui.painter().text(
-                        egui::pos2(numbers_x + number_width - 5.0, y),
-                        Align2::RIGHT_TOP,
-                        (line + 1).to_string(),
-                        font.clone(),
-                        palette.muted,
-                    );
                     if ignored.iter().any(|r| r.contains(&line)) {
                         ui.painter().line_segment(
                             [
@@ -1783,6 +2188,38 @@ impl InteractiveView {
                                 egui::pos2(numbers_x + 2.0, y + row_height - 2.0),
                             ],
                             Stroke::new(2.0, palette.changed),
+                        );
+                    }
+                    if let Some(ending) = ending_differences.get(&line) {
+                        let text = displayed_lines.get(line).copied().unwrap_or_default();
+                        let mut ending_job = egui::text::LayoutJob::default();
+                        let state = changed
+                            .get(&line)
+                            .map(|(state, _)| state)
+                            .unwrap_or(&DirectoryEntryState::Same);
+                        let ranges = changed
+                            .get(&line)
+                            .map(|(_, ranges)| ranges.as_slice())
+                            .unwrap_or(&[]);
+                        super::file_style::append_text(
+                            &mut ending_job,
+                            text,
+                            state,
+                            ranges,
+                            palette,
+                            font.clone(),
+                            Some(row_height),
+                        );
+                        let end_x = text_x - text_scroll_x + ui.painter().layout_job(ending_job).size().x;
+                        super::file_style::paint_ending(
+                            &ui.painter().with_clip_rect(text_clip),
+                            Rect::from_min_size(
+                                egui::pos2(origin.x, y),
+                                egui::vec2(width, row_height),
+                            ),
+                            end_x,
+                            *ending,
+                            state,
                         );
                     }
                 }
@@ -1797,12 +2234,12 @@ impl InteractiveView {
                         for line in lines {
                             let y = origin.y + line as f32 * row_height;
                             let rect = Rect::from_min_size(
-                                egui::pos2(gutter_x + 22.0, y),
-                                egui::vec2(24.0, row_height),
+                                egui::pos2(gutter_x + 24.0, y),
+                                egui::vec2(30.0, row_height),
                             );
                             ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
                                 let tooltip=if expanded{format!("Copy line {} to the chosen target",line+1)}else{format!("Copy chunk {}–{} to the chosen target · Right-click for chunk controls",chunk.range.start+1,chunk.range.end)};
-                                let response=inline_action(ui,rect,egui::Id::new(("two-way-transfer",side,chunk.id,line)),if side==0{"→"}else{"←"},&tooltip);
+                                let response=transfer_action(ui,rect,egui::Id::new(("two-way-transfer",side,chunk.id,line)),if side==0{"→"}else{"←"},side,&tooltip);
                                 if response.clicked() {
                                     pending_transfer = Some(if expanded {
                                         line..line + 1
@@ -2575,6 +3012,41 @@ fn inline_action(
         .on_hover_text(label)
 }
 
+/// Larger, side-colored transfer arrows use the same palette slots as File
+/// Diff's left-only and right-only status icons.  This stays separate from the
+/// smaller expand/collapse controls in the same gutter.
+fn transfer_action(
+    ui: &egui::Ui,
+    rect: Rect,
+    id: egui::Id,
+    glyph: &str,
+    side: usize,
+    label: &str,
+) -> egui::Response {
+    let response = ui.interact(rect, id, Sense::click());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+    let palette = Palette::for_context(ui.ctx());
+    let color = if side == 0 {
+        palette.left_only
+    } else {
+        palette.right_only
+    };
+    if response.hovered() || response.has_focus() {
+        ui.painter()
+            .rect_filled(rect.shrink(1.0), 2.0, palette.hover);
+    }
+    ui.painter().text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        glyph,
+        FontId::proportional(18.0),
+        color,
+    );
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(label)
+}
+
 fn window_button_cursor(ctx: &egui::Context, layer: egui::LayerId) {
     // egui's built-in window close/collapse controls bypass interact_cursor.
     // Limit this fallback to click-only controls so window dragging, resizing,
@@ -2974,6 +3446,26 @@ mod tests {
             ..Default::default()
         }
     }
+    fn readonly_comparison(lines: usize) -> FileComparison {
+        FileComparison {
+            rows: (0..lines)
+                .map(|index| versus::FileComparisonRow {
+                    left: Some((index + 1, format!("left\tline {index}"))),
+                    right: Some((index + 1, format!("right line {index}"))),
+                    state: if index % 3 == 0 {
+                        DirectoryEntryState::Different
+                    } else {
+                        DirectoryEntryState::Same
+                    },
+                    left_changed: Vec::new(),
+                    right_changed: Vec::new(),
+                    left_ending: Some(versus::DisplayLineEnding::Lf),
+                    right_ending: Some(versus::DisplayLineEnding::Lf),
+                })
+                .collect(),
+            message: None,
+        }
+    }
     fn partial_view(path: PathBuf, text: &str) -> InteractiveView {
         let file = WorkingFile {
             identity: None,
@@ -3155,6 +3647,181 @@ mod tests {
         }
     }
     #[test]
+    fn readonly_presentation_is_reused_and_rebuilds_for_filter_changes() {
+        let ctx = egui::Context::default();
+        let mut view = view("left\n", "right\n");
+        view.editing = false;
+        view.diff = Some(readonly_comparison(12));
+        view.diff_rows = vec![0, 3, 6, 9];
+        for _ in 0..2 {
+            ctx.run_ui(egui::RawInput::default(), |ui| {
+                view.ensure_readonly_presentation(ui);
+            })
+            .drop_without_applying_deltas();
+        }
+        let first_rows = view.readonly_presentation.as_ref().unwrap().rows.as_ptr();
+        let first_widths = view.readonly_presentation.as_ref().unwrap().content_widths;
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            view.ensure_readonly_presentation(ui);
+        })
+        .drop_without_applying_deltas();
+        assert_eq!(
+            view.readonly_presentation.as_ref().unwrap().rows.as_ptr(),
+            first_rows,
+            "unchanged frames must reuse the cached row list"
+        );
+        let longest_left = (0..12)
+            .map(|index| format!("left\tline {index}").len() + 3)
+            .max()
+            .unwrap();
+        let expected_left_width =
+            96.0 + longest_left as f32 * view.readonly_presentation.as_ref().unwrap().font.size;
+        assert_eq!(first_widths[0], expected_left_width);
+        let mut row_height = 0.0;
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            row_height = super::comparison_row_height(ui);
+        })
+        .drop_without_applying_deltas();
+        // The old top row is source row 5. Filtering should retain the first
+        // surviving source row at or after it (row 6), not reinterpret pixel
+        // offset five as display row five.
+        view.scroll = [5.0 * row_height + 0.5; 2];
+        view.diff_options[0] = true;
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            view.ensure_readonly_presentation(ui);
+        })
+        .drop_without_applying_deltas();
+        let cached = view.readonly_presentation.as_ref().unwrap();
+        assert_eq!(cached.preferences, [true, false, false]);
+        assert_eq!(cached.rows, vec![0, 3, 6, 9]);
+        assert!((view.scroll[0] - (2.0 * row_height + 0.5)).abs() < 0.01);
+    }
+
+    #[test]
+    fn readonly_refresh_remaps_the_source_line_anchor_and_merge_keeps_its_scroll() {
+        let ctx = egui::Context::default();
+        let mut view = view("left\n", "right\n");
+        view.editing = false;
+        view.diff = Some(readonly_comparison(12));
+        view.diff_rows = vec![0, 3, 6, 9];
+        let mut row_height = 0.0;
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            row_height = super::comparison_row_height(ui);
+            view.ensure_readonly_presentation(ui);
+        })
+        .drop_without_applying_deltas();
+        // Source line 10 is at aligned display index 9 in the old result.
+        view.scroll = [9.0 * row_height + 0.5; 2];
+        view.invalidate_diff();
+        let mut refreshed = readonly_comparison(12);
+        for inserted in 0..2 {
+            refreshed.rows.insert(
+                inserted,
+                versus::FileComparisonRow {
+                    left: None,
+                    right: Some((inserted + 1, format!("inserted {inserted}"))),
+                    state: DirectoryEntryState::RightOnly,
+                    left_changed: Vec::new(),
+                    right_changed: Vec::new(),
+                    left_ending: None,
+                    right_ending: Some(versus::DisplayLineEnding::Lf),
+                },
+            );
+        }
+        view.diff = Some(refreshed);
+        view.diff_rows = vec![0, 1, 2, 5, 8, 11];
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            view.ensure_readonly_presentation(ui);
+        })
+        .drop_without_applying_deltas();
+        let cache = view.readonly_presentation.as_ref().unwrap();
+        let top = (view.scroll[0] / row_height).floor() as usize;
+        let row = &view.diff.as_ref().unwrap().rows[cache.rows[top]];
+        assert_eq!(row.left.as_ref().map(|line| line.0), Some(10));
+        assert!((view.scroll[0] % row_height - 0.5).abs() < 0.01);
+
+        view.editing = true;
+        view.scroll = [37.0, 71.0];
+        view.invalidate_diff();
+        assert!(view.readonly_pending_anchor.is_none());
+        assert_eq!(view.scroll, [37.0, 71.0]);
+    }
+
+    #[test]
+    fn merge_editor_keeps_raw_tabs_syntax_and_a_clear_right_transfer_gutter() {
+        let ctx = egui::Context::default();
+        let mut view = view("\tfn source() {}\n", "target\n");
+        let right_chunk = view.workspace.as_ref().unwrap().chunks(TwoWaySide::Right)[0].id;
+        // Run Diff is intentionally off: the editable source view still keeps
+        // its syntax formatting and byte-identical TextEdit buffer.
+        let output = frame(&mut view, &ctx, vec![]);
+        let source = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text().contains("fn source") => Some(text),
+                _ => None,
+            })
+            .expect("source line should be rendered");
+        assert!(source.galley.text().contains('\t'));
+        assert!(
+            source
+                .galley
+                .job
+                .sections
+                .iter()
+                .any(|section| section.format.color == Palette::for_context(&ctx).accent)
+        );
+        let right_arrow = ctx
+            .read_response(egui::Id::new((
+                "two-way-transfer",
+                1usize,
+                right_chunk,
+                0usize,
+            )))
+            .unwrap()
+            .rect;
+        let right_editor = ctx.read_response(view.editor_id(1)).unwrap().rect;
+        // The text anchor is 68 points after the shifted number/status gutter:
+        // it clears the right-side 58 point transfer area and its 30 point arrow.
+        assert!(right_editor.left() - right_arrow.right() >= 70.0);
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn right_pane_wheel_updates_linked_readonly_scroll_in_the_same_frame() {
+        let ctx = egui::Context::default();
+        let mut view = view("left\n", "right\n");
+        view.editing = false;
+        view.diff = Some(readonly_comparison(120));
+        view.diff_rows = (0..120).filter(|index| index % 3 == 0).collect();
+        frame(&mut view, &ctx, vec![]).drop_without_applying_deltas();
+        let right_pane = ctx
+            .read_response(egui::Id::new(("interactive-readonly-pane", 0u64, 1usize)))
+            .unwrap()
+            .rect
+            .center();
+        frame(&mut view, &ctx, vec![egui::Event::PointerMoved(right_pane)])
+            .drop_without_applying_deltas();
+        frame(
+            &mut view,
+            &ctx,
+            vec![egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Line,
+                delta: egui::vec2(0.0, -8.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: Default::default(),
+            }],
+        )
+        .drop_without_applying_deltas();
+        assert!(
+            view.scroll[1] > 0.0,
+            "right pane should consume its wheel event; pane={right_pane:?}, scroll={:?}",
+            view.scroll
+        );
+        assert_eq!(view.scroll[0], view.scroll[1]);
+    }
+    #[test]
     fn merge_without_diff_keeps_preferences_and_history_across_modes() {
         let ctx = egui::Context::default();
         let mut view = view("left\n", "unrelated\n");
@@ -3247,8 +3914,37 @@ mod tests {
             set_theme(&ctx, theme);
             let mut view = view("fn source() {\n    one();\n    two();\n}\n", "target\n");
             view.destination[1] = 1;
-            frame(&mut view, &ctx, vec![]).drop_without_applying_deltas();
+            let output = frame(&mut view, &ctx, vec![]);
             let chunk = view.workspace.as_ref().unwrap().chunks(TwoWaySide::Left)[0].clone();
+            let arrow = ctx
+                .read_response(egui::Id::new((
+                    "two-way-transfer",
+                    0usize,
+                    chunk.id,
+                    chunk.range.start,
+                )))
+                .unwrap()
+                .rect;
+            let granularity = ctx
+                .read_response(egui::Id::new(("two-way-granularity", 0usize, chunk.id)))
+                .unwrap()
+                .rect;
+            assert!(arrow.width() >= 30.0);
+            assert!(arrow.width() > granularity.width());
+            let glyph = output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.text() == "→" => Some(text),
+                    _ => None,
+                })
+                .expect("transfer arrow should be painted");
+            assert_eq!(glyph.galley.job.sections[0].format.font_id.size, 18.0);
+            assert_eq!(
+                glyph.galley.job.sections[0].format.color,
+                Palette::for_context(&ctx).left_only
+            );
+            output.drop_without_applying_deltas();
             for id in [
                 egui::Id::new(("two-way-transfer", 0usize, chunk.id, chunk.range.start)),
                 egui::Id::new(("two-way-granularity", 0usize, chunk.id)),

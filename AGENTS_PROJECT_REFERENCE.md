@@ -55,6 +55,17 @@ APIs and must fail cleanly when unavailable.
   Zoom stays on the right; comparison options and difference navigation follow it
   only while Run Diff is enabled. Hidden Merge option states are retained. Each
   side loads and scrolls independently; transfers require two loaded files.
+- `src/app/file_style.rs` shares File Diff's row backgrounds, state stripes,
+  number/status gutters, inline highlights, and line-ending badges with editable
+  Merge. Transfer arrows are larger and use the source side's LEFT/RIGHT color.
+  Switching an open merge pair to Diff paints aligned read-only rows through the
+  File Diff painter, with one source header and Refresh in the header toolbar.
+  Read-only row visibility and widths are cached per comparison/preferences/font;
+  the hovered pane processes scrolling first to keep both sides aligned that frame.
+  Diff scrolling stays linked; Merge scrolling remains independent. The retained
+  documents, edits, and history survive switching; Refresh compares working copies
+  without reloading disk bytes. Browse continues opening files in this retained
+  workspace. Direct File Diff sessions retain their existing disk refresh path.
 - `src/app/folder_browser.rs` enumerates one directory level at a time through
   `directory_entries_for_root`, which reads entry metadata and relative paths
   without comparing file contents. Each Merge side enumerates, expands, and scrolls

@@ -40,6 +40,12 @@ controls and change count while retaining the Merge settings. Each file and fold
 pane loads, expands, and scrolls independently; a single selected source opens immediately. Transfer
 controls and file comparison assistance become available once both files are open.
 
+With Run Diff enabled, Merge uses File Diff's row colors, status icons, changed-text
+highlights, and line-ending badges. Transfer arrows use the source side's color.
+Switching to File Diff keeps one path header per side and provides Refresh, with
+the same aligned comparison rows as a new File Diff. Edits and undo history remain
+available when returning to Merge; Refresh compares the retained working copies.
+
 Both panes show editable text, line numbers, and separate unsaved status. Select a
 contiguous line range in either pane, choose an insertion point or explicitly
 select a replacement range in the other pane, then use the transfer control to
