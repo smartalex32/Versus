@@ -84,7 +84,6 @@ pub(super) struct FolderBrowser {
     focus_find: bool,
     query: SearchQuery,
     searched_query: Option<SearchQuery>,
-    searched_scope: Option<SearchScope>,
     replacement: String,
     scope: SearchScope,
     results_side: usize,
@@ -134,7 +133,6 @@ impl FolderBrowser {
             focus_find: false,
             query: SearchQuery::plain(""),
             searched_query: None,
-            searched_scope: None,
             replacement: String::new(),
             scope: SearchScope::Both,
             results_side,
@@ -165,8 +163,13 @@ impl FolderBrowser {
         if !changed {
             return;
         }
-        if sources.iter().filter(|source| source.is_some()).count() == 1 {
-            self.results_side = usize::from(sources[1].is_some());
+        match self.scope {
+            SearchScope::Left => self.results_side = 0,
+            SearchScope::Right => self.results_side = 1,
+            SearchScope::Both if sources.iter().filter(|source| source.is_some()).count() == 1 => {
+                self.results_side = usize::from(sources[1].is_some());
+            }
+            SearchScope::Both => {}
         }
         for side in 0..2 {
             if self.sources[side] != sources[side] {
@@ -199,7 +202,6 @@ impl FolderBrowser {
         self.preview = None;
         self.selected_hits.clear();
         self.searched_query = None;
-        self.searched_scope = None;
     }
     pub(super) fn source_roots(&self) -> [Option<PathBuf>; 2] {
         self.sources.clone()
@@ -1029,7 +1031,17 @@ impl FolderBrowser {
                                 None,
                             );
                             let enabled = self.results_current()
-                                && !self.selected_hits.is_empty()
+                                && self.results.as_ref().is_some_and(|results| {
+                                    results
+                                        .files
+                                        .iter()
+                                        .filter(|file| scope_includes(self.scope, file.side))
+                                        .any(|file| {
+                                            file.hits
+                                                .iter()
+                                                .any(|hit| self.selected_hits.contains(&hit.id))
+                                        })
+                                })
                                 && !view.is_saving();
                             for (index, icon, label, next) in [
                                 (0, ToolbarIcon::ReplaceNext, "Replace Next", true),
@@ -1056,6 +1068,7 @@ impl FolderBrowser {
                             }
                             ui.add_space(6.0);
                             let mut refresh = false;
+                            let mut scope_clicked = false;
                             let scope_width: f32 = ["LEFT", "RIGHT", "BOTH"]
                                 .into_iter()
                                 .map(|label| {
@@ -1083,6 +1096,7 @@ impl FolderBrowser {
                                     if search_scope_button(ui, label, color, self.scope == scope)
                                         .clicked()
                                     {
+                                        scope_clicked = true;
                                         self.scope = scope;
                                         if scope != SearchScope::Both {
                                             self.results_side =
@@ -1099,13 +1113,25 @@ impl FolderBrowser {
                                     refresh = self.search_action_buttons(ui, view);
                                 });
                             }
-                            if self.query != previous_query || self.scope != previous_scope {
-                                self.schedule_search(ctx.input(|input| input.time));
-                            } else if self.replacement != previous_replacement {
+                            let options_changed = self.query.case_sensitive
+                                != previous_query.case_sensitive
+                                || self.query.whole_word != previous_query.whole_word
+                                || self.query.regex != previous_query.regex;
+                            if self.scope != previous_scope
+                                || self.replacement != previous_replacement
+                            {
                                 self.preview = None;
                             }
-                            if refresh {
+                            if refresh
+                                || options_changed
+                                || (scope_clicked
+                                    && (self.search_due_at.is_some()
+                                        || self.query.pattern != previous_query.pattern
+                                        || (self.search.is_none() && !self.results_current())))
+                            {
                                 self.start_search(view);
+                            } else if self.query.pattern != previous_query.pattern {
+                                self.schedule_search(ctx.input(|input| input.time));
                             }
                             ui.horizontal(|ui| {
                                 if self.search.is_some() {
@@ -1254,20 +1280,25 @@ impl FolderBrowser {
                         let palette = Palette::for_context(ui.ctx());
                         let width = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
                         for (side, label) in [(0, "LEFT"), (1, "RIGHT")] {
-                            if search_choice_button(
-                                ui,
-                                label,
-                                palette.text,
-                                self.results_side == side,
-                                egui::Id::new(("folder-search-view", side)),
-                                if side == 0 {
-                                    "Show left results"
-                                } else {
-                                    "Show right results"
-                                },
-                                Some(width),
-                            )
-                            .clicked()
+                            let enabled = scope_includes(self.scope, side);
+                            if ui
+                                .add_enabled_ui(enabled, |ui| {
+                                    search_choice_button(
+                                        ui,
+                                        label,
+                                        palette.text,
+                                        self.results_side == side,
+                                        egui::Id::new(("folder-search-view", side)),
+                                        if side == 0 {
+                                            "Show left results"
+                                        } else {
+                                            "Show right results"
+                                        },
+                                        Some(width),
+                                    )
+                                })
+                                .inner
+                                .clicked()
                             {
                                 self.results_side = side;
                             }
@@ -1465,16 +1496,20 @@ impl FolderBrowser {
                 .as_ref()
                 .is_some_and(|results| !results.cancelled)
             && self.searched_query.as_ref() == Some(&self.query)
-            && self.searched_scope == Some(self.scope)
     }
     fn start_search(&mut self, view: &InteractiveView) {
         self.search_due_at = None;
+        self.search = None;
+        self.results = None;
+        self.preview = None;
+        self.selected_hits.clear();
+        self.error = None;
+        self.searched_query = None;
         if self.query.pattern.is_empty() {
             return;
         }
         self.working = view.export_working_files();
         let roots = self.sources.clone();
-        let scope = self.scope;
         let query = self.query.clone();
         let working = self.working.clone();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -1484,7 +1519,7 @@ impl FolderBrowser {
             let result = crate::diagnostics::catch_worker("Find and Replace search", || {
                 versus::search_roots_streaming(
                     &roots,
-                    scope,
+                    SearchScope::Both,
                     &query,
                     Some(&cancellation),
                     &working,
@@ -1497,20 +1532,26 @@ impl FolderBrowser {
         });
         self.search = Some(SearchJob { receiver, cancel });
         self.searched_query = Some(self.query.clone());
-        self.searched_scope = Some(self.scope);
-        self.results = None;
-        self.preview = None;
-        self.selected_hits.clear();
-        self.error = None;
     }
     fn prepare_replacements(&mut self, view: &InteractiveView, next: bool) {
         if !self.results_current() {
             return;
         }
         self.working = view.export_working_files();
+        let selected = self
+            .results
+            .as_ref()
+            .unwrap()
+            .files
+            .iter()
+            .filter(|file| scope_includes(self.scope, file.side))
+            .flat_map(|file| &file.hits)
+            .filter(|hit| self.selected_hits.contains(&hit.id))
+            .map(|hit| hit.id)
+            .collect();
         match search_session::preview_replacements(
             self.results.as_ref().unwrap(),
-            &self.selected_hits,
+            &selected,
             &self.query,
             &self.replacement,
             &self.working,
@@ -1554,6 +1595,7 @@ impl FolderBrowser {
                 self.results = None;
                 self.preview = None;
                 self.selected_hits.clear();
+                self.start_search(view);
             }
             Err(error) => self.error = Some(error),
         }
@@ -1672,9 +1714,15 @@ fn search_scope_button(
         color,
         selected,
         egui::Id::new(("folder-search-scope", label)),
-        &format!("Search {label}"),
+        &format!("Replace on {label}"),
         None,
     )
+}
+
+fn scope_includes(scope: SearchScope, side: usize) -> bool {
+    scope == SearchScope::Both
+        || (side == 0 && scope == SearchScope::Left)
+        || (side == 1 && scope == SearchScope::Right)
 }
 
 fn search_choice_button(
@@ -1686,6 +1734,12 @@ fn search_choice_button(
     tooltip: &str,
     width: Option<f32>,
 ) -> egui::Response {
+    let enabled = ui.is_enabled();
+    let color = if enabled {
+        color
+    } else {
+        Palette::for_context(ui.ctx()).muted.gamma_multiply(0.4)
+    };
     let text = ui
         .painter()
         .layout_no_wrap(label.into(), FontId::monospace(11.0), color);
@@ -1717,10 +1771,14 @@ fn search_choice_button(
     ui.painter()
         .galley(rect.center() - text.size() * 0.5, text, color);
     response.widget_info(|| {
-        egui::WidgetInfo::selected(egui::WidgetType::Button, true, selected, label)
+        egui::WidgetInfo::selected(egui::WidgetType::Button, enabled, selected, label)
     });
     response
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_cursor(if enabled {
+            egui::CursorIcon::PointingHand
+        } else {
+            egui::CursorIcon::Default
+        })
         .on_hover_text(tooltip)
 }
 
@@ -2484,6 +2542,181 @@ mod tests {
     }
 
     #[test]
+    fn scope_buttons_immediately_filter_cached_results_and_limit_replacement_targets() {
+        let ctx = egui::Context::default();
+        set_theme(&ctx, egui::Theme::Dark);
+        let mut browser = FolderBrowser::new_search([None, None]);
+        let mut view = InteractiveView::default();
+        browser.open_search();
+        browser.query = SearchQuery::plain("match");
+        browser.searched_query = Some(browser.query.clone());
+        browser.replacement = "changed".into();
+        browser.results = Some(SearchResults {
+            files: vec![
+                streamed_file(0, 1, "left match"),
+                streamed_file(1, 2, "right match"),
+            ],
+            ..Default::default()
+        });
+        browser.selected_hits = BTreeSet::from([1, 2]);
+        for _ in 0..3 {
+            dialog_frame(&mut browser, &mut view, &ctx, vec![]).drop_without_applying_deltas();
+        }
+        browser.prepare_replacements(&view, false);
+        assert_eq!(browser.preview.as_ref().unwrap().changes.len(), 2);
+        for (label, side, path) in [
+            ("LEFT", 0usize, "side-0.txt"),
+            ("RIGHT", 1usize, "side-1.txt"),
+        ] {
+            let button = ctx
+                .read_response(egui::Id::new(("folder-search-scope", label)))
+                .unwrap()
+                .rect;
+            click_dialog(&mut browser, &mut view, &ctx, button.center());
+            assert_eq!(browser.results_side, side);
+            assert!(browser.search.is_none() && browser.search_due_at.is_none());
+            assert!(browser.results_current());
+            assert!(
+                browser.preview.is_none(),
+                "scope change must invalidate a wider preview"
+            );
+            assert_eq!(browser.results.as_ref().unwrap().files.len(), 2);
+            assert_eq!(browser.selected_hits, BTreeSet::from([1, 2]));
+            dialog_frame(&mut browser, &mut view, &ctx, vec![]).drop_without_applying_deltas();
+            let other = ctx
+                .read_response(egui::Id::new(("folder-search-view", 1 - side)))
+                .unwrap();
+            assert!(!other.enabled());
+            click_dialog(&mut browser, &mut view, &ctx, other.rect.center());
+            assert_eq!(
+                browser.results_side, side,
+                "disabled toggle cannot change the results side"
+            );
+            browser.prepare_replacements(&view, false);
+            assert_eq!(browser.preview.as_ref().unwrap().changes.len(), 1);
+            assert_eq!(
+                browser.preview.as_ref().unwrap().changes[0].path,
+                PathBuf::from(path)
+            );
+        }
+        let both = ctx
+            .read_response(egui::Id::new(("folder-search-scope", "BOTH")))
+            .unwrap()
+            .rect;
+        click_dialog(&mut browser, &mut view, &ctx, both.center());
+        dialog_frame(&mut browser, &mut view, &ctx, vec![]).drop_without_applying_deltas();
+        for side in 0..2usize {
+            assert!(
+                ctx.read_response(egui::Id::new(("folder-search-view", side)))
+                    .unwrap()
+                    .enabled()
+            );
+        }
+        let left = ctx
+            .read_response(egui::Id::new(("folder-search-view", 0usize)))
+            .unwrap()
+            .rect;
+        click_dialog(&mut browser, &mut view, &ctx, left.center());
+        assert_eq!(browser.results_side, 0);
+        assert!(browser.results_current() && browser.search.is_none());
+        browser.prepare_replacements(&view, false);
+        assert_eq!(browser.preview.as_ref().unwrap().changes.len(), 2);
+        browser.scope = SearchScope::Left;
+        browser.set_search_sources([None, Some(PathBuf::from("right-only.txt"))]);
+        assert_eq!(
+            browser.results_side, 0,
+            "source changes must not select a disabled results side"
+        );
+    }
+
+    #[test]
+    fn button_actions_bypass_typing_delay_and_scope_changes_keep_the_active_search() {
+        let ctx = egui::Context::default();
+        set_theme(&ctx, egui::Theme::Dark);
+        let mut browser = FolderBrowser::new_search([None, None]);
+        let mut view = InteractiveView::default();
+        browser.open_search();
+        for _ in 0..3 {
+            dialog_frame(&mut browser, &mut view, &ctx, vec![]).drop_without_applying_deltas();
+        }
+        browser.query.pattern = "match".into();
+        browser.schedule_search(100.0);
+        let left = ctx
+            .read_response(egui::Id::new(("folder-search-scope", "LEFT")))
+            .unwrap()
+            .rect;
+        click_dialog(&mut browser, &mut view, &ctx, left.center());
+        assert!(browser.search_due_at.is_none() && browser.search.is_some());
+        assert_eq!(browser.searched_query, Some(browser.query.clone()));
+        let cancellation = browser.search.as_ref().unwrap().cancel.clone();
+        let right = ctx
+            .read_response(egui::Id::new(("folder-search-scope", "RIGHT")))
+            .unwrap()
+            .rect;
+        click_dialog(&mut browser, &mut view, &ctx, right.center());
+        assert!(Arc::ptr_eq(
+            &browser.search.as_ref().unwrap().cancel,
+            &cancellation
+        ));
+        assert!(!cancellation.load(Ordering::Relaxed));
+        for label in ["Match Case", "Match Whole Word", "Use Regular Expression"] {
+            browser.schedule_search(100.0);
+            let button = ctx.read_response(egui::Id::new(label)).unwrap().rect;
+            click_dialog(&mut browser, &mut view, &ctx, button.center());
+            assert!(
+                browser.search_due_at.is_none() && browser.search.is_some(),
+                "{label} should search immediately"
+            );
+            assert_eq!(browser.searched_query, Some(browser.query.clone()));
+        }
+        let cancellation = browser.search.as_ref().unwrap().cancel.clone();
+        browser.query.pattern.clear();
+        let button = ctx.read_response(egui::Id::new("Match Case")).unwrap().rect;
+        click_dialog(&mut browser, &mut view, &ctx, button.center());
+        assert!(cancellation.load(Ordering::Relaxed));
+        assert!(
+            browser.search.is_none()
+                && browser.search_due_at.is_none()
+                && browser.results.is_none()
+        );
+    }
+
+    #[test]
+    fn every_worker_searches_both_sides_regardless_of_replacement_scope() {
+        let root =
+            std::env::temp_dir().join(format!("versus-always-both-search-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let paths = [root.join("left.txt"), root.join("right.txt")];
+        for path in &paths {
+            std::fs::write(path, "match\n").unwrap();
+        }
+        let ctx = egui::Context::default();
+        let view = InteractiveView::default();
+        let mut browser = FolderBrowser::new_search(paths.map(Some));
+        browser.query = SearchQuery::plain("match");
+        for scope in [SearchScope::Left, SearchScope::Right, SearchScope::Both] {
+            browser.scope = scope;
+            browser.start_search(&view);
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while browser.search.is_some() && Instant::now() < deadline {
+                browser.poll(&ctx);
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            assert!(browser.results_current());
+            let sides: BTreeSet<_> = browser
+                .results
+                .as_ref()
+                .unwrap()
+                .files
+                .iter()
+                .map(|file| file.side)
+                .collect();
+            assert_eq!(sides, BTreeSet::from([0, 1]));
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn streamed_results_are_visible_before_completion_and_exclusions_survive_view_switches() {
         let ctx = egui::Context::default();
         set_theme(&ctx, egui::Theme::Dark);
@@ -2493,7 +2726,6 @@ mod tests {
         browser.query = SearchQuery::plain("match");
         browser.scope = SearchScope::Both;
         browser.searched_query = Some(browser.query.clone());
-        browser.searched_scope = Some(browser.scope);
         let (sender, receiver) = mpsc::channel();
         browser.search = Some(SearchJob {
             receiver,
@@ -2665,7 +2897,6 @@ mod tests {
         output.drop_without_applying_deltas();
         browser.query = SearchQuery::plain("match");
         browser.searched_query = Some(browser.query.clone());
-        browser.searched_scope = Some(browser.scope);
         let (sender, receiver) = mpsc::channel();
         browser.search = Some(SearchJob {
             receiver,
@@ -2855,7 +3086,6 @@ mod tests {
         browser.query = SearchQuery::plain("foo");
         browser.replacement = "long value".into();
         browser.searched_query = Some(browser.query.clone());
-        browser.searched_scope = Some(SearchScope::Both);
         browser.results = Some(
             versus::search_roots(
                 &browser.sources,
@@ -2893,6 +3123,10 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&paths[1]).unwrap(), "foo\n");
         browser.undo_batch(&mut view, false);
         assert_eq!(view.working_text(1), Some("foo\n"));
+        assert!(
+            browser.search.is_some() && browser.search_due_at.is_none(),
+            "Undo must refresh immediately"
+        );
         assert!(
             browser.results.is_none(),
             "undo invalidates old result snapshots"

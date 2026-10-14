@@ -74,7 +74,7 @@ that pane; the other pane can keep browsing a folder or editing a file. Each
 file pane has a back arrow before its LEFT/RIGHT label to return to its own tree.
 Open files independently on each side, including files with different names or
 relative paths. Each file pair keeps its own undo history as you navigate or pair files again. Folder-wide **Find and
-Replace** searches the left tree, right tree, or both, with plain text or regular
+Replace** searches both trees, with plain text or regular
 expressions, case and whole-word options. Results include file and line, and
 replacement previews can be applied as undoable batches to the working copies.
 Batch undo is atomic across participating files; undo newer edits or ignored-range
@@ -85,11 +85,15 @@ press Escape, or use its close icon to dismiss it. The larger fields use muted,
 italic placeholders. Choose **LEFT**, **RIGHT**, or **BOTH**; the side colors match
 the pane labels. **Match Case**, **Match Whole Word**, and **Use Regular Expression**
 are tooltip-equipped VS Code icons inside the Find field. Search starts after
-250 ms without typing, and matches appear progressively in the right results
+250 ms without typing; button actions start immediately. Every search collects
+both sides, and matches appear progressively in the right results
 panel, which fills the right half by default with a centered empty-state hint.
-A neutral **LEFT / RIGHT** toggle spans that panel’s width and filters the displayed
-side without changing the search scope. Rows show the line number and matching
-text; hover over a row and use its **X** to exclude it from replacement.
+A neutral **LEFT / RIGHT** toggle spans that panel’s width. Choosing **LEFT** or
+**RIGHT** switches the results to that side, disables the opposite toggle, and
+limits replacement to the chosen side. **BOTH** enables both toggles. Scope changes
+reuse cached results immediately without another search. Rows show the line
+number and matching text; hover over a row and use its **X** to exclude it from
+replacement.
 Undo, Redo, and Refresh sit beside the scope controls, with search status below.
 **Refresh** repopulates excluded results and rereads files to include external
 changes, while preserving unsaved working copies. The **Replace Next** and
@@ -97,8 +101,8 @@ changes, while preserving unsaved working copies. The **Replace Next** and
 or all included matches. Apply the preview to update working
 copies as an undoable batch. Remaining original matches advance after each apply,
 so repeated Replace Next actions stay accurate when replacement lengths change.
-Use Refresh after undo to refresh the results; changing search options restarts
-the search automatically.
+Undo, Redo, Refresh, and search-option buttons start any needed search immediately;
+the typing delay applies only to edits in Find.
 With Run Diff enabled, folder statuses include staged working copies and ignored
 ranges. The up/down controls jump to changed files and reveal their parent folders.
 

@@ -452,6 +452,11 @@ pub fn preview_replace(
         .map(|(_, file)| (file.identity_key(), file))
         .collect();
     for file in &results.files {
+        // Cached matches on the other side are not replacement participants.
+        // Their newer edits must not block a preview scoped to this side.
+        if !file.hits.iter().any(|hit| selected.contains(&hit.id)) {
+            continue;
+        }
         let key = file.working_file.identity_key();
         let base = working_by_key
             .get(&key)
@@ -956,6 +961,38 @@ mod tests {
         assert_eq!(results.files[0].working_file.text, "new needle");
         let _ = fs::remove_dir_all(root);
     }
+    #[test]
+    fn preview_only_validates_files_with_selected_replacement_targets() {
+        let root = temp("selected-side-preview");
+        fs::create_dir_all(&root).unwrap();
+        let paths = [root.join("left.txt"), root.join("right.txt")];
+        for path in &paths {
+            fs::write(path, "match").unwrap();
+        }
+        let query = SearchQuery::plain("match");
+        let results = search_roots(
+            &paths.clone().map(Some),
+            SearchScope::Both,
+            &query,
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let mut dirty = load_working_file(Some(&paths[1])).unwrap();
+        dirty.text = "new unsaved text".into();
+        let overrides = BTreeMap::from([(paths[1].clone(), dirty)]);
+        let left = BTreeSet::from([results.files[0].hits[0].id]);
+        let preview = preview_replace(&results, &left, &query, "changed", &overrides).unwrap();
+        assert_eq!(preview.changes.len(), 1);
+        assert_eq!(preview.changes[0].path, paths[0]);
+        assert_eq!(preview.changes[0].after, "changed");
+        let right = BTreeSet::from([results.files[1].hits[0].id]);
+        assert!(preview_replace(&results, &right, &query, "changed", &overrides).is_err());
+        assert_eq!(fs::read_to_string(&paths[0]).unwrap(), "match");
+        assert_eq!(fs::read_to_string(&paths[1]).unwrap(), "match");
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn preview_uses_fresh_search_snapshot_instead_of_a_clean_editor_cache() {
         let root = temp("preview-fresh-clean-cache");

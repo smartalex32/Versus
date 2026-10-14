@@ -67,23 +67,29 @@ APIs and must fail cleanly when unavailable.
   on outside click or Escape. Controls occupy the left half; a scrollable result
   list fills the right half by default with a centered muted empty-state hint
   matching drop targets.
-  Search starts after 250 ms without typing; query, option, and scope changes
-  cancel stale workers and restart that delay. Empty queries and dismissal cancel
-  pending searches. There is no separate Find action. Full-width fields have
+  Typing starts search after 250 ms without edits. Search-option buttons, Refresh,
+  Undo, and Redo start any needed search immediately; scope/view changes reuse
+  available results without restarting workers. Every search collects both sides.
+  Empty queries and dismissal cancel pending searches. There is no separate Find
+  action. Full-width fields have
   muted italic hints, colored LEFT/RIGHT/BOTH scope controls, inline search-option
   icons, and external Replace Next/All icons. Undo, Redo, and Refresh follow the
   scope buttons, with search status below. A neutral LEFT/RIGHT view toggle
-  spans the results column and filters results without changing scope. Results
-  stream in batches while searching; each virtualized row shows a line number, bounded highlighted text
-  preview, and a hover X for exclusion. The empty-state hint is confined to the
+  spans the results column. LEFT/RIGHT scope selects that results side and disables
+  the opposite view toggle; BOTH enables both. Replacement previews include only
+  matches in the selected scope, while hidden-side results and exclusions remain
+  cached. Results stream in batches while searching; each virtualized row shows
+  a line number, bounded highlighted text preview, and a hover X for exclusion.
+  The empty-state hint is confined to the
   results panel. Refresh repopulates exclusions and rereads clean files from disk,
   while dirty working copies take precedence. Replace actions preview included
   targets before applying an undoable working-copy batch. Partial, cancelled,
   failed, and stale searches cannot authorize replacements. Applied
   replacements advance the original result set using exact byte edits, without
-  re-searching replacement text. Search option/scope changes and undo invalidate
-  stale targets. It supports plain text/regex, case, and whole-word matching. Batch
-  undo is atomic across participating files; newer edits or ignored-range changes
+  re-searching replacement text. Option changes and undo invalidate stale targets;
+  scope changes clear previews without discarding search results. It supports
+  plain text/regex, case, and whole-word matching. Batch undo is atomic across
+  participating files; newer edits or ignored-range changes
   in those files must be undone first. Binary, non-text, and files above the 32 MiB
   text limit are skipped. Saving remains an explicit operation. With Run Diff on,
   cancellable per-file comparisons overlay staged content and protected ranges on
