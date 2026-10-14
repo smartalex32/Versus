@@ -71,8 +71,10 @@ pub(super) struct FolderBrowser {
     selected: [Option<PathBuf>; 2],
     error: Option<String>,
     search_open: bool,
+    focus_find: bool,
     query: SearchQuery,
     searched_query: Option<SearchQuery>,
+    searched_scope: Option<SearchScope>,
     replacement: String,
     scope: SearchScope,
     search: Option<SearchJob>,
@@ -107,8 +109,10 @@ impl FolderBrowser {
             selected: [None, None],
             error: None,
             search_open: false,
+            focus_find: false,
             query: SearchQuery::plain(""),
             searched_query: None,
+            searched_scope: None,
             replacement: String::new(),
             scope: SearchScope::Both,
             search: None,
@@ -158,11 +162,13 @@ impl FolderBrowser {
         self.preview = None;
         self.selected_hits.clear();
         self.searched_query = None;
+        self.searched_scope = None;
     }
     pub(super) fn source_roots(&self) -> [Option<PathBuf>; 2] {
         self.sources.clone()
     }
     pub(super) fn open_search(&mut self) {
+        self.focus_find = !self.search_open;
         self.search_open = true;
     }
     /// Refreshes only metadata for already expanded directories. Working files,
@@ -512,6 +518,8 @@ impl FolderBrowser {
                 save.completed.min(save.total) * 100 / save.total
             };
             header_status_label(ui, &format!("Saving files… {percent}%"), palette.text);
+        } else if self.search.is_some() {
+            header_status_label(ui, "Searching folders…", palette.muted);
         } else if self.jobs.iter().any(|jobs| !jobs.is_empty()) {
             header_status_label(ui, "Loading directory metadata…", palette.muted);
         } else if self.overlay_job.is_some() || !self.retired_overlay_jobs.is_empty() {
@@ -812,247 +820,582 @@ impl FolderBrowser {
         if !self.search_open {
             return;
         }
-        let mut visible = true;
-        egui::Window::new("Folder Find and Replace")
-            .open(&mut visible)
-            .default_width(700.0)
+        if self.focus_find {
+            self.working = view.export_working_files();
+        }
+        let mut close = false;
+        let width = (ctx.content_rect().width() - 48.0).clamp(200.0, 500.0);
+        let max_height = (ctx.content_rect().height() - 96.0).clamp(120.0, 440.0);
+        let response = egui::Modal::new(egui::Id::new("folder-find-replace-modal"))
+            .frame(
+                egui::Frame::popup(&ctx.global_style())
+                    .inner_margin(12)
+                    .corner_radius(6),
+            )
             .show(ctx, |ui| {
-                let editing_field=ui.memory(|memory|matches!(memory.focused(),Some(id)if id==egui::Id::new("folder-find-pattern")||id==egui::Id::new("folder-replacement-text")));
-                if !editing_field{
-                    if ui.input_mut(|input|input.consume_key(egui::Modifiers::COMMAND|egui::Modifiers::SHIFT,egui::Key::Z)||input.consume_key(egui::Modifiers::CTRL,egui::Key::Y)){self.undo_batch(view,true);}
-                    else if ui.input_mut(|input|input.consume_key(egui::Modifiers::COMMAND,egui::Key::Z)||input.consume_key(egui::Modifiers::CTRL,egui::Key::Z)){self.undo_batch(view,false);}
-                }
+                ui.set_width(width);
                 ui.horizontal(|ui| {
-                    ui.label("Find");
-                    ui.add(egui::TextEdit::singleline(&mut self.query.pattern).id(egui::Id::new("folder-find-pattern")));
+                    ui.label(RichText::new("Folder Find and Replace").size(14.0).strong());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        close =
+                            icon_button(ui, ToolbarIcon::Cancel, true, "Close Find and Replace")
+                                .clicked();
+                    });
                 });
-                ui.horizontal(|ui| {
-                    ui.label("Replace");
-                    ui.add(egui::TextEdit::singleline(&mut self.replacement).id(egui::Id::new("folder-replacement-text")));
-                });
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.scope, SearchScope::Left, "Left only");
-                    ui.selectable_value(&mut self.scope, SearchScope::Right, "Right only");
-                    ui.selectable_value(&mut self.scope, SearchScope::Both, "Both");
-                });
-                ui.horizontal(|ui| {
-                    ui.checkbox(&mut self.query.case_sensitive, "Case sensitive");
-                    ui.checkbox(&mut self.query.whole_word, "Whole word");
-                    ui.checkbox(&mut self.query.regex, "Regular expression");
-                });
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(
-                            self.search.is_none() && !self.query.pattern.is_empty(),
-                            egui::Button::new("Find"),
-                        )
-                        .clicked()
-                    {
-                        self.working = view.export_working_files();
-                        let roots = self.sources.clone();
-                        let scope = self.scope;
-                        let query = self.query.clone();
-                        let working = self.working.clone();
-                        let cancel = Arc::new(AtomicBool::new(false));
-                        let cancellation = cancel.clone();
-                        let (sender, receiver) = mpsc::channel();
-                        std::thread::spawn(move || {
-                            let result = versus::search_roots(
-                                &roots,
-                                scope,
-                                &query,
-                                Some(&cancellation),
-                                &working,
-                            )
-                            .map_err(|e| e.to_string());
-                            let _ = sender.send(result);
+                ui.add_space(6.0);
+                egui::ScrollArea::vertical()
+                    .id_salt("folder-find-replace-content")
+                    .max_height(max_height)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        let editing_field = ui.memory(|memory| {
+                            matches!(memory.focused(), Some(id)
+                    if id == egui::Id::new("folder-find-pattern")
+                        || id == egui::Id::new("folder-replacement-text"))
                         });
-                        self.search = Some(SearchJob { receiver, cancel });
-                        self.searched_query = Some(self.query.clone());
-                        self.results = None;
-                        self.preview = None;
-                    }
-                    if self.search.is_some() {
-                        ui.spinner();
-                        if ui.button("Cancel search").clicked() {
-                            self.search = None;
-                        }
-                    }
-                    if ui
-                        .add_enabled(
-                            self.results.is_some(),
-                            egui::Button::new("Preview selected replacements"),
-                        )
-                        .clicked()
-                    {
-                        self.working = view.export_working_files();
-                        if let (Some(results), Some(query)) = (&self.results, &self.searched_query)
-                        {
-                            match versus::preview_replace(
-                                results,
-                                &self.selected_hits,
-                                query,
-                                &self.replacement,
-                                &self.working,
-                            ) {
-                                Ok(preview) => self.preview = Some(preview),
-                                Err(e) => self.error = Some(e.to_string()),
+                        if !editing_field {
+                            if ui.input_mut(|input| {
+                                input.consume_key(
+                                    egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                                    egui::Key::Z,
+                                ) || input.consume_key(egui::Modifiers::CTRL, egui::Key::Y)
+                            }) {
+                                self.undo_batch(view, true);
+                            } else if ui.input_mut(|input| {
+                                input.consume_key(egui::Modifiers::COMMAND, egui::Key::Z)
+                                    || input.consume_key(egui::Modifiers::CTRL, egui::Key::Z)
+                            }) {
+                                self.undo_batch(view, false);
                             }
                         }
-                    }
-                    if ui
-                        .add_enabled(view.can_undo_batch(), egui::Button::new("Undo batch"))
-                        .clicked()
-                    {
-                        self.undo_batch(view, false);
-                    }
-                    if ui
-                        .add_enabled(view.can_redo_batch(), egui::Button::new("Redo batch"))
-                        .clicked()
-                    {
-                        self.undo_batch(view, true);
-                    }
-                });
-                if let Some(results) = &self.results {
-                    ui.label(format!(
-                        "{} files with matches · {} binary/oversized files skipped",
-                        results.files.len(),
-                        results.skipped_binary.len()
-                    ));
-                    egui::ScrollArea::vertical()
-                        .max_height(220.0)
-                        .show(ui, |ui| {
-                            for file in &results.files {
-                                let mut enabled = file
-                                    .hits
-                                    .iter()
-                                    .any(|hit| self.selected_hits.contains(&hit.id));
-                                if ui
-                                    .checkbox(
-                                        &mut enabled,
-                                        format!(
-                                            "{} · {}",
-                                            if file.side == 0 { "Left" } else { "Right" },
-                                            file.path.display()
-                                        ),
-                                    )
-                                    .changed()
-                                {
-                                    for hit in &file.hits {
-                                        if enabled {
-                                            self.selected_hits.insert(hit.id);
-                                        } else {
-                                            self.selected_hits.remove(&hit.id);
-                                        }
+                        let previous_query = self.query.clone();
+                        let previous_scope = self.scope;
+                        let previous_replacement = self.replacement.clone();
+                        let find = search_text_field(
+                            ui,
+                            &mut self.query.pattern,
+                            "folder-find-pattern",
+                            "Find",
+                            Some([
+                                &mut self.query.case_sensitive,
+                                &mut self.query.whole_word,
+                                &mut self.query.regex,
+                            ]),
+                        );
+                        if std::mem::take(&mut self.focus_find) {
+                            find.request_focus();
+                        }
+                        let enter_find = find.lost_focus()
+                            && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                        let extent = control_extent(ui);
+                        let gap = ui.spacing().item_spacing.x;
+                        let (row, _) = ui.allocate_exact_size(
+                            egui::vec2(ui.available_width(), SEARCH_FIELD_HEIGHT),
+                            Sense::hover(),
+                        );
+                        let field = Rect::from_min_max(
+                            row.min,
+                            egui::pos2(row.right() - 2.0 * (extent + gap), row.bottom()),
+                        );
+                        ui.scope_builder(
+                            egui::UiBuilder::new()
+                                .max_rect(field)
+                                .layout(egui::Layout::top_down(egui::Align::Min)),
+                            |ui| {
+                                search_text_field(
+                                    ui,
+                                    &mut self.replacement,
+                                    "folder-replacement-text",
+                                    "Replace",
+                                    None,
+                                );
+                            },
+                        );
+                        let enabled = self.results_current()
+                            && !self.selected_hits.is_empty()
+                            && !view.is_saving();
+                        for (index, icon, label, next) in [
+                            (0, ToolbarIcon::ReplaceNext, "Replace Next", true),
+                            (1, ToolbarIcon::ReplaceAll, "Replace All", false),
+                        ] {
+                            let button = Rect::from_center_size(
+                                egui::pos2(
+                                    field.right()
+                                        + gap
+                                        + extent / 2.0
+                                        + index as f32 * (extent + gap),
+                                    row.center().y,
+                                ),
+                                egui::vec2(extent, extent),
+                            );
+                            ui.scope_builder(
+                                egui::UiBuilder::new()
+                                    .max_rect(button)
+                                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                                |ui| {
+                                    if icon_button(ui, icon, enabled, label).clicked() {
+                                        self.prepare_replacements(view, next);
                                     }
+                                },
+                            );
+                        }
+                        ui.horizontal(|ui| {
+                            let palette = Palette::for_context(ui.ctx());
+                            for (scope, label, color) in [
+                                (SearchScope::Left, "LEFT", palette.left_only),
+                                (SearchScope::Right, "RIGHT", palette.right_only),
+                                (SearchScope::Both, "BOTH", palette.text),
+                            ] {
+                                if search_scope_button(ui, label, color, self.scope == scope)
+                                    .clicked()
+                                {
+                                    self.scope = scope;
                                 }
-                                ui.indent(&file.path, |ui| {
-                                    for hit in &file.hits {
-                                        let mut selected = self.selected_hits.contains(&hit.id);
+                            }
+                        });
+                        if self.query != previous_query || self.scope != previous_scope {
+                            self.search = None;
+                            self.results = None;
+                            self.selected_hits.clear();
+                            self.preview = None;
+                        } else if self.replacement != previous_replacement {
+                            self.preview = None;
+                        }
+                        ui.horizontal(|ui| {
+                            if captioned_icon_button(
+                                ui,
+                                ToolbarIcon::Search,
+                                self.search.is_none() && !self.query.pattern.is_empty(),
+                                "Find",
+                            )
+                            .clicked()
+                                || enter_find
+                            {
+                                self.start_search(view);
+                            }
+                            if self.search.is_some() {
+                                ui.spinner();
+                                ui.label("Searching…");
+                                if icon_button(ui, ToolbarIcon::Cancel, true, "Cancel search")
+                                    .clicked()
+                                {
+                                    self.search = None;
+                                }
+                            }
+                            if icon_button(
+                                ui,
+                                ToolbarIcon::Undo,
+                                view.can_undo_batch(),
+                                "Undo replacement batch",
+                            )
+                            .clicked()
+                            {
+                                self.undo_batch(view, false);
+                            }
+                            if icon_button(
+                                ui,
+                                ToolbarIcon::Redo,
+                                view.can_redo_batch(),
+                                "Redo replacement batch",
+                            )
+                            .clicked()
+                            {
+                                self.undo_batch(view, true);
+                            }
+                        });
+                        if let Some(results) = &self.results {
+                            ui.label(format!(
+                                "{} files with matches · {} binary/oversized files skipped",
+                                results.files.len(),
+                                results.skipped_binary.len()
+                            ));
+                            egui::ScrollArea::vertical()
+                                .max_height(130.0)
+                                .show(ui, |ui| {
+                                    for file in &results.files {
+                                        let mut enabled = file
+                                            .hits
+                                            .iter()
+                                            .any(|hit| self.selected_hits.contains(&hit.id));
                                         if ui
                                             .checkbox(
-                                                &mut selected,
-                                                format!("Line {}: {}", hit.line, hit.matched),
+                                                &mut enabled,
+                                                format!(
+                                                    "{} · {}",
+                                                    if file.side == 0 { "Left" } else { "Right" },
+                                                    file.path.display()
+                                                ),
                                             )
                                             .changed()
                                         {
-                                            if selected {
-                                                self.selected_hits.insert(hit.id);
-                                            } else {
-                                                self.selected_hits.remove(&hit.id);
+                                            self.preview = None;
+                                            for hit in &file.hits {
+                                                if enabled {
+                                                    self.selected_hits.insert(hit.id);
+                                                } else {
+                                                    self.selected_hits.remove(&hit.id);
+                                                }
                                             }
                                         }
+                                        ui.indent(&file.path, |ui| {
+                                            for hit in &file.hits {
+                                                let mut selected =
+                                                    self.selected_hits.contains(&hit.id);
+                                                if ui
+                                                    .checkbox(
+                                                        &mut selected,
+                                                        format!(
+                                                            "Line {}: {}",
+                                                            hit.line, hit.matched
+                                                        ),
+                                                    )
+                                                    .changed()
+                                                {
+                                                    self.preview = None;
+                                                    if selected {
+                                                        self.selected_hits.insert(hit.id);
+                                                    } else {
+                                                        self.selected_hits.remove(&hit.id);
+                                                    }
+                                                }
+                                            }
+                                        });
                                     }
                                 });
-                            }
-                        });
-                }
-                if let Some(preview) = &self.preview {
-                    ui.separator();
-                    ui.label("Preview — files are changed in memory until explicitly saved");
-                    egui::ScrollArea::vertical()
-                        .max_height(200.0)
-                        .show(ui, |ui| {
-                            for change in &preview.changes {
-                                egui::CollapsingHeader::new(change.path.display().to_string())
-                                    .show(ui, |ui| {
-                                        ui.columns(2, |cols| {
-                                            cols[0]
-                                                .label(RichText::new(&change.before).monospace());
-                                            cols[1].label(RichText::new(&change.after).monospace());
+                        }
+                        if let Some(preview) = &self.preview {
+                            ui.separator();
+                            ui.label(
+                                "Preview — files are changed in memory until explicitly saved",
+                            );
+                            egui::ScrollArea::vertical()
+                                .max_height(120.0)
+                                .show(ui, |ui| {
+                                    for change in &preview.changes {
+                                        egui::CollapsingHeader::new(
+                                            change.path.display().to_string(),
+                                        )
+                                        .show(ui, |ui| {
+                                            ui.columns(2, |cols| {
+                                                cols[0].label(
+                                                    RichText::new(&change.before).monospace(),
+                                                );
+                                                cols[1].label(
+                                                    RichText::new(&change.after).monospace(),
+                                                );
+                                            });
                                         });
-                                    });
-                            }
-                        });
-                }
-                if ui
-                    .add_enabled(
-                        self.preview.as_ref().is_some_and(|p| !p.changes.is_empty()),
-                        egui::Button::new("Apply preview to working copies"),
-                    )
-                    .clicked()
-                {
-                    let preview = self.preview.take().unwrap();
-                    self.working = view.export_working_files();
-                    match view.apply_search_preview(&preview){
-                        Ok(_)=>self.working=view.export_working_files(),Err(error)=>self.error=Some(error)
-                    }
-                }
-                let dirty = pending_save_files(&self.working).len();
-                ui.label(format!("{dirty} files have unsaved replacements"));
-                if ui
-                    .add_enabled(
-                        dirty > 0 && !self.is_saving() && !view.is_saving(),
-                        egui::Button::new("Preview Save pending files"),
-                    )
-                    .clicked()
-                {
-                    self.pending_save = true;
-                }
-                if let Some(save) = &self.save {
-                    ui.spinner();
-                    ui.label(format!(
-                        "Saving {} of {} files…",
-                        save.completed.min(save.total),
-                        save.total
-                    ));
-                }
-                if self.pending_save {
-                    ui.separator();
-                    ui.label("Save these working copies to their original files?");
-                    egui::ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
-                        for (path, file, _) in pending_save_files(&self.working) {
-                            egui::CollapsingHeader::new(path.display().to_string()).show(ui, |ui| {
-                                ui.columns(2, |columns| {
-                                    columns[0].label("Loaded file");
-                                    columns[0].label(RichText::new(file.baseline_text().unwrap_or_default()).monospace());
-                                    columns[1].label("Pending content");
-                                    columns[1].label(RichText::new(&file.text).monospace());
+                                    }
                                 });
+                        }
+                        if self.preview.is_some()
+                            && ui
+                                .add_enabled(
+                                    self.preview.as_ref().is_some_and(|p| !p.changes.is_empty()),
+                                    egui::Button::new("Apply preview to working copies"),
+                                )
+                                .clicked()
+                        {
+                            self.apply_replacement_preview(view);
+                        }
+                        let dirty = pending_save_files(&self.working).len();
+                        if dirty > 0 {
+                            ui.label(
+                                RichText::new(format!("{dirty} files have unsaved replacements"))
+                                    .color(Palette::for_context(ctx).changed),
+                            );
+                        }
+                        if dirty > 0
+                            && ui
+                                .add_enabled(
+                                    !self.is_saving() && !view.is_saving(),
+                                    egui::Button::new("Preview Save pending files"),
+                                )
+                                .clicked()
+                        {
+                            self.pending_save = true;
+                        }
+                        if let Some(save) = &self.save {
+                            ui.spinner();
+                            ui.label(format!(
+                                "Saving {} of {} files…",
+                                save.completed.min(save.total),
+                                save.total
+                            ));
+                        }
+                        if self.pending_save {
+                            ui.separator();
+                            ui.label("Save these working copies to their original files?");
+                            egui::ScrollArea::vertical()
+                                .max_height(120.0)
+                                .show(ui, |ui| {
+                                    for (path, file, _) in pending_save_files(&self.working) {
+                                        egui::CollapsingHeader::new(path.display().to_string())
+                                            .show(ui, |ui| {
+                                                ui.columns(2, |columns| {
+                                                    columns[0].label("Loaded file");
+                                                    columns[0].label(
+                                                        RichText::new(
+                                                            file.baseline_text()
+                                                                .unwrap_or_default(),
+                                                        )
+                                                        .monospace(),
+                                                    );
+                                                    columns[1].label("Pending content");
+                                                    columns[1].label(
+                                                        RichText::new(&file.text).monospace(),
+                                                    );
+                                                });
+                                            });
+                                    }
+                                });
+                            ui.horizontal(|ui| {
+                                if ui.button("Save pending files").clicked() {
+                                    self.begin_save(view);
+                                }
+                                if ui.button("Cancel save").clicked() {
+                                    self.pending_save = false;
+                                }
                             });
                         }
-                    });
-                    ui.horizontal(|ui| {
-                        if ui.button("Save pending files").clicked() {
-                            self.begin_save(view);
-                        }
-                        if ui.button("Cancel save").clicked() {
-                            self.pending_save = false;
+                        if let Some(error) = &self.error {
+                            ui.colored_label(Palette::for_context(ctx).error, error);
                         }
                     });
-                }
-                if let Some(error) = &self.error {
-                    ui.colored_label(Palette::for_context(ctx).error, error);
-                }
             });
-        self.search_open = visible;
+        self.search_open = !(close || response.should_close());
     }
-    fn undo_batch(&mut self, view: &mut InteractiveView, redo: bool) {
-        match view.undo_batch(redo) {
-            Ok(()) => self.working = view.export_working_files(),
+    fn results_current(&self) -> bool {
+        self.search.is_none()
+            && self.results.is_some()
+            && self.searched_query.as_ref() == Some(&self.query)
+            && self.searched_scope == Some(self.scope)
+    }
+    fn start_search(&mut self, view: &InteractiveView) {
+        if self.query.pattern.is_empty() {
+            return;
+        }
+        self.working = view.export_working_files();
+        let roots = self.sources.clone();
+        let scope = self.scope;
+        let query = self.query.clone();
+        let working = self.working.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancellation = cancel.clone();
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = versus::search_roots(&roots, scope, &query, Some(&cancellation), &working)
+                .map_err(|error| error.to_string());
+            let _ = sender.send(result);
+        });
+        self.search = Some(SearchJob { receiver, cancel });
+        self.searched_query = Some(self.query.clone());
+        self.searched_scope = Some(self.scope);
+        self.results = None;
+        self.preview = None;
+        self.selected_hits.clear();
+        self.error = None;
+    }
+    fn prepare_replacements(&mut self, view: &InteractiveView, next: bool) {
+        if !self.results_current() {
+            return;
+        }
+        self.working = view.export_working_files();
+        match search_session::preview_replacements(
+            self.results.as_ref().unwrap(),
+            &self.selected_hits,
+            &self.query,
+            &self.replacement,
+            &self.working,
+            next,
+        ) {
+            Ok(preview) => self.preview = Some(preview),
+            Err(error) => self.error = Some(error.to_string()),
+        }
+    }
+    fn apply_replacement_preview(&mut self, view: &mut InteractiveView) {
+        let Some(preview) = self.preview.take() else {
+            return;
+        };
+        match view.apply_search_preview(&preview) {
+            Ok(_) => {
+                self.working = view.export_working_files();
+                if let Some(results) = &mut self.results {
+                    if let Err(error) = search_session::advance_results(
+                        results,
+                        &mut self.selected_hits,
+                        &preview,
+                        &self.working,
+                    ) {
+                        self.results = None;
+                        self.selected_hits.clear();
+                        self.error = Some(error);
+                    }
+                }
+            }
             Err(error) => self.error = Some(error),
         }
     }
+
+    fn undo_batch(&mut self, view: &mut InteractiveView, redo: bool) {
+        match view.undo_batch(redo) {
+            Ok(()) => {
+                self.working = view.export_working_files();
+                self.results = None;
+                self.preview = None;
+                self.selected_hits.clear();
+            }
+            Err(error) => self.error = Some(error),
+        }
+    }
+}
+
+const SEARCH_ENTRY_HEIGHT: f32 = 34.0;
+// Four-point padding plus a one-point border on each side.
+const SEARCH_FIELD_HEIGHT: f32 = SEARCH_ENTRY_HEIGHT + 10.0;
+
+fn search_text_field(
+    ui: &mut egui::Ui,
+    text: &mut String,
+    id: &str,
+    placeholder: &str,
+    options: Option<[&mut bool; 3]>,
+) -> egui::Response {
+    let palette = Palette::for_context(ui.ctx());
+    let focused = ui.memory(|memory| memory.has_focus(egui::Id::new(id)));
+    let frame = egui::Frame::new()
+        .fill(palette.background)
+        .corner_radius(3)
+        .stroke(Stroke::new(
+            1.0,
+            if focused {
+                palette.accent
+            } else {
+                palette.border
+            },
+        ))
+        .inner_margin(4);
+    let response = frame.show(ui, |ui| {
+        let extent = control_extent(ui);
+        let gap = ui.spacing().item_spacing.x;
+        let reserve = if options.is_some() {
+            3.0 * (extent + gap)
+        } else {
+            0.0
+        };
+        let (row, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), SEARCH_ENTRY_HEIGHT),
+            Sense::hover(),
+        );
+        let field = Rect::from_min_max(
+            row.min,
+            egui::pos2((row.right() - reserve).max(row.left() + 20.0), row.bottom()),
+        );
+        let edit = ui
+            .scope_builder(egui::UiBuilder::new().max_rect(field), |ui| {
+                ui.set_clip_rect(ui.clip_rect().intersect(field));
+                // TextEdit uses the scoped weak-text color for its hint atoms.
+                ui.visuals_mut().weak_text_color = Some(palette.muted.gamma_multiply(0.8));
+                ui.add_sized(
+                    field.size(),
+                    egui::TextEdit::singleline(text)
+                        .id(egui::Id::new(id))
+                        .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(4, 8)))
+                        .font(FontId::proportional(14.0))
+                        .hint_text(
+                            RichText::new(placeholder)
+                                .font(FontId::proportional(14.0))
+                                .italics()
+                                .color(palette.muted.gamma_multiply(0.8)),
+                        ),
+                )
+            })
+            .inner;
+        if let Some(options) = options {
+            for (index, (value, (icon, label))) in options
+                .into_iter()
+                .zip([
+                    (ToolbarIcon::MatchCase, "Match Case"),
+                    (ToolbarIcon::MatchWholeWord, "Match Whole Word"),
+                    (ToolbarIcon::UseRegularExpression, "Use Regular Expression"),
+                ])
+                .enumerate()
+            {
+                let button = Rect::from_center_size(
+                    egui::pos2(
+                        field.right() + gap + extent / 2.0 + index as f32 * (extent + gap),
+                        row.center().y,
+                    ),
+                    egui::vec2(extent, extent),
+                );
+                ui.scope_builder(
+                    egui::UiBuilder::new()
+                        .max_rect(button)
+                        .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                    |ui| {
+                        if icon_button_state(ui, icon, true, *value, label).clicked() {
+                            *value = !*value;
+                        }
+                    },
+                );
+            }
+        }
+        edit
+    });
+    ui.interact(
+        response.response.rect,
+        egui::Id::new((id, "frame")),
+        Sense::hover(),
+    );
+    response.inner
+}
+
+fn search_scope_button(
+    ui: &mut egui::Ui,
+    label: &str,
+    color: Color32,
+    selected: bool,
+) -> egui::Response {
+    let text = ui
+        .painter()
+        .layout_no_wrap(label.into(), FontId::monospace(11.0), color);
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(text.size().x + 16.0, control_extent(ui)),
+        Sense::hover(),
+    );
+    let response = ui.interact(
+        rect,
+        egui::Id::new(("folder-search-scope", label)),
+        Sense::click(),
+    );
+    let palette = Palette::for_context(ui.ctx());
+    if selected {
+        ui.painter().rect(
+            rect,
+            3,
+            color.gamma_multiply(0.12),
+            Stroke::new(1.0, color),
+            egui::StrokeKind::Inside,
+        );
+    } else if response.hovered() || response.has_focus() {
+        ui.painter().rect_filled(rect, 3, palette.border);
+    }
+    if response.has_focus() {
+        ui.painter().rect_stroke(
+            rect,
+            3,
+            Stroke::new(2.0, palette.accent),
+            egui::StrokeKind::Inside,
+        );
+    }
+    ui.painter()
+        .galley(rect.center() - text.size() * 0.5, text, color);
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Button, true, selected, label)
+    });
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(format!("Search {label}"))
 }
 
 fn compare_overlay_files(
@@ -1277,6 +1620,212 @@ fn retain_saved_snapshot(
 mod tests {
     use super::*;
     use versus::{FileFingerprint, TextEncoding};
+
+    fn dialog_frame(
+        browser: &mut FolderBrowser,
+        view: &mut InteractiveView,
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+    ) -> egui::FullOutput {
+        ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0))),
+                events,
+                ..Default::default()
+            },
+            |_| browser.search_window(ctx, view),
+        )
+    }
+
+    #[test]
+    fn find_modal_is_centered_compact_and_uses_inline_options_and_placeholders() {
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            let ctx = egui::Context::default();
+            set_theme(&ctx, theme);
+            // Inspect the final colors rather than the Area's fade-in opacity.
+            ctx.all_styles_mut(|style| style.animation_time = 0.0);
+            let mut browser = FolderBrowser::new_with_sources([None, None]);
+            let mut view = InteractiveView::default();
+            browser.open_search();
+            // Area sizing is invisible on its first pass; responses retain the
+            // previous pass, so settle the anchored layout before inspecting it.
+            dialog_frame(&mut browser, &mut view, &ctx, vec![]).drop_without_applying_deltas();
+            dialog_frame(&mut browser, &mut view, &ctx, vec![]).drop_without_applying_deltas();
+            let output = dialog_frame(&mut browser, &mut view, &ctx, vec![]);
+            let modal = ctx
+                .memory(|memory| memory.area_rect(egui::Id::new("folder-find-replace-modal")))
+                .unwrap();
+            assert!(modal.center().distance(ctx.content_rect().center()) < 1.0);
+            assert!(modal.width() < 600.0 && modal.height() < 350.0, "{modal:?}");
+            let find = ctx
+                .read_response(egui::Id::new(("folder-find-pattern", "frame")))
+                .unwrap()
+                .rect;
+            let replacement = ctx
+                .read_response(egui::Id::new(("folder-replacement-text", "frame")))
+                .unwrap()
+                .rect;
+            assert!(find.width() > modal.width() - 30.0 && find.height() > 32.0);
+            assert!(replacement.height() > 32.0);
+            for label in ["Match Case", "Match Whole Word", "Use Regular Expression"] {
+                let control = ctx.read_response(egui::Id::new(label)).unwrap().rect;
+                assert!(find.contains_rect(control));
+                assert!(
+                    control.left()
+                        > ctx
+                            .read_response(egui::Id::new("folder-find-pattern"))
+                            .unwrap()
+                            .rect
+                            .right()
+                );
+            }
+            let next = ctx
+                .read_response(egui::Id::new("Replace Next"))
+                .unwrap()
+                .rect;
+            let all = ctx
+                .read_response(egui::Id::new("Replace All"))
+                .unwrap()
+                .rect;
+            assert!(next.left() > replacement.right() && all.left() > next.right());
+            assert!(
+                (next.center().y - replacement.center().y).abs() < 1.0,
+                "next={next:?}, replacement={replacement:?}"
+            );
+            let palette = Palette::for_context(&ctx);
+            for (label, color) in [("LEFT", palette.left_only), ("RIGHT", palette.right_only)] {
+                assert!(output.shapes.iter().any(|shape| matches!(&shape.shape,
+                    egui::Shape::Text(text) if text.galley.text() == label && text.fallback_color == color)),
+                    "{label} expected={color:?}, actual={:?}", output.shapes.iter().filter_map(|shape|
+                        if let egui::Shape::Text(text) = &shape.shape { (text.galley.text() == label).then_some(text.fallback_color) } else { None }).collect::<Vec<_>>());
+            }
+            for placeholder in ["Find", "Replace"] {
+                assert!(output.shapes.iter().any(|shape| matches!(&shape.shape,
+                    egui::Shape::Text(text) if text.galley.text() == placeholder
+                        && text.galley.job.sections[0].format.font_id.size == 14.0
+                        && text.galley.job.sections[0].format.italics
+                        && text.galley.job.sections[0].format.color == palette.muted.gamma_multiply(0.8))));
+            }
+            output.drop_without_applying_deltas();
+            for label in ["Match Case", "Match Whole Word", "Use Regular Expression"] {
+                let pos = ctx
+                    .read_response(egui::Id::new(label))
+                    .unwrap()
+                    .rect
+                    .center();
+                for pressed in [true, false] {
+                    dialog_frame(
+                        &mut browser,
+                        &mut view,
+                        &ctx,
+                        vec![
+                            egui::Event::PointerMoved(pos),
+                            egui::Event::PointerButton {
+                                pos,
+                                button: egui::PointerButton::Primary,
+                                pressed,
+                                modifiers: Default::default(),
+                            },
+                        ],
+                    )
+                    .drop_without_applying_deltas();
+                }
+            }
+            assert!(
+                browser.query.case_sensitive && browser.query.whole_word && browser.query.regex
+            );
+            assert!(
+                browser.search_open,
+                "clicking controls inside the field must keep the modal open"
+            );
+            let outside = egui::pos2(modal.left() - 10.0, modal.center().y);
+            for pressed in [true, false] {
+                dialog_frame(
+                    &mut browser,
+                    &mut view,
+                    &ctx,
+                    vec![
+                        egui::Event::PointerMoved(outside),
+                        egui::Event::PointerButton {
+                            pos: outside,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: Default::default(),
+                        },
+                    ],
+                )
+                .drop_without_applying_deltas();
+            }
+            assert!(!browser.search_open);
+        }
+    }
+
+    #[test]
+    fn replace_next_and_all_preview_then_advance_working_copies_without_saving() {
+        let root = std::env::temp_dir().join(format!("versus-next-replace-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("left")).unwrap();
+        std::fs::create_dir_all(root.join("right")).unwrap();
+        let paths = [root.join("left/a.txt"), root.join("right/a.txt")];
+        std::fs::write(&paths[0], "foo foo\n").unwrap();
+        std::fs::write(&paths[1], "foo\n").unwrap();
+        let working: BTreeMap<_, _> = paths
+            .iter()
+            .map(|path| (path.clone(), load_working_file(Some(path)).unwrap()))
+            .collect();
+        let mut view = InteractiveView::default();
+        view.ingest_working_files(&working);
+        view.open_sources(paths.clone().map(Some));
+        view.set_editing(true, [true; 3]);
+        let mut browser =
+            FolderBrowser::new_with_sources([Some(root.join("left")), Some(root.join("right"))]);
+        browser.query = SearchQuery::plain("foo");
+        browser.replacement = "long value".into();
+        browser.searched_query = Some(browser.query.clone());
+        browser.searched_scope = Some(SearchScope::Both);
+        browser.results = Some(
+            versus::search_roots(
+                &browser.sources,
+                SearchScope::Both,
+                &browser.query,
+                None,
+                &working,
+            )
+            .unwrap(),
+        );
+        browser.selected_hits = browser
+            .results
+            .as_ref()
+            .unwrap()
+            .files
+            .iter()
+            .flat_map(|file| file.hits.iter().map(|hit| hit.id))
+            .collect();
+        browser.prepare_replacements(&view, true);
+        assert_eq!(
+            browser.preview.as_ref().unwrap().changes[0].hit_ids.len(),
+            1
+        );
+        assert_eq!(view.working_text(0), Some("foo foo\n"));
+        browser.apply_replacement_preview(&mut view);
+        assert_eq!(view.working_text(0), Some("long value foo\n"));
+        browser.prepare_replacements(&view, true);
+        browser.apply_replacement_preview(&mut view);
+        assert_eq!(view.working_text(0), Some("long value long value\n"));
+        browser.prepare_replacements(&view, false);
+        browser.apply_replacement_preview(&mut view);
+        assert_eq!(view.working_text(1), Some("long value\n"));
+        assert!(browser.results.as_ref().unwrap().files.is_empty());
+        assert_eq!(std::fs::read_to_string(&paths[0]).unwrap(), "foo foo\n");
+        assert_eq!(std::fs::read_to_string(&paths[1]).unwrap(), "foo\n");
+        browser.undo_batch(&mut view, false);
+        assert_eq!(view.working_text(1), Some("foo\n"));
+        assert!(
+            browser.results.is_none(),
+            "undo invalidates old result snapshots"
+        );
+        assert!(!view.run_diff_enabled());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn save_completion_keeps_newer_edits_dirty_against_the_saved_baseline() {

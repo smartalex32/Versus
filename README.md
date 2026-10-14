@@ -80,6 +80,17 @@ replacement previews can be applied as undoable batches to the working copies.
 Batch undo is atomic across participating files; undo newer edits or ignored-range
 changes in those files first. Binary, non-text, and files over 32 MiB are skipped.
 Saving those changes remains explicit and uses the external-change check.
+Find and Replace opens a compact dialog centered on the app; click outside,
+press Escape, or use its close icon to dismiss it. The larger fields use muted,
+italic placeholders. Choose **LEFT**, **RIGHT**, or **BOTH**; the side colors match
+the pane labels. **Match Case**, **Match Whole Word**, and **Use Regular Expression**
+are tooltip-equipped VS Code icons inside the Find field. Press Enter in Find or
+use the Find action to search. The **Replace Next** and **Replace All** icons beside
+the Replace field preview the next selected match or all selected matches;
+unchecked matches and files stay excluded. Apply the preview to update working
+copies as an undoable batch. Remaining original matches advance after each apply,
+so repeated Replace Next actions stay accurate when replacement lengths change.
+Use Find again after undo or changing the search options to refresh the results.
 With Run Diff enabled, folder statuses include staged working copies and ignored
 ranges. The up/down controls jump to changed files and reveal their parent folders.
 
@@ -449,7 +460,10 @@ Tagged releases additionally publish:
 
 Versus is licensed under [MIT](LICENSE). Each release includes
 `DEPENDENCY-LICENSES.md`, generated from Cargo metadata; review third-party
-licenses before redistributing.
+licenses before redistributing. Find and Replace also embeds Microsoft's
+[VS Code Codicons](https://github.com/microsoft/vscode-codicons), licensed under
+CC BY 4.0. Their [attribution](assets/codicons/NOTICE.md) and license are included
+in the source and binary packages (`licenses/codicons` in portable bundles).
 
 ## Build from source
 

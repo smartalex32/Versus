@@ -60,15 +60,27 @@ APIs and must fail cleanly when unavailable.
   without comparing file contents. Each Merge side enumerates, expands, and scrolls
   its own tree, including when only one root is selected. Expanding a directory
   requests that side’s listing; opening a file loads its working copy independently
-  of the other pane. The recursive Find and Replace window supports left,
-  right, or both roots; plain text/regex, case, and whole-word matching; match
-  selection; previews; staged working-copy application; and batch undo/redo. Batch
+  of the other pane. The recursive Find and Replace modal is centered and
+  dismisses on outside click or Escape. Full-width fields have muted italic hints,
+  colored LEFT/RIGHT/BOTH scope controls, inline search-option icons, and external
+  Replace Next/All icons. These actions preview selected targets before applying
+  an undoable working-copy batch; unchecked matches remain excluded. Applied
+  replacements advance the original result set using exact byte edits, without
+  re-searching replacement text. Search option/scope changes and undo invalidate
+  stale targets. It supports plain text/regex, case, and whole-word matching. Batch
   undo is atomic across participating files; newer edits or ignored-range changes
   in those files must be undone first. Binary, non-text, and files above the 32 MiB
   text limit are skipped. Saving remains an explicit operation. With Run Diff on,
   cancellable per-file comparisons overlay staged content and protected ranges on
   the folder results; unchanged working-copy results are reused. Difference jumps
   reveal the target using only shallow ancestor listings.
+- `src/app/search_session.rs` prepares Next/All previews and remaps remaining
+  original search hits after apply, preserving aliases, selections and byte anchors.
+  It neither starts searches or diffs nor modifies files.
+- `src/app/find_icons.rs` embeds the official Codicons font for the five find/replace
+  controls in a dedicated font family. Body fonts are unchanged. Attribution and
+  the CC BY 4.0 license are included under `assets/codicons/` and copied into Windows
+  and both Linux binary packages; no network access or new crates are needed.
 - `src/core/interactive.rs` is the diff-independent two-way text model. Its
   line-number ranges are zero-based and half-open. The chunk detector prioritizes
   recognized syntax blocks and falls back to blank-line paragraphs. Transfers can

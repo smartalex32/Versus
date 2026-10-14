@@ -1,9 +1,11 @@
 use crate::recent::{RecentComparison, RecentComparisons};
 use crate::selection::{self, ComparisonMode, SelectionMode, SourceKind};
+mod find_icons;
 mod folder_browser;
 mod interactive_view;
 #[cfg(test)]
 mod operating_mode_tests;
+mod search_session;
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 use folder_browser::FolderBrowser;
 use interactive_view::InteractiveView;
@@ -4311,6 +4313,11 @@ enum ToolbarIcon {
     ZoomIn,
     ZoomOut,
     Search,
+    MatchCase,
+    MatchWholeWord,
+    UseRegularExpression,
+    ReplaceNext,
+    ReplaceAll,
     Save,
     New,
     Back,
@@ -4481,6 +4488,21 @@ fn icon_button_content(
                     vec![point(-2.0, -7.0), point(-6.0, -3.0), point(-2.0, 1.0)],
                     stroke,
                 );
+            }
+            ToolbarIcon::MatchCase
+            | ToolbarIcon::MatchWholeWord
+            | ToolbarIcon::UseRegularExpression
+            | ToolbarIcon::ReplaceNext
+            | ToolbarIcon::ReplaceAll => {
+                let glyph = match icon {
+                    ToolbarIcon::MatchCase => find_icons::FindIcon::MatchCase,
+                    ToolbarIcon::MatchWholeWord => find_icons::FindIcon::MatchWholeWord,
+                    ToolbarIcon::UseRegularExpression => find_icons::FindIcon::UseRegularExpression,
+                    ToolbarIcon::ReplaceNext => find_icons::FindIcon::ReplaceNext,
+                    ToolbarIcon::ReplaceAll => find_icons::FindIcon::ReplaceAll,
+                    _ => unreachable!(),
+                };
+                find_icons::paint(ui, center, glyph, color);
             }
             ToolbarIcon::Save => {
                 let rect = Rect::from_center_size(center, egui::vec2(14.0, 14.0));
@@ -4967,6 +4989,13 @@ fn apply_theme(ctx: &egui::Context) {
 }
 
 fn set_theme(ctx: &egui::Context, theme: egui::Theme) {
+    let installed = egui::Id::new("versus-codicons-installed");
+    if !ctx.data(|data| data.get_temp::<bool>(installed).unwrap_or(false)) {
+        let mut fonts = egui::FontDefinitions::default();
+        find_icons::register(&mut fonts);
+        ctx.set_fonts(fonts);
+        ctx.data_mut(|data| data.insert_temp(installed, true));
+    }
     let palette = Palette::new(theme == egui::Theme::Dark);
     ctx.set_theme(theme);
     let mut visuals = if theme == egui::Theme::Dark {
