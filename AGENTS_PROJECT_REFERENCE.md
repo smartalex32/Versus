@@ -33,7 +33,9 @@ APIs and must fail cleanly when unavailable.
 - `src/app/interactive_view.rs` renders the two-way editing workspace. Each side
   has its own text buffer, line numbers, dirty state, scroll position, and explicit
   Save Left/Save Right disk icon beside Browse, plus Save Both in the footer,
-  with a pending-content preview. Selection
+  with a pending-content preview. Save Both shares per-file save eligibility and
+  previews only saveable sides. File content retains File Diff’s header/divider
+  spacing above the first row. Selection
   transfers can insert at a chosen line or replace an explicitly selected target.
   Accept All Left/Right copy one side into the other as a single transaction, while
   honoring destination protection. Automatic merging belongs only to the separate

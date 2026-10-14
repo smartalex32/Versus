@@ -68,7 +68,8 @@ Ctrl/Command+Z and Ctrl+Y or Command+Shift+Z work while editing.
 
 Use the **Save Left** or **Save Right** disk icon immediately to the right of
 each pane’s Browse button, or **Save Both** in the bottom row, to review a preview
-and write the selected working copies. Versus checks that the files have not
+and write the selected working copies. Save Both is enabled only when either
+per-file Save is active, and previews only files ready to save. Versus checks that the files have not
 changed on disk since they were opened before replacing them. Interactive text files are limited
 to 32 MiB. UTF-8 with or without a BOM and UTF-16 little- and big-endian text retain
 their encoding; original line endings are preserved where possible. Cancelled or

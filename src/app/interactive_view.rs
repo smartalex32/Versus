@@ -2638,10 +2638,8 @@ impl InteractiveView {
             bottom_legend(ui, &icons, self.footer_legend_counts());
         });
         if let Some(save) = row.save {
-            let enabled = self.workspace.is_some()
-                && self.side_has_file(0)
-                && self.side_has_file(1)
-                && !self.is_saving();
+            let save_sides: Vec<_> = (0..2).filter(|side| self.can_save_side(*side)).collect();
+            let enabled = !save_sides.is_empty();
             ui.scope_builder(
                 egui::UiBuilder::new()
                     .max_rect(save)
@@ -2649,7 +2647,7 @@ impl InteractiveView {
                 |ui| {
                     if captioned_icon_button(ui, ToolbarIcon::Save, enabled, "Save Both").clicked()
                     {
-                        self.request_save(vec![0, 1]);
+                        self.request_save(save_sides);
                     }
                 },
             );
@@ -4473,11 +4471,75 @@ mod tests {
         }
     }
     #[test]
+    fn save_both_tracks_per_side_save_availability_and_only_previews_changed_files() {
+        let ctx = egui::Context::default();
+        set_theme(&ctx, egui::Theme::Dark);
+        let mut view = view("left\n", "right\n");
+        for side in [0usize, 1] {
+            for _ in 0..2 {
+                frame(&mut view, &ctx, vec![]).drop_without_applying_deltas();
+            }
+            assert!(!view.can_save_side(0) && !view.can_save_side(1));
+            assert!(
+                !ctx.read_response(egui::Id::new("Save Both"))
+                    .unwrap()
+                    .enabled()
+            );
+            view.workspace
+                .as_mut()
+                .unwrap()
+                .set_text(side_of(side), "changed\n");
+            for _ in 0..2 {
+                frame(&mut view, &ctx, vec![]).drop_without_applying_deltas();
+            }
+            assert!(view.can_save_side(side) && !view.can_save_side(1 - side));
+            assert!(
+                ctx.read_response(egui::Id::new("Save Both"))
+                    .unwrap()
+                    .enabled()
+            );
+            click(&mut view, &ctx, egui::Id::new("Save Both"));
+            assert_eq!(view.pending_save, Some(vec![side]));
+            view.pending_save = None;
+            view.move_history(false);
+        }
+        // A single loaded editable file still has an active Save Both action.
+        let file = view.files.as_ref().unwrap()[0].clone();
+        view.files = None;
+        view.paths = None;
+        view.side_sources = [Some("left.rs".into()), None];
+        view.side_files = [Some(file), None];
+        view.workspace
+            .as_mut()
+            .unwrap()
+            .set_text(TwoWaySide::Left, "single changed\n");
+        for _ in 0..2 {
+            frame(&mut view, &ctx, vec![]).drop_without_applying_deltas();
+        }
+        assert!(view.can_save_side(0) && !view.can_save_side(1));
+        assert!(
+            ctx.read_response(egui::Id::new("Save Both"))
+                .unwrap()
+                .enabled()
+        );
+        click(&mut view, &ctx, egui::Id::new("Save Both"));
+        assert_eq!(view.pending_save, Some(vec![0]));
+    }
+
+    #[test]
     fn save_both_matches_toolbar_feedback_and_still_opens_a_preview() {
         for theme in [egui::Theme::Dark, egui::Theme::Light] {
             let ctx = egui::Context::default();
             set_theme(&ctx, theme);
             let mut view = view("left\n", "right\n");
+            view.workspace
+                .as_mut()
+                .unwrap()
+                .set_text(TwoWaySide::Left, "edited left\n");
+            view.workspace
+                .as_mut()
+                .unwrap()
+                .set_text(TwoWaySide::Right, "edited right\n");
             let output = frame(&mut view, &ctx, vec![]);
             let button = ctx.read_response(egui::Id::new("Save Both")).unwrap().rect;
             let caption = output
@@ -4533,8 +4595,8 @@ mod tests {
                 view.save_job.is_none(),
                 "Save Both must preview before writing"
             );
-            assert_eq!(view.working_text(0), Some("left\n"));
-            assert_eq!(view.working_text(1), Some("right\n"));
+            assert_eq!(view.working_text(0), Some("edited left\n"));
+            assert_eq!(view.working_text(1), Some("edited right\n"));
             view.pending_save = None;
             view.set_external_save_busy(true);
             for _ in 0..2 {

@@ -1837,7 +1837,15 @@ impl VersusApp {
         ui.scope_builder(egui::UiBuilder::new().max_rect(body), |ui| {
             comparison_panel(ui).show(ui, |ui| {
                 ui.set_min_height((ui.available_height() - 2.0).max(0.0));
-                ui.spacing_mut().item_spacing = Vec2::ZERO;
+                let source_spacing = ui.spacing().item_spacing.y;
+                ui.spacing_mut().item_spacing = egui::vec2(
+                    0.0,
+                    if self.merge_file_sides.iter().any(|open| *open) {
+                        source_spacing
+                    } else {
+                        0.0
+                    },
+                );
                 back = self.merge_inputs(ui, &mut view);
                 for side in 0..2 {
                     if self.source_jobs[side].is_some() {
@@ -1845,6 +1853,7 @@ impl VersusApp {
                     }
                 }
                 paint_panel_divider(ui);
+                ui.spacing_mut().item_spacing = Vec2::ZERO;
                 if let Some(browser) = &mut self.merge_folders {
                     browser.render_controls(ui, &mut view);
                 }
@@ -6844,6 +6853,47 @@ mod tests {
             }
             assert!(Instant::now() < deadline, "Merge side did not load");
             std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn merge_file_content_top_padding_matches_native_file_diff() {
+        let fixture = SourceFixture::new();
+        std::fs::write(fixture.path("left/model.txt"), "left text\n").unwrap();
+        std::fs::write(fixture.path("right/model.txt"), "right text\n").unwrap();
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            for zoom in [1.0, 2.0] {
+                let ctx = egui::Context::default();
+                set_theme(&ctx, theme);
+                ctx.set_zoom_factor(zoom);
+                let mut merge = VersusApp::default();
+                merge.comparison_mode = ComparisonMode::File;
+                merge.set_workspace_merge(true);
+                merge.select_path(0, fixture.path("left/model.txt"));
+                merge.select_path(1, fixture.path("right/model.txt"));
+                settle_merge_file(&mut merge, &ctx, 0, "left text\n");
+                settle_merge_file(&mut merge, &ctx, 1, "right text\n");
+                for _ in 0..3 {
+                    render(&mut merge, &ctx, vec![]).drop_without_applying_deltas();
+                }
+                let output = render(&mut merge, &ctx, vec![]);
+                let merge_offset = text_positions(&output, "left text\n")[0].y
+                    - merge.source_header_rects[0].bottom();
+                output.drop_without_applying_deltas();
+                let mut diff = VersusApp::default();
+                diff.comparison_mode = ComparisonMode::File;
+                diff.select_path(0, fixture.path("left/model.txt"));
+                diff.select_path(1, fixture.path("right/model.txt"));
+                settle_sources(&mut diff, &ctx);
+                let output = render(&mut diff, &ctx, vec![]);
+                let diff_offset = text_positions(&output, "left text")[0].y
+                    - diff.source_header_rects[0].bottom();
+                assert!(
+                    (merge_offset - diff_offset).abs() < 0.6,
+                    "merge={merge_offset}, diff={diff_offset}, theme={theme:?}, zoom={zoom}"
+                );
+                output.drop_without_applying_deltas();
+            }
         }
     }
 
