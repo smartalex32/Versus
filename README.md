@@ -48,6 +48,9 @@ highlights, and line-ending badges. Transfer arrows are drawn toward the destina
 and sit in two bordered tracks between the file panes: left-to-right copies in
 the left track, right-to-left copies in the right track. The line-expansion
 buttons stay inside the file panes, separated from highlighted text.
+Difference navigation subtly highlights the current changed line. One-sided
+changes move only their own pane; paired changes scroll and highlight both
+corresponding lines.
 Switching to File Diff keeps one path header per side and provides Refresh, with
 the same aligned comparison rows as a new File Diff. Edits and undo history remain
 available when returning to Merge; Refresh compares the retained working copies.

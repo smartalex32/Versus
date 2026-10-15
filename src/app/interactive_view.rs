@@ -1550,11 +1550,27 @@ impl InteractiveView {
         let row_height =
             super::ROW_HEIGHT.max(ctx.fonts_mut(|fonts| fonts.row_height(&font)).ceil() + 8.0);
         if self.editing {
-            // Merge scroll positions refer to source line numbers, so its two
-            // independent editors keep their established behavior.
+            // Only move panes present on this comparison row. Matching rows
+            // can have different source numbers, and the differences-only
+            // projection has its own compact row positions on each side.
             for (side, line) in [&row.left, &row.right].into_iter().enumerate() {
                 if let Some((number, _)) = line {
-                    self.scroll[side] = number.saturating_sub(1) as f32 * row_height;
+                    let display_line = if self.run_diff && self.merge_options[0] {
+                        diff.rows[..row_index]
+                            .iter()
+                            .filter(|row| {
+                                row.state != DirectoryEntryState::Same
+                                    && if side == 0 {
+                                        row.left.is_some()
+                                    } else {
+                                        row.right.is_some()
+                                    }
+                            })
+                            .count()
+                    } else {
+                        number.saturating_sub(1)
+                    };
+                    self.scroll[side] = display_line as f32 * row_height;
                 }
             }
         } else if let Some(display_index) = self.readonly_display_index(row_index) {
@@ -1563,6 +1579,22 @@ impl InteractiveView {
             self.scroll = [display_index as f32 * row_height; 2];
         }
         ctx.request_repaint();
+    }
+    fn navigation_lines(&self, ctx: &egui::Context) -> [Option<usize>; 2] {
+        ctx.memory(|memory| {
+            memory
+                .data
+                .get_temp::<usize>(egui::Id::new("interactive-diff-navigation"))
+        })
+        .and_then(|index| self.diff_rows.get(index))
+        .and_then(|index| self.diff.as_ref()?.rows.get(*index))
+        .map(|row| {
+            [
+                row.left.as_ref().map(|line| line.0.saturating_sub(1)),
+                row.right.as_ref().map(|line| line.0.saturating_sub(1)),
+            ]
+        })
+        .unwrap_or([None; 2])
     }
     fn has_differences(&self) -> bool {
         self.engine_enabled()
@@ -1988,6 +2020,7 @@ impl InteractiveView {
             .unwrap()
             .ignored_ranges(source)
             .to_vec();
+        let navigation_line = self.navigation_lines(ui.ctx())[side];
         let mut max_line_number = count;
         let changed: BTreeMap<usize, (DirectoryEntryState, Vec<Range<usize>>)> = self
             .diff
@@ -2157,7 +2190,7 @@ impl InteractiveView {
                         row_rect,
                         state,
                         display_line % 2 == 1,
-                        false,
+                        navigation_line == Some(line),
                     );
                     super::file_style::paint_gutter(
                         ui.painter(),
@@ -4148,6 +4181,162 @@ mod tests {
             .drop_without_applying_deltas();
         }
     }
+    #[test]
+    fn merge_difference_navigation_highlights_and_scrolls_only_corresponding_sides() {
+        let mut comparison = readonly_comparison(240);
+        for (index, row) in comparison.rows.iter_mut().enumerate() {
+            let modified = row.state != DirectoryEntryState::Same;
+            row.left.as_mut().unwrap().1 = if modified {
+                format!("left change {index}")
+            } else {
+                format!("shared line {index}")
+            };
+            row.right.as_mut().unwrap().1 = if modified {
+                format!("right change {index}")
+            } else {
+                format!("shared line {index}")
+            };
+            if index > 40 {
+                row.right.as_mut().unwrap().0 -= 1;
+            }
+            if index > 130 {
+                row.left.as_mut().unwrap().0 -= 1;
+            }
+        }
+        comparison.rows[40].state = DirectoryEntryState::LeftOnly;
+        comparison.rows[40].right = None;
+        comparison.rows[100].state = DirectoryEntryState::Different;
+        comparison.rows[130].state = DirectoryEntryState::RightOnly;
+        comparison.rows[130].left = None;
+        let texts: [String; 2] = std::array::from_fn(|side| {
+            comparison
+                .rows
+                .iter()
+                .filter_map(|row| {
+                    if side == 0 {
+                        row.left.as_ref()
+                    } else {
+                        row.right.as_ref()
+                    }
+                })
+                .map(|line| format!("{}\n", line.1))
+                .collect()
+        });
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            for zoom in [1.0, 2.0] {
+                for filtered in [false, true] {
+                    let ctx = egui::Context::default();
+                    set_theme(&ctx, theme);
+                    ctx.set_zoom_factor(zoom);
+                    let mut view = view(&texts[0], &texts[1]);
+                    view.editor_context = Some(ctx.clone());
+                    view.run_diff = true;
+                    view.merge_options = [filtered, false, false];
+                    view.diff_rows = comparison
+                        .rows
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, row)| {
+                            (row.state != DirectoryEntryState::Same).then_some(index)
+                        })
+                        .collect();
+                    view.diff = Some(comparison.clone());
+                    for (target, forward, source_lines, filtered_lines) in [
+                        (40usize, true, [Some(40usize), None], [Some(14usize), None]),
+                        (100, true, [Some(100), Some(99)], [Some(35), Some(34)]),
+                        (130, true, [None, Some(129)], [None, Some(45)]),
+                        (100, false, [Some(100), Some(99)], [Some(35), Some(34)]),
+                    ] {
+                        view.scroll = [66.0, 88.0];
+                        let target_index = view
+                            .diff_rows
+                            .iter()
+                            .position(|index| *index == target)
+                            .unwrap();
+                        ctx.memory_mut(|memory| {
+                            memory.data.insert_temp(
+                                egui::Id::new("interactive-diff-navigation"),
+                                if forward {
+                                    target_index - 1
+                                } else {
+                                    target_index + 1
+                                },
+                            )
+                        });
+                        for _ in 0..3 {
+                            frame(&mut view, &ctx, vec![]).drop_without_applying_deltas();
+                        }
+                        let before = view.scroll;
+                        click(
+                            &mut view,
+                            &ctx,
+                            egui::Id::new(if forward {
+                                "Next difference"
+                            } else {
+                                "Previous difference"
+                            }),
+                        );
+                        assert_eq!(view.navigation_lines(&ctx), source_lines);
+                        let font = comparison_font(&ctx);
+                        let row_height = super::ROW_HEIGHT
+                            .max(ctx.fonts_mut(|fonts| fonts.row_height(&font)).ceil() + 8.0);
+                        for side in 0..2 {
+                            let display_line = if filtered {
+                                filtered_lines[side]
+                            } else {
+                                source_lines[side]
+                            };
+                            assert!(
+                                (view.scroll[side]
+                                    - display_line
+                                        .map_or(before[side], |line| line as f32 * row_height))
+                                .abs()
+                                    < 0.5
+                            );
+                        }
+                        let output = frame(&mut view, &ctx, vec![]);
+                        let highlights: Vec<_> = output
+                            .shapes
+                            .iter()
+                            .filter_map(|shape| match &shape.shape {
+                                egui::Shape::Rect(rect)
+                                    if rect.fill
+                                        == Palette::for_context(&ctx)
+                                            .accent
+                                            .gamma_multiply(0.13) =>
+                                {
+                                    Some((rect.rect, shape.clip_rect))
+                                }
+                                _ => None,
+                            })
+                            .collect();
+                        assert_eq!(highlights.len(), source_lines.iter().flatten().count());
+                        for (rect, clip) in highlights {
+                            assert!(
+                                rect.intersect(clip).is_positive(),
+                                "navigated row must be visible"
+                            );
+                            let side =
+                                usize::from(rect.center().x > ctx.viewport_rect().center().x);
+                            assert!(
+                                source_lines[side].is_some(),
+                                "do not highlight an unmatched opposite line"
+                            );
+                        }
+                        output.drop_without_applying_deltas();
+                    }
+                    view.set_run_diff(false);
+                    let output = frame(&mut view, &ctx, vec![]);
+                    assert!(!output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Rect(rect) if rect.fill == Palette::for_context(&ctx).accent.gamma_multiply(0.13))));
+                    assert_eq!(view.working_text(0), Some(texts[0].as_str()));
+                    assert_eq!(view.working_text(1), Some(texts[1].as_str()));
+                    assert!(!view.workspace.as_ref().unwrap().can_undo());
+                    output.drop_without_applying_deltas();
+                }
+            }
+        }
+    }
+
     #[test]
     fn readonly_presentation_is_reused_and_rebuilds_for_filter_changes() {
         let ctx = egui::Context::default();

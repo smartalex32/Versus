@@ -68,6 +68,9 @@ APIs and must fail cleanly when unavailable.
   Each source has a separate center transfer track outside the clipped file
   content. Arrows follow that source’s independent scroll; expansion toggles
   remain inside a reserved content gutter with clearance from row highlights.
+  Merge difference navigation uses File Diff’s subtle row overlay on the source
+  lines present in the selected comparison row. Only those panes scroll; paired
+  rows use each side’s original line number and filtered display position.
   Switching an open merge pair to Diff paints aligned read-only rows through the
   File Diff painter, with one source header and Refresh in the header toolbar.
   Read-only row visibility and widths are cached per comparison/preferences/font;
