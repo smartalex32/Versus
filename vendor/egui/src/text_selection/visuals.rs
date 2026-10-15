@@ -268,7 +268,13 @@ pub fn paint_cursor_end(painter: &Painter, visuals: &Visuals, cursor_rect: Rect)
     let stroke = visuals.text_cursor.stroke;
 
     let top = cursor_rect.center_top();
-    let bottom = cursor_rect.center_bottom();
+    let height = visuals
+        .text_cursor
+        .max_height
+        .map_or(cursor_rect.height(), |height| {
+            height.max(0.0).min(cursor_rect.height())
+        });
+    let bottom = top + vec2(0.0, height);
 
     painter.line_segment([top, bottom], stroke);
 

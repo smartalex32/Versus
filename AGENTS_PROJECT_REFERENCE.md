@@ -218,7 +218,11 @@ APIs and must fail cleanly when unavailable.
   Shared vendored egui scrollbars honor the theme's interaction cursor while
   hovered or dragged, covering horizontal/vertical bars in comparisons, editors,
   trees, and dialogs. Disabled bars and disabled scrollbar input keep the default
-  cursor. After changing vendored egui, clean its cached package for each build
+  cursor. Its optional `TextCursorStyle::max_height` only caps the painted caret,
+  preserving native blinking, selection and scroll geometry. Merge scopes it to
+  the editor font height plus native caret margins, excluding padded diff-row
+  spacing; other text fields retain the default. After changing vendored egui,
+  clean its cached package for each build
   profile (`cargo clean -p egui` and `cargo clean --release -p egui`) before
   validating the rebuilt app.
   Footer guidance updates independently on the left. Activity status only

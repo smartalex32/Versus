@@ -2189,8 +2189,8 @@ impl InteractiveView {
         let displayed_lines: Vec<_> = displayed.lines().collect();
         let font = comparison_font(ui.ctx());
         let row_height = super::comparison_row_height(ui);
-        let text_height = ui.fonts_mut(|fonts| fonts.row_height(&font));
-        let text_padding = ((row_height - text_height) / 2.0).max(0.0);
+        let font_height = ui.fonts_mut(|fonts| fonts.row_height(&font));
+        let text_padding = ((row_height - font_height) / 2.0).max(0.0);
         let count = self.workspace.as_ref().unwrap().line_count(source);
         let chunks = self.workspace.as_ref().unwrap().chunks(source);
         let navigation_line = self.navigation_lines(ui.ctx())[side];
@@ -2427,6 +2427,9 @@ impl InteractiveView {
                         .auto_shrink([false, false])
                         .max_width(text_width)
                         .show(ui, |ui| {
+                            // Keep egui's native caret margins without including
+                            // the extra spacing used by comparison rows.
+                            ui.visuals_mut().text_cursor.max_height = Some(font_height + 3.0);
                             egui::TextEdit::multiline(&mut next)
                                 .id(editor_id)
                                 .font(font.clone())
@@ -3707,6 +3710,91 @@ mod tests {
             visible_chunk_runs(&(0..6), &[0, 2, 3, 5]),
             vec![0..1, 2..4, 5..6]
         );
+    }
+
+    #[test]
+    fn merge_caret_uses_font_height_without_changing_row_spacing() {
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            for zoom in [1.0, 2.0] {
+                for text in ["first\nsecond\n", "first\n\nthird\n", ""] {
+                    for side in 0..2usize {
+                        for run_diff in [false, true] {
+                            let ctx = egui::Context::default();
+                            set_theme(&ctx, theme);
+                            ctx.set_zoom_factor(zoom);
+                            ctx.style_mut_of(theme, |style| {
+                                style.visuals.text_cursor.blink = false
+                            });
+                            let stroke = ctx.style_of(theme).visuals.text_cursor.stroke;
+                            let mut view = view(text, text);
+                            view.run_diff = run_diff;
+                            view.merge_options = [false; 3];
+                            if run_diff {
+                                view.diff = compare_loaded_text(
+                                    [text, text],
+                                    &AtomicBool::new(false),
+                                    &FileViewOptions::default(),
+                                    [&[], &[]],
+                                )
+                                .unwrap();
+                            }
+                            for _ in 0..3 {
+                                frame(&mut view, &ctx, vec![]).drop_without_applying_deltas();
+                            }
+                            view.caret[side] = usize::from(!text.is_empty());
+                            view.sync_editor_cursor(side);
+                            ctx.memory_mut(|memory| memory.request_focus(view.editor_id(side)));
+                            let output = frame(&mut view, &ctx, vec![]);
+                            assert_eq!(
+                                ctx.style_of(theme).visuals.text_cursor.max_height,
+                                None,
+                                "merge caret styling must not leak to other text fields"
+                            );
+                            let font = comparison_font(&ctx);
+                            let font_height = ctx.fonts_mut(|fonts| fonts.row_height(&font));
+                            let cursors: Vec<_> = output
+                                .shapes
+                                .iter()
+                                .filter_map(|shape| match &shape.shape {
+                                    egui::Shape::LineSegment {
+                                        points,
+                                        stroke: painted,
+                                    } if *painted == stroke && points[0].x == points[1].x => {
+                                        Some((points[1].y - points[0].y).abs())
+                                    }
+                                    _ => None,
+                                })
+                                .collect();
+                            assert_eq!(
+                                cursors.len(),
+                                1,
+                                "one focused editor caret: {theme:?}, zoom={zoom}, side={side}"
+                            );
+                            assert!(
+                                (cursors[0] - (font_height + 3.0)).abs() < 0.1,
+                                "caret should use the font height with native caret margins, not padded rows: height={}, font={font_height}, {theme:?}, zoom={zoom}, side={side}, diff={run_diff}, text={text:?}",
+                                cursors[0]
+                            );
+                            for shape in &output.shapes {
+                                if let egui::Shape::Text(text_shape) = &shape.shape {
+                                    if !text.is_empty() && text_shape.galley.text() == text {
+                                        let rows = &text_shape.galley.rows;
+                                        assert!(
+                                            (rows[1].pos.y
+                                                - rows[0].pos.y
+                                                - super::ROW_HEIGHT.max(font_height.ceil() + 8.0))
+                                            .abs()
+                                                < 0.1
+                                        );
+                                    }
+                                }
+                            }
+                            output.drop_without_applying_deltas();
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
