@@ -58,6 +58,136 @@ struct ReadonlyPresentation {
     gutter_extra: f32,
 }
 
+/// Display-only source coordinates retained during an editable diff refresh.
+/// These never stand in for a completed comparison or supply merge targets.
+#[derive(Clone, Default)]
+struct MergeDecoration {
+    lines: BTreeMap<usize, (DirectoryEntryState, Vec<Range<usize>>)>,
+    endings: BTreeMap<usize, versus::DisplayLineEnding>,
+}
+
+struct PendingMergePresentation {
+    sides: [MergeDecoration; 2],
+    changes: usize,
+    legend_counts: Option<[usize; 6]>,
+}
+
+impl MergeDecoration {
+    /// Translate display metadata using the actual edit anchor, without doing a
+    /// comparison. Repaint touched lines provisionally until fresh results arrive.
+    fn rebase(&mut self, before: &str, range: Range<usize>, after: &str) {
+        let old = text_segments(before);
+        let new = text_segments(after);
+        let line_at = |byte: usize| {
+            let mut offset = 0;
+            for (line, (text, ending)) in old.iter().enumerate() {
+                offset += text.len() + ending.len();
+                if byte < offset || (byte == offset && ending.is_empty()) {
+                    return line;
+                }
+            }
+            old.len()
+        };
+        let start = line_at(range.start);
+        let end = (line_at(range.end) + 1).min(old.len());
+        let delta = new.len() as isize - old.len() as isize;
+        let new_end = end.saturating_add_signed(delta).min(new.len());
+        let previous = self.lines.get(&start).cloned();
+        let ending = (end == start + 1 && new_end == end && old[start].1 == new[start].1)
+            .then(|| self.endings.get(&start).copied())
+            .flatten();
+        let inline = if end == start + 1 && new_end == end {
+            let line_start: usize = old[..start]
+                .iter()
+                .map(|(text, ending)| text.len() + ending.len())
+                .sum();
+            (range.end <= line_start + old[start].0.len()).then(|| {
+                let edit = range.start - line_start..range.end - line_start;
+                let inserted = new[start].0.len() + edit.len() - old[start].0.len();
+                let shift = inserted as isize - edit.len() as isize;
+                let mut ranges: Vec<Range<usize>> = previous
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|(_, ranges)| ranges)
+                    .map(|span| {
+                        let a = if span.start <= edit.start {
+                            span.start
+                        } else if span.start >= edit.end {
+                            span.start.saturating_add_signed(shift)
+                        } else {
+                            edit.start
+                        };
+                        let b = if span.end <= edit.start {
+                            span.end
+                        } else if span.end >= edit.end {
+                            span.end.saturating_add_signed(shift)
+                        } else {
+                            edit.start + inserted
+                        };
+                        a..b
+                    })
+                    .filter(|span| !span.is_empty())
+                    .collect();
+                if inserted > 0 {
+                    ranges.push(edit.start..edit.start + inserted);
+                }
+                ranges.sort_by_key(|span| span.start);
+                let mut merged: Vec<Range<usize>> = Vec::new();
+                for span in ranges {
+                    if let Some(last) = merged.last_mut().filter(|last| span.start <= last.end) {
+                        last.end = last.end.max(span.end);
+                    } else {
+                        merged.push(span);
+                    }
+                }
+                merged
+            })
+        } else {
+            None
+        };
+        let remap = |line: usize| {
+            if line < start {
+                Some(line)
+            } else if line >= end {
+                Some(line.saturating_add_signed(delta))
+            } else {
+                None
+            }
+        };
+        self.lines = std::mem::take(&mut self.lines)
+            .into_iter()
+            .filter_map(|(line, value)| Some((remap(line)?, value)))
+            .collect();
+        self.endings = std::mem::take(&mut self.endings)
+            .into_iter()
+            .filter_map(|(line, value)| Some((remap(line)?, value)))
+            .collect();
+        if let Some(ending) = ending {
+            self.endings.insert(start, ending);
+        }
+        for (line, (text, _)) in new.iter().enumerate().take(new_end).skip(start) {
+            self.lines.insert(
+                line,
+                (
+                    previous
+                        .as_ref()
+                        .map(|(state, _)| state)
+                        .filter(|state| **state != DirectoryEntryState::Same)
+                        .cloned()
+                        .unwrap_or(DirectoryEntryState::Different),
+                    if let Some(inline) = &inline {
+                        inline.clone()
+                    } else if text.is_empty() {
+                        Vec::new()
+                    } else {
+                        vec![0..text.len()]
+                    },
+                ),
+            );
+        }
+    }
+}
+
 #[derive(Default)]
 pub(super) struct InteractiveView {
     workspace: Option<TwoWayWorkspace>,
@@ -80,6 +210,7 @@ pub(super) struct InteractiveView {
     retired_diffs: Vec<DiffJob>,
     diff_not_before: Option<Instant>,
     diff: Option<FileComparison>,
+    pending_merge_presentation: Option<PendingMergePresentation>,
     readonly_presentation: Option<ReadonlyPresentation>,
     readonly_pending_anchor: Option<([Option<usize>; 2], f32)>,
     save_job: Option<SaveJob>,
@@ -941,6 +1072,7 @@ impl InteractiveView {
             self.retired_diffs.push(job);
         }
         self.diff = None;
+        self.pending_merge_presentation = None;
         self.diff_rows.clear();
         if let Some(ctx) = &self.editor_context {
             ctx.memory_mut(|memory| {
@@ -951,6 +1083,80 @@ impl InteractiveView {
         }
         self.diff_dirty = self.engine_enabled();
         self.diff_not_before = Some(Instant::now() + Duration::from_millis(150));
+    }
+    fn merge_decoration(&self, side: usize) -> MergeDecoration {
+        if let Some(diff) = &self.diff {
+            let mut decoration = MergeDecoration::default();
+            for row in &diff.rows {
+                let (line, changed, ending) = if side == 0 {
+                    (&row.left, &row.left_changed, row.left_ending)
+                } else {
+                    (&row.right, &row.right_changed, row.right_ending)
+                };
+                if let Some((number, _)) = line {
+                    decoration
+                        .lines
+                        .insert(number - 1, (row.state.clone(), changed.clone()));
+                    if !self.merge_options[2] && row.left_ending != row.right_ending {
+                        if let Some(ending) = ending {
+                            decoration.endings.insert(number - 1, ending);
+                        }
+                    }
+                }
+            }
+            decoration
+        } else {
+            self.pending_merge_presentation
+                .as_ref()
+                .map(|pending| pending.sides[side].clone())
+                .unwrap_or_default()
+        }
+    }
+    fn invalidate_edited_diff(&mut self, side: usize, before: &str, range: Range<usize>) {
+        let mut presentation = (self.editing
+            && self.run_diff
+            && (self.diff.is_some() || self.pending_merge_presentation.is_some()))
+        .then(|| PendingMergePresentation {
+            sides: std::array::from_fn(|side| self.merge_decoration(side)),
+            legend_counts: self.footer_legend_counts(),
+            changes: self
+                .pending_merge_presentation
+                .as_ref()
+                .map_or(self.diff_rows.len(), |pending| pending.changes),
+        });
+        let shared_file = self.side_sources[0]
+            .as_ref()
+            .zip(self.side_sources[1].as_ref())
+            .is_some_and(|(left, right)| self.key_for(left) == self.key_for(right));
+        let peer_before = shared_file.then(|| {
+            self.workspace
+                .as_ref()
+                .unwrap()
+                .text(side_of(1 - side))
+                .to_owned()
+        });
+        // Cancel stale workers and publish edits as usual, retaining only display
+        // metadata. Actual comparison results remain invalid until the worker returns.
+        self.invalidate_diff();
+        if let (Some(presentation), Some(workspace)) = (&mut presentation, &self.workspace) {
+            for target in 0..2 {
+                let after = workspace.text(side_of(target));
+                if target == side {
+                    presentation.sides[target].rebase(before, range.clone(), after);
+                } else if shared_file {
+                    if let Some(peer_before) = &peer_before {
+                        if peer_before == before && after != peer_before {
+                            presentation.sides[target].rebase(before, range.clone(), after);
+                        } else if let Some((peer_range, _)) =
+                            external_refresh_edit(peer_before, after)
+                        {
+                            presentation.sides[target].rebase(peer_before, peer_range, after);
+                        }
+                    }
+                }
+            }
+        }
+        self.pending_merge_presentation = presentation;
     }
     fn cache_active(&mut self) {
         if let Some(paths) = &self.paths {
@@ -973,12 +1179,14 @@ impl InteractiveView {
         if !self.engine_enabled() {
             self.diff_job = None;
             self.diff = None;
+            self.pending_merge_presentation = None;
             self.readonly_presentation = None;
             return;
         }
         if self.files.is_none() && !self.side_files.iter().all(Option::is_some) {
             self.diff_job = None;
             self.diff = None;
+            self.pending_merge_presentation = None;
             self.diff_rows.clear();
             self.readonly_presentation = None;
             return;
@@ -1045,10 +1253,14 @@ impl InteractiveView {
                         })
                         .collect();
                     self.diff = Some(comparison);
+                    self.pending_merge_presentation = None;
                     self.readonly_presentation = None;
                 }
-                Ok(None) => {}
-                Err(error) => self.error = Some(error),
+                Ok(None) => self.pending_merge_presentation = None,
+                Err(error) => {
+                    self.pending_merge_presentation = None;
+                    self.error = Some(error);
+                }
             }
         }
         if self.diff_job.is_some() {
@@ -1072,6 +1284,9 @@ impl InteractiveView {
                 .folder_difference_index
                 .map(|index| format!("Change {} of {count}", index + 1))
                 .unwrap_or_else(|| format!("{count} changes"));
+        }
+        if let Some(pending) = &self.pending_merge_presentation {
+            return format!("{} changes", pending.changes);
         }
         let current = self.editor_context.as_ref().and_then(|ctx| {
             ctx.memory(|memory| {
@@ -1939,31 +2154,15 @@ impl InteractiveView {
         let count = self.workspace.as_ref().unwrap().line_count(source);
         let chunks = self.workspace.as_ref().unwrap().chunks(source);
         let navigation_line = self.navigation_lines(ui.ctx())[side];
-        let mut max_line_number = count;
-        let changed: BTreeMap<usize, (DirectoryEntryState, Vec<Range<usize>>)> = self
-            .diff
-            .as_ref()
-            .map(|diff| {
-                diff.rows
-                    .iter()
-                    .filter_map(|row| {
-                        for (number, _) in row.left.iter().chain(row.right.iter()) {
-                            max_line_number = max_line_number.max(*number);
-                        }
-                        let line = if side == 0 { &row.left } else { &row.right };
-                        let ranges = if side == 0 {
-                            &row.left_changed
-                        } else {
-                            &row.right_changed
-                        };
-                        line.as_ref()
-                            .map(|(number, _)| (number - 1, (row.state.clone(), ranges.clone())))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let max_line_number =
+            count.max(self.workspace.as_ref().unwrap().line_count(source.other()));
+        let MergeDecoration {
+            lines: changed,
+            endings: ending_differences,
+        } = self.merge_decoration(side);
         let gutter_extra = super::file_style::gutter_extra(max_line_number);
-        let filtering_same = self.run_diff && self.merge_options[0] && self.diff.is_some();
+        let decorated = self.diff.is_some() || self.pending_merge_presentation.is_some();
+        let filtering_same = self.run_diff && self.merge_options[0] && decorated;
         let projection = filtering_same.then(|| merge_projection(&displayed, &changed));
         if projection
             .as_ref()
@@ -2017,25 +2216,6 @@ impl InteractiveView {
                 let range = cursor.as_sorted_char_range();
                 usize::from(range.start)..usize::from(range.end)
             });
-        let ending_differences: BTreeMap<usize, versus::DisplayLineEnding> = self
-            .diff
-            .as_ref()
-            .map(|diff| {
-                diff.rows
-                    .iter()
-                    .filter_map(|row| {
-                        let line = if side == 0 { &row.left } else { &row.right };
-                        let ending = if side == 0 {
-                            row.left_ending
-                        } else {
-                            row.right_ending
-                        };
-                        (!self.merge_options[2] && row.left_ending != row.right_ending)
-                            .then_some((line.as_ref()?.0 - 1, ending?))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
         let syntax = self.side_sources[side]
             .as_ref()
             .or_else(|| self.paths.as_ref().map(|paths| &paths[side]))
@@ -2165,7 +2345,7 @@ impl InteractiveView {
                                     font.clone(),
                                     Some(row_height),
                                 );
-                            } else if self.diff.is_some() {
+                            } else if decorated {
                                 super::file_style::append_text(
                                     &mut job,
                                     line,
@@ -2442,7 +2622,7 @@ impl InteractiveView {
                             text: updated_display.clone(),
                             source_lines: (0..text_segments(&updated_display).len()).collect(),
                         });
-                        self.invalidate_diff();
+                        self.invalidate_edited_diff(side, &current, range);
                     }
                 }
                 Err(error) => self.error = Some(error.into()),
@@ -2519,7 +2699,9 @@ impl InteractiveView {
         icons
     }
     fn footer_legend_counts(&self) -> Option<[usize; 6]> {
-        let diff = self.diff.as_ref()?;
+        let Some(diff) = self.diff.as_ref() else {
+            return self.pending_merge_presentation.as_ref()?.legend_counts;
+        };
         let mut counts = [0; 6];
         for row in &diff.rows {
             match row.state {
@@ -2588,20 +2770,18 @@ impl InteractiveView {
         if range.is_empty() || !self.editing || !self.run_diff || !self.merge_options[0] {
             return false;
         }
-        let Some(diff) = &self.diff else {
+        if self.diff.is_none() && self.pending_merge_presentation.is_none() {
             return false;
-        };
-        let side = side_index(side);
+        }
+        let decoration = self.merge_decoration(side_index(side));
         range.clone().any(|line| {
-            !diff.rows.iter().any(|row| {
-                let source = if side == 0 { &row.left } else { &row.right };
-                source
-                    .as_ref()
-                    .is_some_and(|(number, _)| *number == line + 1)
-                    && row.state != DirectoryEntryState::Same
-            })
+            !decoration
+                .lines
+                .get(&line)
+                .is_some_and(|(state, _)| *state != DirectoryEntryState::Same)
         })
     }
+
     fn copy_all(&mut self, source: TwoWaySide) {
         if !self.has_actual_pair() {
             return;
@@ -3472,6 +3652,291 @@ mod tests {
             visible_chunk_runs(&(0..6), &[0, 2, 3, 5]),
             vec![0..1, 2..4, 5..6]
         );
+    }
+
+    #[test]
+    fn failed_diff_refresh_drops_provisional_decoration_without_losing_edits() {
+        for disconnected in [false, true] {
+            let ctx = egui::Context::default();
+            let mut view = view("old\n", "new\n");
+            view.run_diff = true;
+            view.diff = compare_loaded_text(
+                ["old\n", "new\n"],
+                &AtomicBool::new(false),
+                &FileViewOptions::default(),
+                [&[], &[]],
+            )
+            .unwrap();
+            view.workspace
+                .as_mut()
+                .unwrap()
+                .edit_bytes(TwoWaySide::Left, 0..0, "!".into())
+                .unwrap();
+            view.invalidate_edited_diff(0, "old\n", 0..0);
+            assert!(view.pending_merge_presentation.is_some());
+            let (sender, receiver) = mpsc::channel();
+            if !disconnected {
+                sender.send(Err("Comparison failed".into())).unwrap();
+            }
+            drop(sender);
+            view.diff_job = Some(DiffJob {
+                receiver,
+                cancel: Arc::default(),
+                progress: Arc::default(),
+            });
+            view.diff_dirty = false;
+            view.poll_diff(&ctx);
+            assert!(view.pending_merge_presentation.is_none() && view.diff.is_none());
+            assert!(view.error.is_some());
+            assert_eq!(view.working_text(0), Some("!old\n"));
+            view.selected_side = 0;
+            view.move_history(false);
+            assert_eq!(view.working_text(0), Some("old\n"));
+        }
+    }
+
+    #[test]
+    fn pending_single_line_edits_keep_source_color_and_precise_inline_ranges() {
+        let mut decoration = MergeDecoration::default();
+        decoration
+            .lines
+            .insert(0, (DirectoryEntryState::LeftOnly, vec![2..4, 6..8]));
+        decoration.rebase("abcdefgh\n", 0..0, "文abcdefgh\n");
+        assert_eq!(
+            decoration.lines[&0],
+            (DirectoryEntryState::LeftOnly, vec![0..3, 5..7, 9..11])
+        );
+        decoration.rebase("文abcdefgh\n", 5..7, "文abefgh\n");
+        assert_eq!(
+            decoration.lines[&0],
+            (DirectoryEntryState::LeftOnly, vec![0..3, 7..9])
+        );
+        decoration.rebase("文abefgh\n", 3..5, "文Xefgh\n");
+        assert_eq!(
+            decoration.lines[&0],
+            (DirectoryEntryState::LeftOnly, vec![0..4, 6..8])
+        );
+    }
+
+    #[test]
+    fn pending_diff_decorations_follow_exact_byte_anchors_and_line_endings() {
+        let before = "x\r\nx\nchanged\rkeep\r\n";
+        let mut decoration = MergeDecoration::default();
+        decoration
+            .lines
+            .insert(1, (DirectoryEntryState::Different, vec![0..1]));
+        decoration
+            .lines
+            .insert(2, (DirectoryEntryState::Different, vec![0..7]));
+        decoration.endings.insert(2, versus::DisplayLineEnding::Cr);
+        let after = format!("x\r\n{before}");
+        decoration.rebase(before, 0..0, &after);
+        assert_eq!(decoration.lines[&2].1, [0..1]);
+        assert_eq!(decoration.lines[&3].1, [0..7]);
+        assert_eq!(decoration.endings[&3], versus::DisplayLineEnding::Cr);
+        // UTF-8 text inserted into that moved line gets valid highlight ranges.
+        let byte = after.find("changed").unwrap();
+        let mut next = after.clone();
+        next.insert_str(byte, "文");
+        decoration.rebase(&after, byte..byte, &next);
+        assert_eq!(decoration.lines[&3].1, [0.."文changed".len()]);
+        assert_eq!(decoration.endings[&3], versus::DisplayLineEnding::Cr);
+    }
+
+    #[test]
+    fn typing_with_unfiltered_diff_preserves_other_line_decorations_on_both_sides() {
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            for side in 0..2usize {
+                let ctx = egui::Context::default();
+                set_theme(&ctx, theme);
+                let mut view = view("same\r\nold\r\nother\r\n", "same\nnew\nanother\n");
+                view.run_diff = true;
+                view.merge_options = [false, false, true];
+                view.diff = compare_loaded_text(
+                    [view.working_text(0).unwrap(), view.working_text(1).unwrap()],
+                    &AtomicBool::new(false),
+                    &FileViewOptions::default(),
+                    [&[], &[]],
+                )
+                .unwrap();
+                for _ in 0..3 {
+                    frame(&mut view, &ctx, vec![]).drop_without_applying_deltas();
+                }
+                let original_peer = view.working_text(1 - side).unwrap().to_owned();
+                let untouched = view.merge_decoration(side).lines[&2].clone();
+                view.caret[side] = 1;
+                view.sync_editor_cursor(side);
+                ctx.memory_mut(|memory| memory.request_focus(view.editor_id(side)));
+                frame(&mut view, &ctx, vec![egui::Event::Text("文".into())])
+                    .drop_without_applying_deltas();
+                view.diff_not_before = Some(Instant::now() + Duration::from_secs(1));
+                frame(&mut view, &ctx, vec![]).drop_without_applying_deltas();
+                assert_eq!(view.working_text(1 - side), Some(original_peer.as_str()));
+                assert!(view.working_text(side).unwrap().contains(if side == 0 {
+                    "文old\r\n"
+                } else {
+                    "文new\n"
+                }));
+                assert_eq!(view.merge_decoration(side).lines[&2], untouched);
+                assert_eq!(
+                    view.editor_projection[side].as_ref().unwrap().source_lines,
+                    [0, 1, 2]
+                );
+                view.set_run_diff(false);
+                assert!(view.pending_merge_presentation.is_none() && view.diff_job.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn typing_with_diff_keeps_filtered_content_and_highlights_between_results() {
+        let left = "prefix\nold\nsame\nlater\nsuffix\n";
+        let right = "prefix\nnew\nsame\nlaterR\nsuffix\n";
+        let ctx = egui::Context::default();
+        let mut view = view(left, right);
+        view.run_diff = true;
+        view.merge_options = [true; 3];
+        view.diff = compare_loaded_text(
+            [left, right],
+            &AtomicBool::new(false),
+            &FileViewOptions::default(),
+            [&[], &[]],
+        )
+        .unwrap();
+        for _ in 0..3 {
+            frame(&mut view, &ctx, vec![]).drop_without_applying_deltas();
+        }
+        view.diff_rows = view
+            .diff
+            .as_ref()
+            .unwrap()
+            .rows
+            .iter()
+            .enumerate()
+            .filter_map(|(index, row)| (row.state != DirectoryEntryState::Same).then_some(index))
+            .collect();
+        let counts = view.footer_legend_counts();
+        let label = view.change_label();
+        let stale_comparison = view.diff.as_ref().unwrap().clone();
+        let (sender, receiver) = mpsc::channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        view.diff_job = Some(DiffJob {
+            receiver,
+            cancel: cancel.clone(),
+            progress: Arc::default(),
+        });
+        let id = view.editor_id(0);
+        let mut state = egui::TextEdit::load_state(&ctx, id).unwrap();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(0),
+            )));
+        state.store(&ctx, id);
+        ctx.memory_mut(|memory| memory.request_focus(id));
+        frame(&mut view, &ctx, vec![egui::Event::Text("!".into())]).drop_without_applying_deltas();
+        assert!(cancel.load(Ordering::Relaxed));
+        sender.send(Ok(Some(stale_comparison))).unwrap();
+        view.diff_not_before = Some(Instant::now() + Duration::from_secs(1));
+        frame(&mut view, &ctx, vec![]).drop_without_applying_deltas();
+        assert!(
+            view.loaded_pair_comparison().is_none(),
+            "pending display metadata is not a completed comparison"
+        );
+        assert_eq!(view.footer_legend_counts(), counts);
+        assert_eq!(view.change_label(), label);
+        assert_eq!(
+            view.working_text(0),
+            Some("prefix\n!old\nsame\nlater\nsuffix\n")
+        );
+        assert_eq!(
+            view.editor_projection[0].as_ref().unwrap().text,
+            "!old\nlater\n",
+            "editing must not briefly expand hidden unchanged lines while diff is pending"
+        );
+        assert_eq!(
+            view.editor_projection[1].as_ref().unwrap().text,
+            "new\nlaterR\n"
+        );
+        assert_eq!(
+            view.merge_decoration(0).lines[&1].0,
+            DirectoryEntryState::Different,
+            "diff decoration should remain visible while refreshing"
+        );
+        // Continue typing before any worker returns. Newlines must update the
+        // compact projection's source coordinates without exposing hidden text.
+        frame(&mut view, &ctx, vec![egui::Event::Text("β\nsecond".into())])
+            .drop_without_applying_deltas();
+        view.diff_not_before = Some(Instant::now() + Duration::from_secs(1));
+        frame(&mut view, &ctx, vec![]).drop_without_applying_deltas();
+        assert_eq!(
+            view.editor_projection[0].as_ref().unwrap().text,
+            "!β\nsecondold\nlater\n"
+        );
+        assert_eq!(
+            view.editor_projection[0].as_ref().unwrap().source_lines,
+            [1, 2, 4]
+        );
+        frame(&mut view, &ctx, vec![egui::Event::Text("?".into())]).drop_without_applying_deltas();
+        assert_eq!(
+            view.working_text(0),
+            Some("prefix\n!β\nsecond?old\nsame\nlater\nsuffix\n")
+        );
+        // A deliberate selection joins only the two adjacent edited lines.
+        frame(&mut view, &ctx, vec![]).drop_without_applying_deltas();
+        let mut state = egui::TextEdit::load_state(&ctx, id).unwrap();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::two(
+                egui::text::CCursor::new(2),
+                egui::text::CCursor::new(3),
+            )));
+        state.store(&ctx, id);
+        frame(
+            &mut view,
+            &ctx,
+            vec![egui::Event::Key {
+                key: egui::Key::Backspace,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        )
+        .drop_without_applying_deltas();
+        view.diff_not_before = Some(Instant::now() + Duration::from_secs(1));
+        frame(&mut view, &ctx, vec![]).drop_without_applying_deltas();
+        assert_eq!(
+            view.editor_projection[0].as_ref().unwrap().text,
+            "!βsecond?old\nlater\n"
+        );
+        assert_eq!(
+            view.editor_projection[0].as_ref().unwrap().source_lines,
+            [1, 3]
+        );
+        assert!(view.filtered_merge_range_hidden(TwoWaySide::Left, &(1..4)));
+        // Real comparison results take over without resetting editing/history.
+        view.diff_not_before = None;
+        for _ in 0..100 {
+            view.poll_diff(&ctx);
+            if view.diff.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(view.diff.is_some() && view.pending_merge_presentation.is_none());
+        frame(&mut view, &ctx, vec![]).drop_without_applying_deltas();
+        assert_eq!(
+            view.editor_projection[0].as_ref().unwrap().text,
+            "!βsecond?old\nlater\n"
+        );
+        view.move_history(false);
+        assert_eq!(
+            view.working_text(0),
+            Some("prefix\n!β\nsecond?old\nsame\nlater\nsuffix\n")
+        );
+        view.set_run_diff(false);
+        assert!(view.pending_merge_presentation.is_none() && view.diff.is_none());
     }
 
     #[test]

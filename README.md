@@ -22,6 +22,8 @@ automatic chunks and inline line/chunk transfers remain available. Turn it on fo
 difference highlighting and navigation within the editors. Diff work is debounced
 for the open pair and can be cancelled. Turning
 Run Diff off cancels pending work and clears highlighting.
+Typing keeps the filtered view and existing diff decorations visible while updated
+comparison results are calculated in the background.
 The three comparison options (Show only differences, Ignore whitespace, Ignore
 line endings) have separate settings in Diff and Merge. Enabling Run Diff for the
 first time defaults all three to on; later toggles preserve your Merge choices
