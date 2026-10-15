@@ -98,7 +98,9 @@ Batch undo is atomic across participating files; undo newer edits or ignored-ran
 changes in those files first. Binary, non-text, and files over 32 MiB are skipped.
 Saving those changes remains explicit and uses the external-change check.
 Find and Replace opens a compact dialog centered on the app; click outside,
-press Escape, or use its close icon to dismiss it. The larger fields use muted,
+press Escape, or use its close icon to dismiss it. Reopening immediately reruns
+the current search, including changes made while it was closed. Unsaved edits take
+precedence over disk content. The larger fields use muted,
 italic placeholders. Choose **LEFT**, **RIGHT**, or **BOTH**; the side colors match
 the pane labels. **Match Case**, **Match Whole Word**, and **Use Regular Expression**
 are tooltip-equipped VS Code icons inside the Find field. Search starts after

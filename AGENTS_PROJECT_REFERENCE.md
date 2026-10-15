@@ -98,7 +98,9 @@ APIs and must fail cleanly when unavailable.
   matching drop targets.
   Typing starts search after 250 ms without edits. Search-option buttons, Refresh,
   Undo, and Redo start any needed search immediately; scope/view changes reuse
-  available results without restarting workers. Every search collects both sides.
+  available results without restarting workers. Reopening the modal immediately
+  reruns the current query, rereads clean files and repopulates exclusions while
+  retaining dirty working copies. Every search collects both sides.
   Empty queries and dismissal cancel pending searches. There is no separate Find
   action. Full-width fields have
   muted italic hints, colored LEFT/RIGHT/BOTH scope controls, inline search-option

@@ -202,18 +202,15 @@ impl FolderBrowser {
         self.sources.clone()
     }
     pub(super) fn open_search(&mut self) {
-        self.focus_find = !self.search_open;
-        if self.focus_find
-            && self
-                .results
-                .as_ref()
-                .is_some_and(|results| results.cancelled)
-        {
+        if !self.search_open {
+            self.focus_find = true;
+            self.search = None;
             self.results = None;
             self.selected_hits.clear();
-        }
-        if self.focus_find && self.results.is_none() && self.search.is_none() {
             self.searched_query = None;
+            self.error = None;
+            // Opening is an explicit action; only typing uses the debounce.
+            self.search_due_at = (!self.query.pattern.is_empty()).then_some(0.0);
         }
         self.search_open = true;
     }
@@ -2818,8 +2815,9 @@ mod tests {
         browser.open_search();
         dialog_frame_at(&mut browser, &mut view, &ctx, vec![], Some(10.0))
             .drop_without_applying_deltas();
-        assert_eq!(browser.search_due_at, Some(10.25));
-        assert!(browser.results.is_none());
+        assert!(browser.search_due_at.is_none());
+        assert_eq!(browser.searched_query, Some(browser.query.clone()));
+        assert!(browser.search.is_some());
     }
 
     #[test]
@@ -2920,13 +2918,100 @@ mod tests {
         browser.open_search();
         dialog_frame_at(&mut browser, &mut view, &ctx, vec![], Some(2.5))
             .drop_without_applying_deltas();
-        assert_eq!(
-            browser.search_due_at,
-            Some(2.75),
-            "reopening resumes the pending query after a fresh delay"
+        assert!(browser.search_due_at.is_none());
+        assert_eq!(browser.searched_query, Some(browser.query.clone()));
+        assert!(
+            browser.search.is_some(),
+            "reopening searches without a typing delay"
         );
-        assert!(browser.search.is_none());
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn reopening_completed_search_rereads_files_and_repopulates_exclusions() {
+        let root =
+            std::env::temp_dir().join(format!("versus-reopen-search-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("item.txt");
+        let ctx = egui::Context::default();
+        set_theme(&ctx, egui::Theme::Dark);
+        for folders in [false, true] {
+            fs::write(&path, "match old\n").unwrap();
+            let mut view = InteractiveView::default();
+            view.ingest_working_files(&BTreeMap::from([(
+                path.clone(),
+                load_working_file(Some(&path)).unwrap(),
+            )]));
+            let mut browser = FolderBrowser::new_search([
+                Some(if folders { root.clone() } else { path.clone() }),
+                None,
+            ]);
+            browser.query = SearchQuery::plain("match");
+            browser.replacement = "replacement".into();
+            browser.scope = SearchScope::Left;
+            let wait = |browser: &mut FolderBrowser| {
+                let deadline = Instant::now() + Duration::from_secs(3);
+                while browser.search.is_some() {
+                    browser.poll(&ctx);
+                    assert!(Instant::now() < deadline);
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                assert!(browser.results_current());
+            };
+            let close = |browser: &mut FolderBrowser, view: &mut InteractiveView| {
+                dialog_frame(
+                    browser,
+                    view,
+                    &ctx,
+                    vec![egui::Event::Key {
+                        key: egui::Key::Escape,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: Default::default(),
+                    }],
+                )
+                .drop_without_applying_deltas();
+                assert!(!browser.search_open);
+            };
+            browser.open_search();
+            dialog_frame(&mut browser, &mut view, &ctx, vec![]).drop_without_applying_deltas();
+            wait(&mut browser);
+            assert_eq!(browser.search_match_counts(), [1, 0]);
+            browser.selected_hits.clear();
+            close(&mut browser, &mut view);
+            fs::write(&path, "match new\nmatch added\n").unwrap();
+            browser.open_search();
+            assert!(!browser.results_current());
+            dialog_frame(&mut browser, &mut view, &ctx, vec![]).drop_without_applying_deltas();
+            assert!(browser.search.is_some() && browser.search_due_at.is_none());
+            wait(&mut browser);
+            assert_eq!(browser.search_match_counts(), [2, 0]);
+            assert_eq!(
+                browser.results.as_ref().unwrap().files[0].working_file.text,
+                "match new\nmatch added\n"
+            );
+            assert_eq!(browser.replacement, "replacement");
+            assert_eq!(browser.scope, SearchScope::Left);
+            close(&mut browser, &mut view);
+            let mut dirty = load_working_file(Some(&path)).unwrap();
+            dirty.text = "match in memory\n".into();
+            view.ingest_working_files(&BTreeMap::from([(path.clone(), dirty)]));
+            browser.open_search();
+            dialog_frame(&mut browser, &mut view, &ctx, vec![]).drop_without_applying_deltas();
+            wait(&mut browser);
+            assert_eq!(browser.search_match_counts(), [1, 0]);
+            assert_eq!(
+                browser.results.as_ref().unwrap().files[0].working_file.text,
+                "match in memory\n"
+            );
+            assert!(view.any_dirty());
+            assert_eq!(
+                fs::read_to_string(&path).unwrap(),
+                "match new\nmatch added\n"
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2977,6 +3062,7 @@ mod tests {
         view.set_editing(true, [true; 3]);
         let mut browser =
             FolderBrowser::new_with_sources([Some(root.join("left")), Some(root.join("right"))]);
+        browser.open_search();
         browser.query = SearchQuery::plain("foo");
         browser.replacement = "long value".into();
         browser.searched_query = Some(browser.query.clone());
@@ -3000,7 +3086,6 @@ mod tests {
             .collect();
         let ctx = egui::Context::default();
         set_theme(&ctx, egui::Theme::Dark);
-        browser.open_search();
         for _ in 0..3 {
             dialog_frame(&mut browser, &mut view, &ctx, vec![]).drop_without_applying_deltas();
         }
