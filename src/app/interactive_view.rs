@@ -19,8 +19,7 @@ use versus::{
 #[derive(Clone)]
 struct CachedPair {
     scroll: [f32; 2],
-    selected: [Range<usize>; 2],
-    destination: [usize; 2],
+    caret: [usize; 2],
     expanded: [Vec<u64>; 2],
 }
 #[derive(Clone)]
@@ -100,9 +99,7 @@ pub(super) struct InteractiveView {
     folder_difference_index: Option<usize>,
     folder_jump: Option<PathBuf>,
     expanded: [Vec<u64>; 2],
-    selected: [Range<usize>; 2],
-    destination: [usize; 2],
-    replace: bool,
+    caret: [usize; 2],
     scroll: [f32; 2],
     pending_navigation_scroll: [bool; 2],
     generation: u64,
@@ -198,8 +195,7 @@ impl InteractiveView {
         self.side_generation[side] = self.side_generation[side].wrapping_add(1);
         self.scroll[side] = 0.0;
         self.pending_navigation_scroll[side] = false;
-        self.selected[side] = 0..0;
-        self.destination[side] = 0;
+        self.caret[side] = 0;
         self.expanded[side].clear();
         self.activate_side_workspace();
         let Some(path) = path else {
@@ -496,27 +492,6 @@ impl InteractiveView {
             .max()
             .unwrap_or(0)
     }
-    pub(super) fn folder_ignored_ranges(&self) -> BTreeMap<PathBuf, Vec<Range<usize>>> {
-        let mut ranges: BTreeMap<_, _> = self
-            .documents
-            .iter()
-            .map(|(identity, retained)| {
-                (
-                    identity.clone(),
-                    retained.document.ignored_ranges().to_vec(),
-                )
-            })
-            .collect();
-        if let (Some(files), Some(workspace)) = (&self.files, &self.workspace) {
-            for side in 0..2 {
-                ranges.insert(
-                    files[side].identity_key(),
-                    workspace.ignored_ranges(side_of(side)).to_vec(),
-                );
-            }
-        }
-        ranges
-    }
     pub(super) fn folder_document_revisions(&self) -> BTreeMap<PathBuf, u64> {
         let mut revisions: BTreeMap<_, _> = self
             .documents
@@ -621,9 +596,7 @@ impl InteractiveView {
         self.workspace = Some(TwoWayWorkspace::from_documents(documents));
         for side in 0..2 {
             let count = self.workspace.as_ref().unwrap().line_count(side_of(side));
-            self.destination[side] = self.destination[side].min(count);
-            self.selected[side] =
-                self.selected[side].start.min(count)..self.selected[side].end.min(count);
+            self.caret[side] = self.caret[side].min(count);
         }
     }
     fn refresh_partial_active(&mut self) {
@@ -640,9 +613,7 @@ impl InteractiveView {
         self.workspace = Some(TwoWayWorkspace::from_documents(documents));
         for side in 0..2 {
             let count = self.workspace.as_ref().unwrap().line_count(side_of(side));
-            self.destination[side] = self.destination[side].min(count);
-            self.selected[side] =
-                self.selected[side].start.min(count)..self.selected[side].end.min(count);
+            self.caret[side] = self.caret[side].min(count);
         }
     }
     fn activate_pair(&mut self, paths: [PathBuf; 2]) {
@@ -656,13 +627,11 @@ impl InteractiveView {
             .unwrap_or([None, None]);
         if let Some(presentation) = self.cache.get(&paths) {
             self.scroll = presentation.scroll;
-            self.selected = presentation.selected.clone();
-            self.destination = presentation.destination;
+            self.caret = presentation.caret;
             self.expanded = presentation.expanded.clone();
         } else {
             self.scroll = [0.0; 2];
-            self.selected = [0..0, 0..0];
-            self.destination = [0; 2];
+            self.caret = [0; 2];
             self.expanded = [Vec::new(), Vec::new()];
         }
         self.generation = self.generation.wrapping_add(1);
@@ -697,9 +666,7 @@ impl InteractiveView {
             self.workspace = Some(TwoWayWorkspace::from_documents(documents));
             for side in 0..2 {
                 let count = self.workspace.as_ref().unwrap().line_count(side_of(side));
-                self.destination[side] = self.destination[side].min(count);
-                self.selected[side] =
-                    self.selected[side].start.min(count)..self.selected[side].end.min(count);
+                self.caret[side] = self.caret[side].min(count);
             }
         } else {
             self.workspace = None;
@@ -799,13 +766,13 @@ impl InteractiveView {
                     ));
                 }
                 // Refresh only the staged clone. All participants must pass
-                // their protected-range and preview checks before publication.
+                // their byte-range and snapshot checks before publication.
                 // A separate history entry makes batch Undo return to fresh
                 // disk text while retaining older editor history.
                 if let Some(edit) = external_refresh_edit(retained.document.text(), &base.text) {
                     retained.document.apply_byte_edits(
                         HistoryTag::Local(retained.document.revision()), vec![edit],
-                    ).map_err(|error| format!("{} cannot refresh protected content: {error}. Adjust the ignored ranges before replacing it.", change.path.display()))?;
+                    ).map_err(|error| format!("{} cannot refresh content: {error}. Refresh search before replacing it.", change.path.display()))?;
                 }
                 retained.document.mark_saved_text(base.text.clone());
                 let native_path = retained.file.path.clone();
@@ -849,7 +816,10 @@ impl InteractiveView {
     fn move_batch(&mut self, id: u64, redo: bool) -> Result<(), String> {
         self.publish_active();
         if !self.batch_available(id, redo) {
-            return Err("Undo newer edits or range changes in the batch files before moving this replacement transaction.".into());
+            return Err(
+                "Undo newer edits in the batch files before moving this replacement transaction."
+                    .into(),
+            );
         }
         for path in &self.batches[&id] {
             let document = &mut self.documents.get_mut(path).unwrap().document;
@@ -982,68 +952,13 @@ impl InteractiveView {
         self.diff_dirty = self.engine_enabled();
         self.diff_not_before = Some(Instant::now() + Duration::from_millis(150));
     }
-    #[cfg(test)]
-    pub(super) fn validate_search_changes(
-        &self,
-        changes: &[versus::SearchChange],
-    ) -> Result<(), String> {
-        let validate = |paths: &[PathBuf; 2], workspace: &TwoWayWorkspace| {
-            for change in changes {
-                for side in 0..2 {
-                    if paths[side] != change.path {
-                        continue;
-                    }
-                    let segments = text_segments(&change.before);
-                    for protected in workspace.ignored_ranges(side_of(side)) {
-                        let start: usize = segments
-                            .iter()
-                            .take(protected.start)
-                            .map(|(text, ending)| text.len() + ending.len())
-                            .sum();
-                        let end: usize = segments
-                            .iter()
-                            .take(protected.end)
-                            .map(|(text, ending)| text.len() + ending.len())
-                            .sum();
-                        if change.ranges.iter().any(|range| {
-                            if range.is_empty() {
-                                start < range.start && range.start < end
-                            } else {
-                                range.start < end && start < range.end
-                            }
-                        }) {
-                            return Err(format!(
-                                "{}: replacement overlaps protected lines. Adjust the selected matches or ignored ranges.",
-                                change.path.display()
-                            ));
-                        }
-                    }
-                }
-            }
-            Ok(())
-        };
-        if let (Some(paths), Some(workspace)) = (&self.paths, &self.workspace) {
-            validate(paths, workspace)?;
-        }
-        for retained in self.documents.values() {
-            if let Some(path) = &retained.file.path {
-                let facade = TwoWayWorkspace::from_documents([
-                    retained.document.clone(),
-                    InteractiveDocument::new(""),
-                ]);
-                validate(&[path.clone(), PathBuf::new()], &facade)?;
-            }
-        }
-        Ok(())
-    }
     fn cache_active(&mut self) {
         if let Some(paths) = &self.paths {
             self.cache.insert(
                 paths.clone(),
                 CachedPair {
                     scroll: self.scroll,
-                    selected: self.selected.clone(),
-                    destination: self.destination,
+                    caret: self.caret,
                     expanded: self.expanded.clone(),
                 },
             );
@@ -1082,10 +997,6 @@ impl InteractiveView {
                 workspace.text(TwoWaySide::Left).to_owned(),
                 workspace.text(TwoWaySide::Right).to_owned(),
             ];
-            let ignored = [
-                workspace.ignored_ranges(TwoWaySide::Left).to_vec(),
-                workspace.ignored_ranges(TwoWaySide::Right).to_vec(),
-            ];
             let preferences = if self.editing {
                 self.merge_options
             } else {
@@ -1101,13 +1012,9 @@ impl InteractiveView {
             let worker_cancel = cancel.clone();
             let (sender, receiver) = mpsc::channel();
             std::thread::spawn(move || {
-                let result = compare_loaded_text(
-                    [&text[0], &text[1]],
-                    &worker_cancel,
-                    &options,
-                    [&ignored[0], &ignored[1]],
-                )
-                .map_err(|e| e.to_string());
+                let result =
+                    compare_loaded_text([&text[0], &text[1]], &worker_cancel, &options, [&[], &[]])
+                        .map_err(|e| e.to_string());
                 let _ = sender.send(result);
             });
             self.diff_job = Some(DiffJob {
@@ -1227,7 +1134,7 @@ impl InteractiveView {
         {
             &self.status
         } else if self.editing {
-            "Select content and a destination to transfer."
+            "Use chunk or line arrows to transfer content."
         } else {
             "Inspect differences between the open files."
         }
@@ -1733,18 +1640,12 @@ impl InteractiveView {
         let pane_clip = ui.clip_rect();
         ui.scope_builder(egui::UiBuilder::new().max_rect(content), |ui| {
             ui.set_clip_rect(content.intersect(pane_clip));
-            egui::ScrollArea::vertical()
-                .id_salt(("merge-pane-controls", self.side_generation[side], side))
-                .max_height(height)
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    self.editor(
-                        ui,
-                        side,
-                        height,
-                        track.map(|rect| rect.intersect(pane_clip)),
-                    );
-                });
+            self.editor(
+                ui,
+                side,
+                height,
+                track.map(|rect| rect.intersect(pane_clip)),
+            );
         });
     }
     fn ensure_readonly_presentation(&mut self, ui: &egui::Ui) {
@@ -2037,12 +1938,6 @@ impl InteractiveView {
         let text_padding = ((row_height - text_height) / 2.0).max(0.0);
         let count = self.workspace.as_ref().unwrap().line_count(source);
         let chunks = self.workspace.as_ref().unwrap().chunks(source);
-        let ignored = self
-            .workspace
-            .as_ref()
-            .unwrap()
-            .ignored_ranges(source)
-            .to_vec();
         let navigation_line = self.navigation_lines(ui.ctx())[side];
         let mut max_line_number = count;
         let changed: BTreeMap<usize, (DirectoryEntryState, Vec<Range<usize>>)> = self
@@ -2166,7 +2061,7 @@ impl InteractiveView {
                 )
             });
         let merge_controls = self.editing && self.has_actual_pair();
-        let text_height = (height - if merge_controls { 150.0 } else { 5.0 }).max(60.0);
+        let text_height = (height - 5.0).max(60.0);
         let content_height = (visible_lines.len().max(1) as f32 * row_height).max(row_height);
         if std::mem::take(&mut self.pending_navigation_scroll[side]) {
             // TextEdit paints inside ScrollArea, before its final offset clamp.
@@ -2177,7 +2072,6 @@ impl InteractiveView {
             self.scroll[side] = self.scroll[side].min((content_height - text_height).max(0.0));
         }
         let mut pending_transfer = None;
-        let mut pending_context = None;
         let output = egui::ScrollArea::vertical()
             .id_salt(("two-way-scroll", self.side_generation[side], side))
             .auto_shrink([false, false])
@@ -2236,7 +2130,11 @@ impl InteractiveView {
                         highlight_slots.push((
                             slot,
                             display_line,
-                            displayed_lines.get(line).copied().unwrap_or_default().to_owned(),
+                            displayed_lines
+                                .get(line)
+                                .copied()
+                                .unwrap_or_default()
+                                .to_owned(),
                             ranges.clone(),
                             state.clone(),
                         ));
@@ -2248,22 +2146,14 @@ impl InteractiveView {
                     let mut layouter = |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, _: f32| {
                         let mut job = egui::text::LayoutJob::default();
                         job.wrap.max_width = f32::INFINITY;
-                        for (display_line, line) in buffer.as_str().split_inclusive('\n').enumerate() {
-                            let index = visible_lines.get(display_line).copied().unwrap_or(display_line);
-                            let protected = ignored.iter().any(|r| r.contains(&index));
-                            if protected {
-                                job.append(
-                                    line,
-                                    0.0,
-                                    egui::TextFormat {
-                                        font_id: font.clone(),
-                                        color: palette.muted,
-                                        background: palette.muted.gamma_multiply(0.15),
-                                        line_height: Some(row_height),
-                                        ..Default::default()
-                                    },
-                                );
-                            } else if let Some((state, ranges)) = changed.get(&index) {
+                        for (display_line, line) in
+                            buffer.as_str().split_inclusive('\n').enumerate()
+                        {
+                            let index = visible_lines
+                                .get(display_line)
+                                .copied()
+                                .unwrap_or(display_line);
+                            if let Some((state, ranges)) = changed.get(&index) {
                                 super::file_style::append_text_without_inline_background(
                                     &mut job,
                                     line,
@@ -2284,10 +2174,18 @@ impl InteractiveView {
                                     Some(row_height),
                                 );
                             } else {
-                                append_code_line(&mut job, line, egui::TextFormat {
-                                    font_id: font.clone(), color: palette.text,
-                                    line_height: Some(row_height), ..Default::default()
-                                }, syntax, palette);
+                                append_code_line(
+                                    &mut job,
+                                    line,
+                                    egui::TextFormat {
+                                        font_id: font.clone(),
+                                        color: palette.text,
+                                        line_height: Some(row_height),
+                                        ..Default::default()
+                                    },
+                                    syntax,
+                                    palette,
+                                );
                             }
                         }
                         if job.text.is_empty() {
@@ -2321,8 +2219,10 @@ impl InteractiveView {
                     text_scroll_x = horizontal.state.offset.x;
                     text_clip = horizontal.inner_rect.intersect(ui.clip_rect());
                     let highlight_clip = Rect::from_min_max(
-                        egui::pos2(text_clip.left(), text_clip.top() - text_padding), text_clip.max,
-                    ).intersect(ui.clip_rect());
+                        egui::pos2(text_clip.left(), text_clip.top() - text_padding),
+                        text_clip.max,
+                    )
+                    .intersect(ui.clip_rect());
                     let highlight_painter = ui.painter().with_clip_rect(highlight_clip);
                     for (slot, display_line, text, ranges, state) in highlight_slots.drain(..) {
                         let shapes = super::file_style::inline_highlight_rects(
@@ -2339,10 +2239,10 @@ impl InteractiveView {
                         .into_iter()
                         .map(|rect| {
                             egui::Shape::rect_filled(
-                                    rect,
-                                    0.0,
-                                    state_color(&state, palette).gamma_multiply(0.3),
-                                )
+                                rect,
+                                0.0,
+                                state_color(&state, palette).gamma_multiply(0.3),
+                            )
                         })
                         .collect();
                         highlight_painter.set(slot, egui::Shape::Vec(shapes));
@@ -2351,72 +2251,18 @@ impl InteractiveView {
                     if edit.response.has_focus() {
                         self.selected_side = side;
                         if let Some(cursor) = edit.cursor_range {
-                            let a: usize = cursor.primary.index.min(cursor.secondary.index).into();
-                            let b: usize = cursor.primary.index.max(cursor.secondary.index).into();
-                            let a_line = next
-                                .chars()
-                                .take(a)
-                                .filter(|c| *c == '\n')
-                                .count()
-                                .min(text_segments(&next).len());
-                            let b_line = next
-                                .chars()
-                                .take(b)
-                                .filter(|c| *c == '\n')
-                                .count()
-                                .min(text_segments(&next).len());
-                            let source_at = |display_line: usize, at_end: bool| {
-                                visible_lines.get(display_line).copied().unwrap_or_else(|| {
-                                    visible_lines
-                                        .last()
-                                        .map(|line| line + usize::from(at_end))
-                                        .unwrap_or(0)
-                                })
-                            };
-                            let a_source = source_at(a_line, true);
-                            self.destination[side] = a_source;
-                            // A cursor is an insertion target; a selection is an explicit replacement target.
-                            let at_line_start = b == 0 || next.chars().take(b).last() == Some('\n');
-                            let b_source = if at_line_start {
-                                source_at(b_line, true)
-                            } else {
-                                source_at(b_line, true).saturating_add(1)
-                            };
-                            let selected = if a == b {
-                                a_source..a_source
-                            } else {
-                                a_source..b_source
-                            };
-                            let selection_crosses_hidden = !selected.is_empty()
-                                && visible_lines
-                                    .iter()
-                                    .filter(|line| selected.contains(line))
-                                    .copied()
-                                    .collect::<Vec<_>>()
-                                    .windows(2)
-                                    .any(|pair| pair[1] != pair[0] + 1);
-                            if selection_crosses_hidden {
-                                self.selected[side] = a_source..a_source;
-                                self.error = Some(
-                                    "Selection crosses hidden unchanged lines. Turn off Show only differences to edit or transfer across them.".into(),
-                                );
-                            } else {
-                                self.selected[side] = selected;
-                            };
+                            let position: usize = cursor.primary.index.into();
+                            let display_line =
+                                next.chars().take(position).filter(|c| *c == '\n').count();
+                            self.caret[side] = visible_lines
+                                .get(display_line)
+                                .copied()
+                                .unwrap_or_else(|| visible_lines.last().map_or(0, |line| line + 1));
                         }
                     }
                 });
                 for (display_line, &line) in visible_lines.iter().enumerate() {
                     let y = origin.y + display_line as f32 * row_height;
-                    if ignored.iter().any(|r| r.contains(&line)) {
-                        ui.painter().line_segment(
-                            [
-                                egui::pos2(numbers_x + 2.0, y + 2.0),
-                                egui::pos2(numbers_x + 2.0, y + row_height - 2.0),
-                            ],
-                            Stroke::new(2.0, palette.changed),
-                        );
-                    }
                     if let Some(ending) = ending_differences.get(&line) {
                         let text = displayed_lines.get(line).copied().unwrap_or_default();
                         let mut ending_job = egui::text::LayoutJob::default();
@@ -2437,7 +2283,8 @@ impl InteractiveView {
                             font.clone(),
                             Some(row_height),
                         );
-                        let end_x = text_x - text_scroll_x + ui.painter().layout_job(ending_job).size().x;
+                        let end_x =
+                            text_x - text_scroll_x + ui.painter().layout_job(ending_job).size().x;
                         super::file_style::paint_ending(
                             &ui.painter().with_clip_rect(text_clip),
                             Rect::from_min_size(
@@ -2464,56 +2311,49 @@ impl InteractiveView {
                                 vec![run.start]
                             };
                             for line in lines {
-                            let display_line = visible_lines
-                                .iter()
-                                .position(|visible| *visible == line)
-                                .unwrap();
-                            let y = origin.y + display_line as f32 * row_height;
-                            let track = track.expect("loaded merge pair has transfer tracks");
-                            let track_clip = Rect::from_min_max(
-                                egui::pos2(track.left(), track.top().max(ui.clip_rect().top())),
-                                egui::pos2(track.right(), track.bottom().min(ui.clip_rect().bottom())),
-                            );
-                            let rect = Rect::from_min_size(
-                                egui::pos2(track.center().x - 15.0, y),
-                                egui::vec2(30.0, row_height),
-                            );
-                            ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
-                                ui.set_clip_rect(track_clip);
-                                let tooltip=if expanded{format!("Copy line {} to the chosen target",line+1)}else{format!("Copy chunk {}–{} to the chosen target · Right-click for chunk controls",run.start+1,run.end)};
-                                let response=transfer_action(ui,rect,egui::Id::new(("two-way-transfer",side,chunk.id,line)),side,&tooltip);
-                                if response.clicked() {
-                                    pending_transfer = Some(if expanded {
-                                        line..line + 1
+                                let display_line = visible_lines
+                                    .iter()
+                                    .position(|visible| *visible == line)
+                                    .unwrap();
+                                let y = origin.y + display_line as f32 * row_height;
+                                let track = track.expect("loaded merge pair has transfer tracks");
+                                let track_clip = Rect::from_min_max(
+                                    egui::pos2(track.left(), track.top().max(ui.clip_rect().top())),
+                                    egui::pos2(
+                                        track.right(),
+                                        track.bottom().min(ui.clip_rect().bottom()),
+                                    ),
+                                );
+                                let rect = Rect::from_min_size(
+                                    egui::pos2(track.center().x - 15.0, y),
+                                    egui::vec2(30.0, row_height),
+                                );
+                                ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                                    ui.set_clip_rect(track_clip);
+                                    let tooltip = if expanded {
+                                        format!("Copy line {} at the other pane’s cursor", line + 1)
                                     } else {
-                                        run.clone()
-                                    });
-                                }
-                                response.context_menu(|ui| {
-                                    if ui.button("Select this chunk").clicked() {
-                                        self.selected[side] = run.clone();
-                                        ui.close();
-                                    }
-                                    if ui.button("Split at selected line").clicked() {
-                                        pending_context = Some((0, chunk.id));
-                                        ui.close();
-                                    }
-                                    if ui.button("Adjust to selected range").clicked() {
-                                        pending_context = Some((1, chunk.id));
-                                        ui.close();
-                                    }
-                                    if ui.button("Combine with next chunk").clicked() {
-                                        pending_context = Some((2, chunk.id));
-                                        ui.close();
-                                    }
-                                    if self.diff.is_some()
-                                        && ui.button("Suggest corresponding destination").clicked()
-                                    {
-                                        self.suggest_target(source, run.clone());
-                                        ui.close();
+                                        format!(
+                                            "Copy chunk {}–{} at the other pane’s cursor",
+                                            run.start + 1,
+                                            run.end
+                                        )
+                                    };
+                                    let response = transfer_action(
+                                        ui,
+                                        rect,
+                                        egui::Id::new(("two-way-transfer", side, chunk.id, line)),
+                                        side,
+                                        &tooltip,
+                                    );
+                                    if response.clicked() {
+                                        pending_transfer = Some(if expanded {
+                                            line..line + 1
+                                        } else {
+                                            run.clone()
+                                        });
                                     }
                                 });
-                            });
                             }
                         }
                         let first_visible = runs[0].start;
@@ -2522,11 +2362,25 @@ impl InteractiveView {
                             .position(|line| *line == first_visible)
                             .unwrap();
                         let toggle = Rect::from_min_size(
-                            egui::pos2(gutter_x + 5.0, origin.y + first_display as f32 * row_height),
+                            egui::pos2(
+                                gutter_x + 5.0,
+                                origin.y + first_display as f32 * row_height,
+                            ),
                             egui::vec2(21.0, row_height),
                         );
                         ui.scope_builder(egui::UiBuilder::new().max_rect(toggle), |ui| {
-                            if inline_action(ui,toggle,egui::Id::new(("two-way-granularity",side,chunk.id)),if expanded{"−"}else{"+"},if expanded{"Return to chunk controls"}else{"Show an arrow for each line"}).clicked()
+                            if inline_action(
+                                ui,
+                                toggle,
+                                egui::Id::new(("two-way-granularity", side, chunk.id)),
+                                if expanded { "−" } else { "+" },
+                                if expanded {
+                                    "Return to chunk controls"
+                                } else {
+                                    "Show an arrow for each line"
+                                },
+                            )
+                            .clicked()
                             {
                                 if expanded {
                                     self.expanded[side].retain(|id| *id != chunk.id);
@@ -2592,168 +2446,10 @@ impl InteractiveView {
             }
             // The gutter geometry was rendered for the previous text.
             pending_transfer = None;
-            pending_context = None;
         }
         if let Some(range) = pending_transfer {
             self.transfer(source, range);
         }
-        if let Some((action, id)) = pending_context {
-            let range = self.selected[side].clone();
-            let workspace = self.workspace.as_mut().unwrap();
-            let result = match action {
-                0 => workspace.split_chunk(source, id, range.start).map(|_| ()),
-                1 => workspace.adjust_chunk(source, id, range).map(|_| ()),
-                _ => chunks
-                    .iter()
-                    .position(|c| c.id == id)
-                    .and_then(|i| chunks.get(i + 1))
-                    .ok_or(versus::TwoWayMergeError::CannotCombineChunks)
-                    .and_then(|next| workspace.combine_chunks(source, id, next.id).map(|_| ())),
-            };
-            if let Err(error) = result {
-                self.error = Some(error.to_string());
-            }
-        }
-        if merge_controls {
-            self.chunk_controls(ui, side);
-        }
-    }
-    fn chunk_controls(&mut self, ui: &mut egui::Ui, side: usize) {
-        let source = side_of(side);
-        let count = self.workspace.as_ref().unwrap().line_count(source);
-        let mut range = self.selected[side].clone();
-        ui.horizontal_wrapped(|ui| {
-            let mut start = range.start + 1;
-            let mut end = range.end;
-            ui.label("Selected lines");
-            if ui
-                .add(egui::DragValue::new(&mut start).range(1..=count.max(1)))
-                .changed()
-            {
-                range.start = start - 1;
-            }
-            if ui
-                .add(egui::DragValue::new(&mut end).range(0..=count))
-                .changed()
-            {
-                range.end = end;
-            }
-            range.start = range.start.min(range.end);
-            if ui
-                .add_enabled(
-                    !range.is_empty(),
-                    egui::Button::new(if side == 0 {
-                        "Transfer →"
-                    } else {
-                        "← Transfer"
-                    }),
-                )
-                .on_hover_text("Copy selected lines to the other pane's chosen destination")
-                .clicked()
-            {
-                self.transfer(source, range.clone());
-            }
-        });
-        self.selected[side] = range.clone();
-        ui.horizontal_wrapped(|ui| {
-            let mut at = self.destination[side] + 1;
-            ui.label("Insert before line");
-            if ui
-                .add(egui::DragValue::new(&mut at).range(1..=count + 1))
-                .changed()
-            {
-                self.destination[side] = at - 1;
-            }
-            ui.checkbox(&mut self.replace, "Replace selected target")
-                .on_hover_cursor(egui::CursorIcon::PointingHand)
-                .on_hover_text("Requires an explicit nonempty selection in the destination pane");
-        });
-        ui.horizontal_wrapped(|ui| {
-            if ui
-                .add_enabled(!range.is_empty(), egui::Button::new("Create chunk"))
-                .clicked()
-            {
-                match self
-                    .workspace
-                    .as_mut()
-                    .unwrap()
-                    .create_chunk(source, range.clone())
-                {
-                    Ok(_) => {}
-                    Err(e) => self.error = Some(e.to_string()),
-                }
-            }
-            if ui
-                .add_enabled(!range.is_empty(), egui::Button::new("Ignore range"))
-                .clicked()
-            {
-                match self
-                    .workspace
-                    .as_mut()
-                    .unwrap()
-                    .add_ignored_range(source, range.clone())
-                {
-                    Ok(_) => self.invalidate_diff(),
-                    Err(e) => self.error = Some(e.to_string()),
-                }
-            }
-            if ui.button("Manage ignored…").clicked() {
-                ui.memory_mut(|m| {
-                    m.data
-                        .insert_temp(egui::Id::new(("ignored-manager", side)), true)
-                });
-            }
-        });
-        let id = egui::Id::new(("ignored-manager", side));
-        let mut open = ui.memory(|m| m.data.get_temp::<bool>(id)).unwrap_or(false);
-        if open {
-            let ranges = self
-                .workspace
-                .as_ref()
-                .unwrap()
-                .ignored_ranges(source)
-                .to_vec();
-            let window = egui::Window::new(if side == 0 {
-                "Left ignored ranges"
-            } else {
-                "Right ignored ranges"
-            })
-            .id(id)
-            .open(&mut open)
-            .show(ui.ctx(), |ui| {
-                ui.label("Ignored lines remain in the file and are protected from transfers.");
-                for existing in ranges {
-                    ui.horizontal(|ui| {
-                        ui.label(format!("Lines {}–{}", existing.start + 1, existing.end));
-                        if ui.button("Remove").clicked() {
-                            self.workspace
-                                .as_mut()
-                                .unwrap()
-                                .remove_ignored_range(source, existing.clone());
-                            self.invalidate_diff();
-                        }
-                        if ui
-                            .add_enabled(!range.is_empty(), egui::Button::new("Use selection"))
-                            .clicked()
-                        {
-                            if let Err(e) = self.workspace.as_mut().unwrap().update_ignored_range(
-                                source,
-                                existing.clone(),
-                                range.clone(),
-                            ) {
-                                self.error = Some(e.to_string());
-                            } else {
-                                self.invalidate_diff();
-                            }
-                        }
-                    });
-                }
-            });
-            if let Some(window) = window {
-                window_button_cursor(ui.ctx(), window.response.layer_id);
-            }
-        }
-        ui.memory_mut(|m| m.data.insert_temp(id, open));
     }
     fn footer(&mut self, ui: &mut egui::Ui) -> Rect {
         let icons = self.footer_legend_icons();
@@ -2859,48 +2555,24 @@ impl InteractiveView {
         }
         let dest = source.other();
         let side = side_index(dest);
-        let target = if self.replace {
-            let selected = self.selected[side].clone();
-            if selected.is_empty() {
-                self.error = Some("Select destination lines before replacing content.".into());
-                return;
-            }
-            selected
-        } else {
-            let at = self.destination[side].min(self.workspace.as_ref().unwrap().line_count(dest));
-            at..at
-        };
-        let placement = if self.replace {
-            TransferPlacement::Replace
-        } else {
-            TransferPlacement::Insert
-        };
-        if self.filtered_merge_range_hidden(source, &range)
-            || (self.replace && self.filtered_merge_range_hidden(dest, &target))
-        {
-            self.error = Some(
-                "That transfer crosses hidden unchanged lines. Turn off Show only differences to transfer the full range.".into(),
-            );
+        let at = self.caret[side].min(self.workspace.as_ref().unwrap().line_count(dest));
+        let target = at..at;
+        if self.filtered_merge_range_hidden(source, &range) {
+            self.error = Some("That transfer crosses hidden unchanged lines. Turn off Show only differences to transfer the full range.".into());
             return;
         }
         let old_count = self.workspace.as_ref().unwrap().line_count(dest);
-        match self
-            .workspace
-            .as_mut()
-            .unwrap()
-            .transfer(source, range, target.clone(), placement)
-        {
+        match self.workspace.as_mut().unwrap().transfer(
+            source,
+            range,
+            target.clone(),
+            TransferPlacement::Insert,
+        ) {
             Ok(()) => {
                 let new_count = self.workspace.as_ref().unwrap().line_count(dest);
                 let inserted = (new_count as isize - old_count as isize + target.len() as isize)
                     .max(0) as usize;
-                if self.replace {
-                    self.selected[side] = target.start + inserted..target.start + inserted;
-                } else {
-                    self.selected[side] =
-                        remap_target(self.selected[side].clone(), target.clone(), inserted);
-                }
-                self.destination[side] = target.start + inserted;
+                self.caret[side] = target.start + inserted;
                 self.activate_editor(side);
                 self.error = None;
                 self.status = "Transferred into the working copy. Save when ready.".into();
@@ -2927,42 +2599,6 @@ impl InteractiveView {
             })
         })
     }
-    fn suggest_target(&mut self, source: TwoWaySide, range: Range<usize>) {
-        let Some(diff) = &self.diff else {
-            return;
-        };
-        let mut target = Vec::new();
-        let mut preceding = 0;
-        for row in &diff.rows {
-            let (from, to) = if source == TwoWaySide::Left {
-                (&row.left, &row.right)
-            } else {
-                (&row.right, &row.left)
-            };
-            if let Some((number, _)) = from {
-                let line = number - 1;
-                if line < range.start {
-                    if let Some((n, _)) = to {
-                        preceding = *n;
-                    }
-                } else if range.contains(&line) {
-                    if let Some((n, _)) = to {
-                        target.push(n - 1);
-                    }
-                }
-            }
-        }
-        let side = side_index(source.other());
-        self.selected[side] = target
-            .first()
-            .zip(target.last())
-            .map(|(a, b)| *a..*b + 1)
-            .unwrap_or(preceding..preceding);
-        self.destination[side] = self.selected[side].start;
-        self.sync_editor_cursor(side);
-        self.status =
-            "Suggested destination selected. Choose insertion or explicit replacement.".into();
-    }
     fn copy_all(&mut self, source: TwoWaySide) {
         if !self.has_actual_pair() {
             return;
@@ -2979,8 +2615,7 @@ impl InteractiveView {
             Ok(()) => {
                 let count = self.workspace.as_ref().unwrap().line_count(dest);
                 let side = side_index(dest);
-                self.destination[side] = count;
-                self.selected[side] = count..count;
+                self.caret[side] = count;
                 self.activate_editor(side);
                 self.invalidate_diff();
                 self.error = None;
@@ -2996,31 +2631,18 @@ impl InteractiveView {
             .text(side_of(side))
             .replace("\r\n", "\n")
             .replace('\r', "\n");
-        let range = &self.selected[side];
-        let at = if range.is_empty() {
-            self.destination[side]
-        } else {
-            range.start
-        };
-        let offset = |line: usize| {
-            text.split_inclusive('\n')
-                .take(line)
-                .map(|line| line.chars().count())
-                .sum::<usize>()
-        };
-        let a = offset(at);
-        let b = if range.is_empty() {
-            a
-        } else {
-            offset(range.end)
-        };
+        let at = self.caret[side];
+        let offset = text
+            .split_inclusive('\n')
+            .take(at)
+            .map(|line| line.chars().count())
+            .sum::<usize>();
         let id = egui::Id::new(("two-way-edit", self.side_generation[side], side));
         let mut state = egui::TextEdit::load_state(ctx, id).unwrap_or_default();
         state
             .cursor
-            .set_char_range(Some(egui::text::CCursorRange::two(
-                egui::text::CCursor::new(a),
-                egui::text::CCursor::new(b),
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(offset),
             )));
         state.clear_undoer();
         state.store(ctx, id);
@@ -3175,7 +2797,7 @@ impl InteractiveView {
 }
 /// A bounded text splice for reconciling a clean cache with fresh disk bytes.
 /// This does not run the diff engine. Conservative overlap checks are delegated
-/// to the document, preserving protected content and history.
+/// to the document, preserving byte boundaries and history.
 fn external_refresh_edit(before: &str, after: &str) -> Option<(Range<usize>, String)> {
     if before == after {
         return None;
@@ -3212,19 +2834,6 @@ fn retained_file(file: WorkingFile) -> RetainedFile {
 }
 fn file_key(path: &std::path::Path) -> PathBuf {
     versus::working_file_key(path)
-}
-fn remap_target(range: Range<usize>, target: Range<usize>, inserted: usize) -> Range<usize> {
-    let delta = inserted as isize - target.len() as isize;
-    let map = |line: usize| {
-        if line < target.start {
-            line
-        } else if line >= target.end {
-            line.saturating_add_signed(delta)
-        } else {
-            target.start + inserted
-        }
-    };
-    map(range.start)..map(range.end)
 }
 fn inline_action(
     ui: &egui::Ui,
@@ -3299,21 +2908,6 @@ fn transfer_action(
         .on_hover_text(label)
 }
 
-fn window_button_cursor(ctx: &egui::Context, layer: egui::LayerId) {
-    // egui's built-in window close/collapse controls bypass interact_cursor.
-    // Limit this fallback to click-only controls so window dragging, resizing,
-    // and text editing retain their own cursors.
-    let hovered =
-        ctx.interaction_snapshot(|snapshot| snapshot.hovered.iter().copied().collect::<Vec<_>>());
-    for id in hovered {
-        if let Some(response) = ctx.read_response(id)
-            && response.layer_id == layer
-            && response.sense == Sense::click()
-        {
-            response.on_hover_cursor(egui::CursorIcon::PointingHand);
-        }
-    }
-}
 fn append_code_line(
     job: &mut egui::text::LayoutJob,
     line: &str,
@@ -3804,48 +3398,23 @@ mod tests {
         assert_eq!(view.change_label(), "Change 1 of 2");
     }
     #[test]
-    fn keyboard_edit_before_repeated_protected_lines_uses_cursor_anchor() {
+    fn keyboard_edit_before_repeated_lines_preserves_caret_endings_and_history() {
         let ctx = egui::Context::default();
         let mut view = view("x\r\nx\np\r", "right\n");
-        view.workspace
-            .as_mut()
-            .unwrap()
-            .add_ignored_range(TwoWaySide::Left, 1..2)
-            .unwrap();
         frame(&mut view, &ctx, vec![]).drop_without_applying_deltas();
-        view.destination[0] = 0;
+        view.caret[0] = 0;
         view.sync_editor_cursor(0);
-        let id = egui::Id::new(("two-way-edit", view.side_generation[0], 0usize));
-        ctx.memory_mut(|memory| memory.request_focus(id));
+        ctx.memory_mut(|memory| memory.request_focus(view.editor_id(0)));
         frame(&mut view, &ctx, vec![egui::Event::Text("x\n".into())])
             .drop_without_applying_deltas();
         assert_eq!(view.working_text(0), Some("x\r\nx\r\nx\np\r"));
-        assert_eq!(
-            view.workspace
-                .as_ref()
-                .unwrap()
-                .ignored_ranges(TwoWaySide::Left),
-            &[2..3]
-        );
         view.move_history(false);
         assert_eq!(view.working_text(0), Some("x\r\nx\np\r"));
-        assert_eq!(
-            view.workspace
-                .as_ref()
-                .unwrap()
-                .ignored_ranges(TwoWaySide::Left),
-            &[1..2]
-        );
         view.move_history(true);
-        assert_eq!(
-            view.workspace
-                .as_ref()
-                .unwrap()
-                .ignored_ranges(TwoWaySide::Left),
-            &[2..3]
-        );
+        assert_eq!(view.working_text(0), Some("x\r\nx\r\nx\np\r"));
         assert!(view.diff_job.is_none());
     }
+
     #[test]
     fn byte_edit_handles_unicode_selection_backspace_and_delete() {
         for (original, edited, cursor, range, replacement) in [
@@ -3922,7 +3491,7 @@ mod tests {
         for _ in 0..3 {
             frame(&mut view, &ctx, vec![]).drop_without_applying_deltas();
         }
-        view.destination[1] = 3;
+        view.caret[1] = 3;
         view.transfer(TwoWaySide::Left, 3..4);
         frame(&mut view, &ctx, vec![egui::Event::Text("!".into())]).drop_without_applying_deltas();
         assert_eq!(
@@ -3987,7 +3556,7 @@ mod tests {
     fn keyboard_redo_is_consumed_before_the_less_specific_undo_shortcut() {
         let ctx = egui::Context::default();
         let mut view = view("left\n", "right\n");
-        view.destination[1] = 1;
+        view.caret[1] = 1;
         view.transfer(TwoWaySide::Left, 0..1);
         let key = |modifiers| egui::Event::Key {
             key: egui::Key::Z,
@@ -4016,7 +3585,7 @@ mod tests {
             .set_text(TwoWaySide::Left, "edited\n");
         frame(&mut view, &ctx, vec![]).drop_without_applying_deltas();
         view.selected_side = 0;
-        view.destination[1] = 1;
+        view.caret[1] = 1;
         view.transfer(TwoWaySide::Left, 0..1);
         view.move_history(false);
         assert_eq!(view.working_text(0), Some("edited\n"));
@@ -4704,17 +4273,69 @@ mod tests {
         assert_eq!(view.scroll[0], view.scroll[1]);
     }
     #[test]
+    fn merge_editors_fill_the_panes_without_lower_management_controls() {
+        let text: String = (0..200)
+            .map(|line| format!("fn item_{line}() {{}}\n"))
+            .collect();
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            for zoom in [1.0, 2.0] {
+                let ctx = egui::Context::default();
+                set_theme(&ctx, theme);
+                ctx.set_zoom_factor(zoom);
+                let mut view = view(&text, &text);
+                for _ in 0..3 {
+                    frame(&mut view, &ctx, vec![]).drop_without_applying_deltas();
+                }
+                let output = frame(&mut view, &ctx, vec![]);
+                for label in [
+                    "Selected lines",
+                    "Transfer →",
+                    "← Transfer",
+                    "Insert before line",
+                    "Replace selected target",
+                    "Create chunk",
+                    "Ignore range",
+                    "Manage ignored…",
+                ] {
+                    assert!(!output.shapes.iter().any(|shape| matches!(&shape.shape,
+                        egui::Shape::Text(text) if text.galley.text() == label)));
+                }
+                let tracks: [Rect; 2] = std::array::from_fn(|side| {
+                    ctx.read_response(egui::Id::new(("merge-transfer-track", side)))
+                        .unwrap()
+                        .rect
+                });
+                let editors: Vec<_> = output
+                    .shapes
+                    .iter()
+                    .filter_map(|shape| match &shape.shape {
+                        egui::Shape::Text(text) if text.galley.text().contains("fn item_0()") => {
+                            Some(shape.clip_rect)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(editors.len(), 2);
+                for rect in editors {
+                    let side = usize::from(rect.center().x > ctx.viewport_rect().center().x);
+                    assert!(
+                        rect.height() >= tracks[side].height() - 12.0,
+                        "editor should reclaim the lower controls area: editor={rect:?}, track={:?}",
+                        tracks[side]
+                    );
+                }
+                output.drop_without_applying_deltas();
+            }
+        }
+    }
+
+    #[test]
     fn merge_without_diff_keeps_preferences_and_history_across_modes() {
         let ctx = egui::Context::default();
         let mut view = view("left\n", "unrelated\n");
         view.merge_options = [false, true, false];
-        view.destination[1] = 1;
+        view.caret[1] = 1;
         view.transfer(TwoWaySide::Left, 0..1);
-        view.workspace
-            .as_mut()
-            .unwrap()
-            .add_ignored_range(TwoWaySide::Right, 0..1)
-            .unwrap();
         view.invalidate_diff();
         view.poll(&ctx);
         assert!(view.diff_job.is_none() && view.diff.is_none());
@@ -4730,63 +4351,9 @@ mod tests {
         assert!(view.diff_job.is_none() && view.diff.is_none());
         assert_eq!(view.working_text(1), Some(result.as_str()));
         assert!(view.workspace.as_mut().unwrap().undo());
-        assert!(
-            view.workspace
-                .as_ref()
-                .unwrap()
-                .ignored_ranges(TwoWaySide::Right)
-                .is_empty()
-        );
-        assert!(view.workspace.as_mut().unwrap().undo());
         assert_eq!(view.working_text(1), Some("unrelated\n"));
         assert!(view.workspace.as_mut().unwrap().redo());
         assert_eq!(view.working_text(1), Some(result.as_str()));
-    }
-    #[test]
-    fn window_title_buttons_use_pointer_cursor() {
-        let ctx = egui::Context::default();
-        set_theme(&ctx, egui::Theme::Dark);
-        let mut open = true;
-        let mut frame = |position: Option<Pos2>| {
-            ctx.run_ui(
-                egui::RawInput {
-                    events: position
-                        .map(egui::Event::PointerMoved)
-                        .into_iter()
-                        .collect(),
-                    ..Default::default()
-                },
-                |_| {
-                    if let Some(window) = egui::Window::new("Ignored ranges")
-                        .open(&mut open)
-                        .resizable(false)
-                        .movable(false)
-                        .show(&ctx, |ui| {
-                            ui.label("Protected content");
-                        })
-                    {
-                        window_button_cursor(&ctx, window.response.layer_id);
-                    }
-                },
-            )
-        };
-        // Windows have an initial invisible sizing pass.
-        frame(None).drop_without_applying_deltas();
-        frame(None).drop_without_applying_deltas();
-        let buttons = ctx
-            .interactive_rects_last_pass()
-            .into_iter()
-            .filter(|rect| rect.width() < 30.0 && rect.height() < 30.0)
-            .collect::<Vec<_>>();
-        assert_eq!(buttons.len(), 2, "close and collapse buttons");
-        for button in buttons {
-            let output = frame(Some(button.center()));
-            assert_eq!(
-                output.platform_output.cursor_icon,
-                egui::CursorIcon::PointingHand
-            );
-            output.drop_without_applying_deltas();
-        }
     }
 
     #[test]
@@ -4897,7 +4464,7 @@ mod tests {
                     assert!(
                         (ctx.read_response(right_id).unwrap().rect.top() - right_y).abs() < 0.1
                     );
-                    view.destination[0] = 0;
+                    view.caret[0] = 0;
                     click(&mut view, &ctx, right_id);
                     let copied = if run_diff {
                         "    right_0();\n"
@@ -4920,7 +4487,7 @@ mod tests {
             let ctx = egui::Context::default();
             set_theme(&ctx, theme);
             let mut view = view("fn source() {\n    one();\n    two();\n}\n", "target\n");
-            view.destination[1] = 1;
+            view.caret[1] = 1;
             let output = frame(&mut view, &ctx, vec![]);
             let chunk = view.workspace.as_ref().unwrap().chunks(TwoWaySide::Left)[0].clone();
             let arrow = ctx
@@ -4979,7 +4546,7 @@ mod tests {
                 Some("target\nfn source() {\n    one();\n    two();\n}\n")
             );
             assert!(view.diff_job.is_none());
-            assert_eq!(view.destination[1], 5);
+            assert_eq!(view.caret[1], 5);
             click(
                 &mut view,
                 &ctx,
@@ -5293,7 +4860,7 @@ mod tests {
                     .unwrap()
                     .edit_bytes(TwoWaySide::Left, 0..0, "edited\n".into())
                     .unwrap();
-                view.selected = [0..1, 0..1];
+                view.caret = [1, 0];
                 view.invalidate_diff();
                 let undo = view.workspace.as_ref().unwrap().next_undo_tag();
                 let mut output = frame(&mut view, &ctx, vec![]);
@@ -5328,7 +4895,7 @@ mod tests {
                 }
                 assert_eq!(view.working_text(0), Some("edited\nleft\n"));
                 assert_eq!(view.workspace.as_ref().unwrap().next_undo_tag(), undo);
-                assert_eq!(view.selected, [0..1, 0..1]);
+                assert_eq!(view.caret, [1, 0]);
                 assert_eq!(view.merge_options, [false, true, true]);
                 assert_eq!(view.diff_options, [true, false, true]);
                 assert!(view.diff_job.is_none());
@@ -5336,56 +4903,28 @@ mod tests {
         }
     }
     #[test]
-    fn accept_all_is_atomic_and_never_replaces_protected_content() {
+    fn accept_all_replaces_destination_as_one_undoable_operation() {
         let mut view = view("whole\nleft\n", "right\n");
-        view.destination[1] = 1;
-        view.replace = false;
         view.copy_all(TwoWaySide::Left);
         assert_eq!(view.working_text(1), view.working_text(0));
         assert!(view.workspace.as_mut().unwrap().undo());
         assert_eq!(view.working_text(1), Some("right\n"));
-        view.workspace
-            .as_mut()
-            .unwrap()
-            .add_ignored_range(TwoWaySide::Right, 0..1)
-            .unwrap();
-        view.copy_all(TwoWaySide::Left);
-        assert_eq!(view.working_text(1), Some("right\n"));
-        assert!(view.error.as_ref().unwrap().contains("protected"));
+        assert!(!view.workspace.as_ref().unwrap().can_undo());
+        assert!(view.workspace.as_mut().unwrap().redo());
+        assert_eq!(view.working_text(1), Some("whole\nleft\n"));
     }
+
     #[test]
     fn repeated_insertions_follow_the_original_target_in_source_order() {
         let mut view = view("first\nsecond\n", "keep\n");
-        view.destination[1] = 0;
+        view.caret[1] = 0;
         view.transfer(TwoWaySide::Left, 0..1);
         view.transfer(TwoWaySide::Left, 1..2);
         assert_eq!(view.working_text(1), Some("first\nsecond\nkeep\n"));
         assert!(view.workspace.as_mut().unwrap().undo());
         assert_eq!(view.working_text(1), Some("first\nkeep\n"));
     }
-    #[test]
-    fn search_protection_checks_only_the_matched_ranges() {
-        let mut view = view("a\nprotected\nlast\n", "right\n");
-        view.workspace
-            .as_mut()
-            .unwrap()
-            .add_ignored_range(TwoWaySide::Left, 1..2)
-            .unwrap();
-        let change = SearchChange {
-            path: PathBuf::from("left.rs"),
-            before: "a\nprotected\nlast\n".into(),
-            after: "b\nprotected\nlast\n".into(),
-            hit_ids: vec![1],
-            ranges: vec![0..1],
-            edits: vec![(0..1, "b".into())],
-        };
-        assert!(view.validate_search_changes(&[change.clone()]).is_ok());
-        let blocked = SearchChange {
-            ranges: vec![2..11],
-            ..change
-        };
-        assert!(view.validate_search_changes(&[blocked]).is_err());
-    }
+
     #[test]
     fn editing_preserves_unaffected_mixed_endings() {
         assert_eq!(
@@ -5495,7 +5034,7 @@ mod tests {
     }
 
     #[test]
-    fn refreshed_replacement_preserves_history_and_remaps_protected_manual_ranges() {
+    fn refreshed_replacement_preserves_earlier_edit_history() {
         let mut view = view("before match\nkept\n", "right\n");
         view.workspace
             .as_mut()
@@ -5508,36 +5047,14 @@ mod tests {
             .unwrap()
             .fingerprint = versus::FileFingerprint::Bytes(b"old match\nkept\n".to_vec());
         view.update_saved_files(&saved);
-        let workspace = view.workspace.as_mut().unwrap();
-        workspace.add_ignored_range(TwoWaySide::Left, 1..2).unwrap();
-        let chunk = workspace.create_chunk(TwoWaySide::Left, 1..2).unwrap();
-        view.invalidate_diff();
         let preview = refreshed_preview(&view, &[("left.rs", "new\nold match\nkept\n")]);
         view.apply_search_preview(&preview).unwrap();
         assert_eq!(view.working_text(0), Some("new\nold found\nkept\n"));
-        let workspace = view.workspace.as_ref().unwrap();
-        assert_eq!(workspace.ignored_ranges(TwoWaySide::Left), &[2..3]);
-        assert_eq!(
-            workspace
-                .chunks(TwoWaySide::Left)
-                .iter()
-                .find(|item| item.id == chunk)
-                .unwrap()
-                .range,
-            2..3
-        );
         view.undo_batch(false).unwrap();
         assert_eq!(view.working_text(0), Some("new\nold match\nkept\n"));
         view.selected_side = 0;
         view.move_history(false);
         assert_eq!(view.working_text(0), Some("old match\nkept\n"));
-        assert_eq!(
-            view.workspace
-                .as_ref()
-                .unwrap()
-                .ignored_ranges(TwoWaySide::Left),
-            &[1..2]
-        );
         for _ in 0..3 {
             view.move_history(false);
         }
@@ -5546,36 +5063,26 @@ mod tests {
     }
 
     #[test]
-    fn refreshed_replacement_rejects_dirty_or_protected_documents_atomically() {
-        for dirty in [true, false] {
-            let mut view = view("left match\n", "right match\n");
-            let preview = refreshed_preview(
-                &view,
-                &[
-                    ("left.rs", "new left match\n"),
-                    ("right.rs", "new right match\n"),
-                ],
-            );
-            if dirty {
-                view.workspace
-                    .as_mut()
-                    .unwrap()
-                    .set_text(TwoWaySide::Right, "unsaved match\n");
-            } else {
-                view.workspace
-                    .as_mut()
-                    .unwrap()
-                    .add_ignored_range(TwoWaySide::Right, 0..1)
-                    .unwrap();
-            }
-            view.invalidate_diff();
-            let before = view.export_working_files();
-            let revision = view.folder_revision_signature();
-            assert!(view.apply_search_preview(&preview).is_err());
-            assert_eq!(view.export_working_files(), before);
-            assert_eq!(view.folder_revision_signature(), revision);
-            assert!(!view.can_undo_batch());
-        }
+    fn refreshed_replacement_rejects_dirty_documents_atomically() {
+        let mut view = view("left match\n", "right match\n");
+        let preview = refreshed_preview(
+            &view,
+            &[
+                ("left.rs", "new left match\n"),
+                ("right.rs", "new right match\n"),
+            ],
+        );
+        view.workspace
+            .as_mut()
+            .unwrap()
+            .set_text(TwoWaySide::Right, "unsaved match\n");
+        view.invalidate_diff();
+        let before = view.export_working_files();
+        let revision = view.folder_revision_signature();
+        assert!(view.apply_search_preview(&preview).is_err());
+        assert_eq!(view.export_working_files(), before);
+        assert_eq!(view.folder_revision_signature(), revision);
+        assert!(!view.can_undo_batch());
     }
 
     #[test]
@@ -5623,7 +5130,7 @@ mod tests {
         assert_eq!(view.working_text(1), Some("batch-right\n"));
     }
     #[test]
-    fn later_protection_changes_block_atomic_batch_undo_until_their_undo() {
+    fn later_manual_edits_block_atomic_batch_undo_until_their_undo() {
         let mut view = view("left\n", "right\n");
         let preview = preview_for(
             &view,
@@ -5633,27 +5140,21 @@ mod tests {
         view.workspace
             .as_mut()
             .unwrap()
-            .add_ignored_range(TwoWaySide::Right, 0..1)
-            .unwrap();
+            .set_text(TwoWaySide::Right, "newer\n");
         view.invalidate_diff();
         view.selected_side = 0;
         view.move_history(false);
         assert_eq!(view.working_text(0), Some("batch\n"));
-        assert_eq!(view.working_text(1), Some("batch\n"));
+        assert_eq!(view.working_text(1), Some("newer\n"));
         assert!(view.error.is_some());
         view.selected_side = 1;
         view.move_history(false);
-        assert!(
-            view.workspace
-                .as_ref()
-                .unwrap()
-                .ignored_ranges(TwoWaySide::Right)
-                .is_empty()
-        );
+        assert_eq!(view.working_text(1), Some("batch\n"));
         view.move_history(false);
         assert_eq!(view.working_text(0), Some("left\n"));
         assert_eq!(view.working_text(1), Some("right\n"));
     }
+
     #[test]
     fn alternate_pairing_retains_canonical_file_text_and_undo_without_changing_partner() {
         let mut view = view("left\n", "right\n");
@@ -5695,16 +5196,16 @@ mod tests {
     #[test]
     fn failed_multifile_batch_preflight_changes_no_text_or_history() {
         let mut view = view("left\n", "right\n");
-        view.workspace
-            .as_mut()
-            .unwrap()
-            .add_ignored_range(TwoWaySide::Right, 0..1)
-            .unwrap();
-        view.invalidate_diff();
-        let preview = preview_for(
+        let mut preview = preview_for(
             &view,
             &[("left.rs", 0..4, "batch"), ("right.rs", 0..5, "batch")],
         );
+        preview
+            .changes
+            .iter_mut()
+            .find(|change| change.path == PathBuf::from("right.rs"))
+            .unwrap()
+            .edits = vec![(0..999, "invalid".into())];
         assert!(view.apply_search_preview(&preview).is_err());
         assert_eq!(view.working_text(0), Some("left\n"));
         assert_eq!(view.working_text(1), Some("right\n"));

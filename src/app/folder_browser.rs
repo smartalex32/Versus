@@ -4,7 +4,6 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     hash::{Hash, Hasher},
-    ops::Range,
 };
 use versus::{
     DirectoryEntryState, FileViewOptions, LazyDirectoryItem, SearchEvent, SearchPreview,
@@ -66,8 +65,8 @@ pub(super) struct FolderBrowser {
     jobs: [BTreeMap<PathBuf, ListingJob>; 2],
     overlays: BTreeMap<PathBuf, DirectoryEntryState>,
     merged_cache: Option<MergedFolderCache>,
-    /// Every path that has had a working-copy overlay.  Retaining it lets a
-    /// save or ignored-range removal restore the disk-backed folder state.
+    /// Every path that has had a working-copy overlay. Retaining it lets a
+    /// save restore the disk-backed folder state.
     overlay_paths: BTreeSet<PathBuf>,
     overlay_cache: BTreeMap<PathBuf, u64>,
     overlay_token: Option<(u64, [bool; 3])>,
@@ -491,7 +490,6 @@ impl FolderBrowser {
         }
         self.overlay_not_before = None;
         let working = view.export_working_files();
-        let ignored = view.folder_ignored_ranges();
         let revisions = view.folder_document_revisions();
         let mut loaded: BTreeMap<PathBuf, [Option<WorkingFile>; 2]> = BTreeMap::new();
         let mut modified = BTreeSet::new();
@@ -505,21 +503,15 @@ impl FolderBrowser {
                         .entry(relative.to_path_buf())
                         .or_insert_with(|| [None, None]);
                     entry[side] = Some(file.clone());
-                    if file.is_dirty()
-                        || !ignored
-                            .get(&file.identity_key())
-                            .cloned()
-                            .unwrap_or_default()
-                            .is_empty()
-                    {
+                    if file.is_dirty() {
                         modified.insert(relative.to_path_buf());
                     }
                 }
             }
         }
-        // Include paths that used to be dirty/protected once more.  Their
-        // signature changes after save or an ignored-range edit, which puts
-        // the original disk comparison back without rereading every folder.
+        // Include paths that used to be dirty once more. Their signature
+        // changes after save, which puts the original disk comparison back
+        // without rereading every folder.
         let mut affected = self.overlay_paths.clone();
         affected.extend(modified.iter().cloned());
         self.overlay_paths = affected.clone();
@@ -533,7 +525,6 @@ impl FolderBrowser {
                     let signature = overlay_signature(
                         left,
                         loaded.get(left),
-                        &ignored,
                         &revisions,
                         &preferences,
                         modified.contains(left),
@@ -549,7 +540,6 @@ impl FolderBrowser {
             let signature = overlay_signature(
                 &relative,
                 loaded.get(&relative),
-                &ignored,
                 &revisions,
                 &preferences,
                 modified.contains(&relative),
@@ -569,7 +559,7 @@ impl FolderBrowser {
         let (sender, receiver) = mpsc::channel();
         std::thread::spawn(move || {
             let result = crate::diagnostics::catch_worker("Merge working-copy comparison", || {
-                compare_overlay_files(roots, requested, loaded, ignored, options, &worker_cancel)
+                compare_overlay_files(roots, requested, loaded, options, &worker_cancel)
             });
             let _ = sender.send((generation, result));
         });
@@ -1677,7 +1667,6 @@ fn compare_overlay_files(
     roots: [PathBuf; 2],
     affected: BTreeSet<PathBuf>,
     loaded: BTreeMap<PathBuf, [Option<WorkingFile>; 2]>,
-    ignored: BTreeMap<PathBuf, Vec<Range<usize>>>,
     preferences: [bool; 3],
     cancellation: &AtomicBool,
 ) -> Result<BTreeMap<PathBuf, DirectoryEntryState>, String> {
@@ -1721,19 +1710,11 @@ fn compare_overlay_files(
                 (None, Some(_)) => DirectoryEntryState::RightOnly,
                 (None, None) => continue,
                 (Some(left), Some(right)) => {
-                    let left_ignored = ignored
-                        .get(&left.identity_key())
-                        .cloned()
-                        .unwrap_or_default();
-                    let right_ignored = ignored
-                        .get(&right.identity_key())
-                        .cloned()
-                        .unwrap_or_default();
                     let comparison = compare_loaded_text(
                         [&left.text, &right.text],
                         cancellation,
                         &options,
-                        [&left_ignored, &right_ignored],
+                        [&[], &[]],
                     )
                     .map_err(|error| error.to_string())?;
                     let Some(comparison) = comparison else {
@@ -1760,7 +1741,6 @@ fn compare_overlay_files(
 fn overlay_signature(
     relative: &std::path::Path,
     files: Option<&[Option<WorkingFile>; 2]>,
-    ignored: &BTreeMap<PathBuf, Vec<Range<usize>>>,
     revisions: &BTreeMap<PathBuf, u64>,
     preferences: &[bool; 3],
     modified: bool,
@@ -1775,10 +1755,6 @@ fn overlay_signature(
             Some(file) => {
                 file.identity_key().hash(&mut hasher);
                 revisions.get(&file.identity_key()).hash(&mut hasher);
-                for range in ignored.get(&file.identity_key()).into_iter().flatten() {
-                    range.start.hash(&mut hasher);
-                    range.end.hash(&mut hasher);
-                }
             }
             None => 0_u8.hash(&mut hasher),
         }
@@ -3361,7 +3337,6 @@ mod tests {
             [(relative.clone(), [Some(left), Some(right)])]
                 .into_iter()
                 .collect(),
-            BTreeMap::new(),
             [false, false, false],
             &AtomicBool::new(false),
         )
@@ -3388,7 +3363,6 @@ mod tests {
             [(relative.clone(), [Some(left), None])]
                 .into_iter()
                 .collect(),
-            BTreeMap::new(),
             [false; 3],
             &AtomicBool::new(false),
         )
@@ -3408,30 +3382,21 @@ mod tests {
             fingerprint: FileFingerprint::Bytes(b"saved\n".to_vec()),
         };
         let files = [Some(file), None];
-        let ignored = BTreeMap::new();
         let revisions = [(files[0].as_ref().unwrap().identity_key(), 1)]
             .into_iter()
             .collect();
         let dirty = overlay_signature(
             &path,
             Some(&files),
-            &ignored,
             &revisions,
             &[false, false, false],
             true,
         );
-        let show_only = overlay_signature(
-            &path,
-            Some(&files),
-            &ignored,
-            &revisions,
-            &[true, false, false],
-            true,
-        );
+        let show_only =
+            overlay_signature(&path, Some(&files), &revisions, &[true, false, false], true);
         let saved = overlay_signature(
             &path,
             Some(&files),
-            &ignored,
             &revisions,
             &[false, false, false],
             false,

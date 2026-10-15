@@ -9,7 +9,7 @@ Browse opens the corresponding native picker directly. The toggle switches modes
 for the same open sources. Diff is read-only and
 compares automatically. Merge uses two independent editable working copies; there
 is no desktop Base pane or three-way workflow. Its optional Run Diff setting starts
-off, leaving editing, chunking, transfers, and protected ignored ranges independent
+off, leaving editing, automatic chunk detection, and inline transfers independent
 from comparison. Folder Merge browses directory metadata lazily and loads contents
 when a file is opened. Traditional three-way merging is a separate `--merge` CLI
 operation. Runtime behavior must
@@ -35,19 +35,17 @@ APIs and must fail cleanly when unavailable.
   Save Left/Save Right disk icon beside Browse, plus Save Both in the footer,
   with a pending-content preview for active files. Save Both also saves retained
   dirty files from folder-wide replacement after the modal is closed. File content
-  retains File Diff’s header/divider spacing above the first row. Selection
-  transfers can insert at a chosen line or replace an explicitly selected target.
-  Accept All Left/Right copy one side into the other as a single transaction, while
-  honoring destination protection. Automatic merging belongs only to the separate
-  three-way CLI workflow. Chunks are
-  heuristic structural blocks for recognized source-like text or blank-line
-  paragraphs, not full language parses; users can create, split, combine, and
-  adjust manual chunks. Protected ranges are maintained independently and remain
-  in the file. They block transfers and search replacement, while direct typing in
-  those ranges remains allowed. Undo and Redo preserve transfer, edit, chunk, and
-  ignored-range state. Diff rows only assist with alignment and target suggestions
-  when enabled; manual transfers work without them. File-pair history uses
-  canonical tagged snapshots and survives navigation and alternate pairing.
+  retains File Diff’s header/divider spacing above the first row. Inline chunk and
+  line transfers insert at the other pane's cursor. Accept All Left/Right replaces
+  the other file as one transaction. Chunks are heuristic structural blocks or
+  blank-line paragraphs and can expand into line arrows. The lower management
+  section, manual selected-range transfers/replacement targets, manual chunk
+  editing, and manually ignored line ranges are removed, including their context
+  menus and state. Editors use the reclaimed pane height. Text editing and
+  transactional undo/redo remain; diff results only assist display and navigation.
+  Automatic merging belongs only to the separate three-way CLI workflow.
+  File-pair history uses canonical tagged snapshots and survives navigation and
+  alternate pairing.
   Run Diff is in the header beside the theme button, with Refresh immediately
   to its right while enabled. The toolbar keeps New comparison and the folder
   Find and Replace magnifying glass on the left, followed by the change count
@@ -125,11 +123,10 @@ APIs and must fail cleanly when unavailable.
   re-searching replacement text. Option changes and undo invalidate stale targets;
   scope changes retain search results and limit the next replacement action.
   It supports plain text/regex, case, and whole-word matching. Batch undo is atomic across
-  participating files; newer edits or ignored-range changes
-  in those files must be undone first. Binary, non-text, and files above the 32 MiB
-  text limit are skipped. Saving remains an explicit operation. With Run Diff on,
-  cancellable per-file comparisons overlay staged content and protected ranges on
-  the folder results; unchanged working-copy results are reused. Difference jumps
+  participating files; newer edits in those files must be undone first. Binary,
+  non-text, and files above the 32 MiB text limit are skipped. Saving remains an
+  explicit operation. With Run Diff on, cancellable per-file comparisons overlay
+  staged content on the folder results; unchanged working-copy results are reused. Difference jumps
   reveal the target using only shallow ancestor listings.
   Merge folder status uses a cached bottom-up tree traversal. Both panes and
   navigation share the same state and difference-path snapshots; unchanged frames
@@ -140,11 +137,10 @@ APIs and must fail cleanly when unavailable.
   byte anchors.
   It neither starts searches or diffs nor modifies files.
 - Applying a replacement from refreshed search results reconciles stale clean
-  editor documents only on staged clones, through an undoable protected text
-  splice, then applies
-  the replacement batch. All participants validate before publication. Batch
+  editor documents only on staged clones, through an undoable text splice, then
+  applies the replacement batch. All participants validate before publication. Batch
   Undo returns to refreshed disk text; earlier editor history remains available.
-  Dirty documents, identity changes, and protected overlap fail safely.
+  Dirty documents, identity changes, and invalid byte edits fail safely.
   Saves retain the refreshed byte fingerprint.
 - `src/app/search_result_rows.rs` paints bounded text previews and hover removal
   controls without loading files or modifying search data.
@@ -152,12 +148,12 @@ APIs and must fail cleanly when unavailable.
   controls in a dedicated font family. Body fonts are unchanged. Attribution and
   the CC BY 4.0 license are included under `assets/codicons/` and copied into Windows
   and both Linux binary packages; no network access or new crates are needed.
-- `src/core/interactive.rs` is the diff-independent two-way text model. Its
-  line-number ranges are zero-based and half-open. The chunk detector prioritizes
-  recognized syntax blocks and falls back to blank-line paragraphs. Transfers can
-  insert or replace; destination protected ranges reject transfers or replacements,
-  while manual text edits can modify those lines. Mutations have transactional
-  undo/redo, with chunk and ignored-range boundaries remapped after edits.
+- `src/core/interactive.rs` owns canonical editable documents, automatic chunk
+  detection, byte-preserving transfers, and transactional undo/redo. Chunk
+  detection prioritizes recognized syntax blocks and falls back to blank-line
+  paragraphs. Generic insertion/replacement primitives support inline transfers,
+  Accept All, and search replacement. Manual chunk and ignored-range state and
+  management APIs are removed.
 - `src/core/work_files.rs` owns lazy directory entries and text working copies.
   It records the exact original bytes for external-change checks and supports
   UTF-8 (with or without BOM) and BOM-marked UTF-16 little/big endian, up to the

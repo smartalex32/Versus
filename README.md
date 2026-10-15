@@ -18,9 +18,9 @@ Diff and Merge preserves the open files and edits.
 
 Merge does not need the diff engine. **Run Diff** is available in Merge mode and
 starts off. While it is off, Versus does not compare the open files; edits,
-selection transfers, chunks, and ignored ranges remain available. Turn it on for
-difference highlighting, navigation, and destination suggestions within the
-editors. Diff work is debounced for the open pair and can be cancelled. Turning
+automatic chunks and inline line/chunk transfers remain available. Turn it on for
+difference highlighting and navigation within the editors. Diff work is debounced
+for the open pair and can be cancelled. Turning
 Run Diff off cancels pending work and clears highlighting.
 The three comparison options (Show only differences, Ignore whitespace, Ignore
 line endings) have separate settings in Diff and Merge. Enabling Run Diff for the
@@ -55,22 +55,16 @@ Switching to File Diff keeps one path header per side and provides Refresh, with
 the same aligned comparison rows as a new File Diff. Edits and undo history remain
 available when returning to Merge; Refresh compares the retained working copies.
 
-Both panes show editable text, line numbers, and separate unsaved status. Select a
-contiguous line range in either pane, choose an insertion point or explicitly
-select a replacement range in the other pane, then use the transfer control to
-copy it across. Transfers preserve the source text and are undoable. Versus groups
-recognized code blocks and blank-line-separated paragraphs into chunks; these are
-heuristics rather than a full language parser. You can create, split, combine, and
-adjust manual chunks. Ignored line ranges are managed independently on each side.
-They stay in the file and block transfers or replacement targets that would
-overwrite protected lines; you can still type directly in an ignored range. The
-automatic transfer and search replacement paths respect those protections.
+Both panes show editable text, line numbers, and separate unsaved status. Use the
+center-track arrows to copy a chunk to the other pane's cursor without changing
+the source. Expand a chunk with **+** to copy individual lines. Transfers and free
+text edits are undoable. Versus groups recognized code blocks and blank-line
+paragraphs automatically; chunk detection uses heuristics rather than a full
+language parser. The editors fill their panes without a lower management panel.
 The centered toolbar has **Accept All Left**, **Accept All Right**, **Undo**, and
 **Redo** icons with tooltips. Accept All copies that side into the other as one
-undoable operation, subject to protection. Automatic conflict merging belongs to
-the separate three-way CLI workflow. Undo and Redo cover edits, transfers, chunk changes,
-and ignored-range changes. They are also available in the toolbar;
-Ctrl/Command+Z and Ctrl+Y or Command+Shift+Z work while editing.
+undoable operation. Automatic conflict merging belongs to the separate three-way
+CLI workflow. Ctrl/Command+Z and Ctrl+Y or Command+Shift+Z work while editing.
 
 Use the **Save Left** or **Save Right** disk icon immediately to the right of
 each pane’s Browse button to preview and save that file. **Save Both** in the
@@ -94,8 +88,8 @@ relative paths. Each file pair keeps its own undo history as you navigate or pai
 Replace** searches both trees, with plain text or regular
 expressions, case and whole-word options. Results include file and line, and
 replacements apply immediately as undoable batches to the working copies.
-Batch undo is atomic across participating files; undo newer edits or ignored-range
-changes in those files first. Binary, non-text, and files over 32 MiB are skipped.
+Batch undo is atomic across participating files; undo newer edits in those files
+first. Binary, non-text, and files over 32 MiB are skipped.
 Saving those changes remains explicit and uses the external-change check.
 Find and Replace opens a compact dialog centered on the app; click outside,
 press Escape, or use its close icon to dismiss it. Reopening immediately reruns
@@ -126,8 +120,8 @@ matches advance after each action, so repeated Replace Next actions stay accurat
 when replacement lengths change.
 Undo, Redo, Refresh, and search-option buttons start any needed search immediately;
 the typing delay applies only to edits in Find.
-With Run Diff enabled, folder statuses include staged working copies and ignored
-ranges. The up/down controls jump to changed files and reveal their parent folders.
+With Run Diff enabled, folder statuses include staged working copies. The up/down
+controls jump to changed files and reveal their parent folders.
 
 Each comparison mode has a folder or file icon and the active mode is highlighted,
 with Folder Diff selected initially. Clicking a path area or browse icon in

@@ -415,7 +415,7 @@ pub struct SearchChange {
     pub after: String,
     pub hit_ids: Vec<u64>,
     /// Original offsets of selected matches.  Consumers use these to preserve
-    /// protected merge ranges when presenting the replacement preview.
+    /// byte ranges when preparing the replacement transaction.
     pub ranges: Vec<Range<usize>>,
     /// Exact replacements in original-buffer coordinates.  These let history
     /// preserve multiple disjoint find-and-replace edits as one transaction.

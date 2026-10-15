@@ -2,7 +2,6 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
-    sync::atomic::AtomicBool,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -18,80 +17,6 @@ fn sandbox(name: &str) -> PathBuf {
     ));
     fs::create_dir_all(&path).unwrap();
     path
-}
-
-#[test]
-fn protected_ranges_are_independent_and_keep_original_line_numbers_for_optional_diff() {
-    let left = (0..800)
-        .map(|line| format!("left-{line}\n"))
-        .collect::<String>();
-    let right = (0..400)
-        .map(|line| format!("right-{line}\n"))
-        .collect::<String>();
-    let mut workspace = TwoWayWorkspace::new(left, right);
-
-    workspace
-        .add_ignored_range(TwoWaySide::Left, 50..750)
-        .unwrap();
-    workspace
-        .add_ignored_range(TwoWaySide::Right, 100..300)
-        .unwrap();
-    assert_eq!(workspace.ignored_ranges(TwoWaySide::Left), &[50..750]);
-    assert_eq!(workspace.ignored_ranges(TwoWaySide::Right), &[100..300]);
-    assert_eq!(workspace.comparison_lines(TwoWaySide::Left).len(), 100);
-    assert_eq!(workspace.comparison_lines(TwoWaySide::Right).len(), 200);
-    assert!(
-        workspace
-            .comparison_lines(TwoWaySide::Left)
-            .iter()
-            .all(|(line, _)| *line < 50 || *line >= 750)
-    );
-
-    // Calling the optional comparison utility consumes only already-loaded text
-    // and preserves source numbers after independently omitted ranges.
-    let cancelled = AtomicBool::new(false);
-    let comparison = compare_loaded_text(
-        [
-            workspace.text(TwoWaySide::Left),
-            workspace.text(TwoWaySide::Right),
-        ],
-        &cancelled,
-        &FileViewOptions::default(),
-        [
-            workspace.ignored_ranges(TwoWaySide::Left),
-            workspace.ignored_ranges(TwoWaySide::Right),
-        ],
-    )
-    .unwrap()
-    .unwrap();
-    assert!(comparison.rows.iter().all(|row| {
-        row.left
-            .as_ref()
-            .is_none_or(|(number, _)| !(51..=750).contains(number))
-            && row
-                .right
-                .as_ref()
-                .is_none_or(|(number, _)| !(101..=300).contains(number))
-    }));
-
-    // Protected content is never an automatic replacement target, but remains
-    // readable as a source for a deliberate transfer.
-    assert!(matches!(
-        workspace.transfer(
-            TwoWaySide::Right,
-            0..1,
-            120..121,
-            TransferPlacement::Replace,
-        ),
-        Err(TwoWayMergeError::ProtectedRange {
-            side: TwoWaySide::Left,
-            ..
-        })
-    ));
-    workspace
-        .transfer(TwoWaySide::Left, 50..51, 0..0, TransferPlacement::Insert)
-        .unwrap();
-    assert!(workspace.text(TwoWaySide::Right).starts_with("left-50\n"));
 }
 
 #[test]
@@ -136,7 +61,7 @@ fn transfers_are_atomic_undoable_redoable_and_never_mutate_the_source() {
 }
 
 #[test]
-fn chunks_support_empty_identical_unrelated_and_manual_boundary_changes() {
+fn chunks_support_empty_identical_and_unrelated_files() {
     let empty = TwoWayWorkspace::new("", "");
     assert_eq!(empty.line_count(TwoWaySide::Left), 0);
     assert!(empty.chunks(TwoWaySide::Left).is_empty());
@@ -149,38 +74,19 @@ fn chunks_support_empty_identical_unrelated_and_manual_boundary_changes() {
     assert!(!identical.chunks(TwoWaySide::Left).is_empty());
 
     let mut unrelated = TwoWayWorkspace::new("fn left() {}\n\nbody\n", "zero\none\ntwo\n");
-    let first = unrelated.create_chunk(TwoWaySide::Left, 0..2).unwrap();
-    let (first_half, second_half) = unrelated.split_chunk(TwoWaySide::Left, first, 1).unwrap();
-    unrelated
-        .adjust_chunk(TwoWaySide::Left, second_half, 1..3)
-        .unwrap();
-    let combined = unrelated
-        .combine_chunks(TwoWaySide::Left, first_half, second_half)
-        .unwrap();
-    let manual = unrelated
-        .chunks(TwoWaySide::Left)
-        .into_iter()
-        .find(|chunk| chunk.id == combined)
-        .unwrap();
-    assert_eq!(manual.kind, ChunkKind::Manual);
-    assert_eq!(manual.range, 0..3);
-
-    // Each boundary operation is one history item. Rewinding combination leaves
-    // the edited chunks available, rather than corrupting a later transfer.
-    assert!(unrelated.undo());
+    let automatic = unrelated.chunks(TwoWaySide::Left);
     assert!(
-        unrelated
-            .chunks(TwoWaySide::Left)
+        automatic
             .iter()
-            .any(|chunk| chunk.id == first_half)
+            .any(|chunk| chunk.kind == ChunkKind::Structural)
     );
-    assert!(unrelated.redo());
+    let chunk = automatic[0].clone();
     unrelated
-        .transfer_chunk(TwoWaySide::Left, combined, 1..1, TransferPlacement::Insert)
+        .transfer_chunk(TwoWaySide::Left, chunk.id, 1..1, TransferPlacement::Insert)
         .unwrap();
     assert_eq!(
         unrelated.text(TwoWaySide::Right),
-        "zero\nfn left() {}\n\nbody\none\ntwo\n"
+        "zero\nfn left() {}\none\ntwo\n"
     );
 }
 
