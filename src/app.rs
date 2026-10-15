@@ -1218,7 +1218,7 @@ impl VersusApp {
             };
             if let Some(target) = target {
                 if let Some(index) = view.visible_rows.iter().position(|row| *row == target) {
-                    view.scroll_y = index as f32 * view.row_height;
+                    view.scroll_y = index.saturating_sub(1) as f32 * view.row_height;
                     view.navigation_row = Some(target);
                     view.navigation_scroll_pending = true;
                 }
@@ -1276,7 +1276,7 @@ impl VersusApp {
                 .iter()
                 .position(|row| row.node.relative_path == path)
             {
-                self.tree_scroll_y = index as f32 * self.row_height;
+                self.tree_scroll_y = index.saturating_sub(1) as f32 * self.row_height;
             }
             self.selected = Some(path);
         }
@@ -8631,7 +8631,7 @@ mod tests {
         let mut view = loaded_file_view();
         view.comparison.as_mut().unwrap().rows = (1..=200)
             .map(|number| {
-                let changed = [20, 80, 150, 200].contains(&number);
+                let changed = [1, 20, 80, 150, 200].contains(&number);
                 test_file_row(
                     Some((number, format!("left line {number}"))),
                     Some((number, format!("right line {number}"))),
@@ -8646,6 +8646,7 @@ mod tests {
         update_visible_file_rows(&mut view, false);
         app.file_view = Some(view);
         for (action, number) in [
+            ("Next difference", 1),
             ("Next difference", 20),
             ("Next difference", 80),
             ("Next difference", 150),
@@ -8662,6 +8663,15 @@ mod tests {
             let left = text_positions(&output, &format!("left line {number}"))[0];
             let right = text_positions(&output, &format!("right line {number}"))[0];
             assert!((left.y - right.y).abs() < 0.1);
+            // Keep the preceding line visible, or clamp to the file start.
+            if number > 1 {
+                assert_eq!(
+                    text_positions(&output, &format!("left line {}", number - 1)).len(),
+                    1
+                );
+            } else {
+                assert_eq!(app.file_view.as_ref().unwrap().scroll_y, 0.0);
+            }
             assert_eq!(
                 first_positions,
                 vec![left],

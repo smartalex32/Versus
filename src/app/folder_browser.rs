@@ -676,7 +676,7 @@ impl FolderBrowser {
             .id_salt(("merge-folder-tree", side, self.source_generation[side]))
             .max_height(available - 5.0);
         if let Some(index) = reveal_index {
-            scroll = scroll.vertical_scroll_offset(index as f32 * row_height);
+            scroll = scroll.vertical_scroll_offset(index.saturating_sub(1) as f32 * row_height);
         }
         scroll.show_rows(ui, row_height, rows.len(), |ui, range| {
             for index in range {

@@ -71,6 +71,8 @@ APIs and must fail cleanly when unavailable.
   Merge difference navigation uses File Diff’s subtle row overlay on the source
   lines present in the selected comparison row. Only those panes scroll; paired
   rows use each side’s original line number and filtered display position.
+  Next/previous difference navigation leaves one visible context row above the
+  target in Diff and Merge, clamped at the start of the file or folder listing.
   Switching an open merge pair to Diff paints aligned read-only rows through the
   File Diff painter, with one source header and Refresh in the header toolbar.
   Read-only row visibility and widths are cached per comparison/preferences/font;

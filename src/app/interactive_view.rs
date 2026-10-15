@@ -1570,13 +1570,13 @@ impl InteractiveView {
                     } else {
                         number.saturating_sub(1)
                     };
-                    self.scroll[side] = display_line as f32 * row_height;
+                    self.scroll[side] = display_line.saturating_sub(1) as f32 * row_height;
                 }
             }
         } else if let Some(display_index) = self.readonly_display_index(row_index) {
             // Diff panes are aligned rows, including when the differences-only
             // preference filters out equal rows.
-            self.scroll = [display_index as f32 * row_height; 2];
+            self.scroll = [display_index.saturating_sub(1) as f32 * row_height; 2];
         }
         ctx.request_repaint();
     }
@@ -4242,7 +4242,13 @@ mod tests {
                         .collect();
                     view.diff = Some(comparison.clone());
                     for (target, forward, source_lines, filtered_lines) in [
-                        (40usize, true, [Some(40usize), None], [Some(14usize), None]),
+                        (
+                            0usize,
+                            true,
+                            [Some(0usize), Some(0usize)],
+                            [Some(0usize), Some(0usize)],
+                        ),
+                        (40, true, [Some(40), None], [Some(14), None]),
                         (100, true, [Some(100), Some(99)], [Some(35), Some(34)]),
                         (130, true, [None, Some(129)], [None, Some(45)]),
                         (100, false, [Some(100), Some(99)], [Some(35), Some(34)]),
@@ -4257,7 +4263,7 @@ mod tests {
                             memory.data.insert_temp(
                                 egui::Id::new("interactive-diff-navigation"),
                                 if forward {
-                                    target_index - 1
+                                    (target_index + view.diff_rows.len() - 1) % view.diff_rows.len()
                                 } else {
                                     target_index + 1
                                 },
@@ -4289,7 +4295,9 @@ mod tests {
                             assert!(
                                 (view.scroll[side]
                                     - display_line
-                                        .map_or(before[side], |line| line as f32 * row_height))
+                                        .map_or(before[side], |line| line.saturating_sub(1)
+                                            as f32
+                                            * row_height))
                                 .abs()
                                     < 0.5
                             );
@@ -4318,6 +4326,12 @@ mod tests {
                             );
                             let side =
                                 usize::from(rect.center().x > ctx.viewport_rect().center().x);
+                            if source_lines[side].is_some_and(|line| line > 0) {
+                                assert!(
+                                    rect.top() - clip.top() >= row_height - 1.0,
+                                    "leave a line above the highlighted change"
+                                );
+                            }
                             assert!(
                                 source_lines[side].is_some(),
                                 "do not highlight an unmatched opposite line"
@@ -4333,6 +4347,36 @@ mod tests {
                     assert!(!view.workspace.as_ref().unwrap().can_undo());
                     output.drop_without_applying_deltas();
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn readonly_difference_navigation_leaves_a_context_row_and_clamps_at_start() {
+        for filtered in [false, true] {
+            let ctx = egui::Context::default();
+            set_theme(&ctx, egui::Theme::Dark);
+            let mut view = view("left\n", "right\n");
+            view.editing = false;
+            view.diff = Some(readonly_comparison(240));
+            view.diff_rows = (0..240).step_by(3).collect();
+            view.diff_options = [filtered, false, false];
+            frame(&mut view, &ctx, vec![]).drop_without_applying_deltas();
+            let font = comparison_font(&ctx);
+            let row_height =
+                super::ROW_HEIGHT.max(ctx.fonts_mut(|fonts| fonts.row_height(&font)).ceil() + 8.0);
+            for (forward, display_line) in [
+                (true, 0usize),
+                (true, if filtered { 1 } else { 3 }),
+                (true, if filtered { 2 } else { 6 }),
+                (false, if filtered { 1 } else { 3 }),
+                (false, 0),
+            ] {
+                view.jump_diff(forward, &ctx);
+                assert_eq!(
+                    view.scroll,
+                    [display_line.saturating_sub(1) as f32 * row_height; 2]
+                );
             }
         }
     }
