@@ -466,8 +466,7 @@ pub fn preview_replace(
             return Err(CompareError {
                 path: Some(file.path.clone()),
                 kind: CompareErrorKind::Io,
-                message: "file changed after find; run find again before previewing replacements"
-                    .into(),
+                message: "file changed after find; run find again before replacing".into(),
             });
         }
         snapshots.entry(key.clone()).or_insert(base);

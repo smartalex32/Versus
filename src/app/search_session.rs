@@ -1,8 +1,8 @@
 //! Keeps folder-find results usable after an explicitly applied replacement.
 //!
 //! This module deliberately only transforms the search result snapshots.  It
-//! never writes a working copy and it never starts another search: callers keep
-//! the explicit preview/apply/find lifecycle.
+//! never writes a working copy and it never starts another search: callers
+//! prepare and apply validated replacement transactions from the current search.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -12,7 +12,7 @@ use std::{
 
 use versus::{CompareError, SearchChange, SearchPreview, SearchQuery, SearchResults, WorkingFile};
 
-/// Makes a replacement preview for the first selected result (`next`) or all
+/// Prepares a replacement transaction for the first selected result (`next`) or all
 /// selected results.  Result order is the stable file/hit order from the last
 /// Find operation.
 pub(super) fn preview_replacements(
@@ -37,7 +37,7 @@ pub(super) fn preview_replacements(
     versus::preview_replace(results, &selection, query, replacement, working)
 }
 
-/// Advances an existing search result set after its reviewed preview has been
+/// Advances an existing search result set after its replacement transaction has been
 /// applied to `working`.  The original search remains authoritative: matches
 /// created by replacement text are deliberately not introduced here.
 pub(super) fn advance_results(

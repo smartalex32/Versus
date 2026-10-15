@@ -91,7 +91,7 @@ Open files independently on each side, including files with different names or
 relative paths. Each file pair keeps its own undo history as you navigate or pair files again. Folder-wide **Find and
 Replace** searches both trees, with plain text or regular
 expressions, case and whole-word options. Results include file and line, and
-replacement previews can be applied as undoable batches to the working copies.
+replacements apply immediately as undoable batches to the working copies.
 Batch undo is atomic across participating files; undo newer edits or ignored-range
 changes in those files first. Binary, non-text, and files over 32 MiB are skipped.
 Saving those changes remains explicit and uses the external-change check.
@@ -112,9 +112,10 @@ replacement.
 Undo, Redo, and Refresh sit beside the scope controls, with search status below.
 **Refresh** repopulates excluded results and rereads files to include external
 changes, while preserving unsaved working copies. The **Replace Next** and
-**Replace All** icons beside the Replace field preview the next included match
-or all included matches. Apply the preview to update working
-copies as an undoable batch. Remaining original matches advance after each apply,
+**Replace All** icons beside the Replace field immediately replace the next
+included match or all included matches in working copies, with no preview or Apply
+step. Each action is one undoable batch. Remaining original matches advance after
+each action,
 so repeated Replace Next actions stay accurate when replacement lengths change.
 Undo, Redo, Refresh, and search-option buttons start any needed search immediately;
 the typing delay applies only to edits in Find.

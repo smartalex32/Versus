@@ -749,7 +749,7 @@ impl InteractiveView {
             let base = preview
                 .bases
                 .get(&change.path)
-                .ok_or_else(|| "Replacement preview is missing a file snapshot.".to_owned())?;
+                .ok_or_else(|| "Replacement is missing a file snapshot.".to_owned())?;
             let key = base.identity_key();
             let existing_key = self.key_for(&change.path);
             if self.documents.contains_key(&existing_key) && existing_key != key {
@@ -760,8 +760,7 @@ impl InteractiveView {
             }
             if !unique.insert(key.clone()) {
                 return Err(
-                    "Replacement preview contains duplicate file identities. Run Find again."
-                        .into(),
+                    "Replacement contains duplicate file identities. Run Find again.".into(),
                 );
             }
             let mut retained = self
@@ -777,7 +776,7 @@ impl InteractiveView {
                 working.text = retained.document.text().into();
                 if retained.document.is_dirty() || working.is_dirty() || base.is_dirty() {
                     return Err(format!(
-                        "{} changed after preview. Refresh search before replacing it.",
+                        "{} changed since the search. Refresh search before replacing it.",
                         change.path.display()
                     ));
                 }
@@ -797,7 +796,7 @@ impl InteractiveView {
             }
             if retained.document.text() != change.before {
                 return Err(format!(
-                    "{} changed after preview. Run Find again.",
+                    "{} changed since the search. Run Find again.",
                     change.path.display()
                 ));
             }
@@ -806,7 +805,7 @@ impl InteractiveView {
                 .apply_byte_edits(HistoryTag::FolderBatch(id), change.edits.clone())
                 .map_err(|e| e.to_string())?;
             if retained.document.text() != change.after {
-                return Err("Replacement preview does not match its selected edits.".into());
+                return Err("Replacement does not match its selected edits.".into());
             }
             prepared.push((key, retained));
         }

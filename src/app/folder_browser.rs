@@ -91,7 +91,6 @@ pub(super) struct FolderBrowser {
     search: Option<SearchJob>,
     results: Option<SearchResults>,
     selected_hits: BTreeSet<u64>,
-    preview: Option<SearchPreview>,
     working: BTreeMap<PathBuf, WorkingFile>,
     working_revision: Option<u64>,
     pending_save: bool,
@@ -140,7 +139,6 @@ impl FolderBrowser {
             search: None,
             results: None,
             selected_hits: BTreeSet::new(),
-            preview: None,
             working: BTreeMap::new(),
             working_revision: None,
             pending_save: false,
@@ -199,7 +197,6 @@ impl FolderBrowser {
         self.search = None;
         self.search_due_at = None;
         self.results = None;
-        self.preview = None;
         self.selected_hits.clear();
         self.searched_query = None;
     }
@@ -215,7 +212,6 @@ impl FolderBrowser {
                 .is_some_and(|results| results.cancelled)
         {
             self.results = None;
-            self.preview = None;
             self.selected_hits.clear();
         }
         if self.focus_find && self.results.is_none() && self.search.is_none() {
@@ -992,8 +988,6 @@ impl FolderBrowser {
                                 }
                             }
                             let previous_query = self.query.clone();
-                            let previous_scope = self.scope;
-                            let previous_replacement = self.replacement.clone();
                             let find = search_text_field(
                                 ui,
                                 &mut self.query.pattern,
@@ -1063,7 +1057,7 @@ impl FolderBrowser {
                                         .layout(egui::Layout::left_to_right(egui::Align::Center)),
                                 );
                                 if icon_button(&mut button_ui, icon, enabled, label).clicked() {
-                                    self.prepare_replacements(view, next);
+                                    self.replace_matches(view, next);
                                 }
                             }
                             ui.add_space(6.0);
@@ -1117,11 +1111,6 @@ impl FolderBrowser {
                                 != previous_query.case_sensitive
                                 || self.query.whole_word != previous_query.whole_word
                                 || self.query.regex != previous_query.regex;
-                            if self.scope != previous_scope
-                                || self.replacement != previous_replacement
-                            {
-                                self.preview = None;
-                            }
                             if refresh
                                 || options_changed
                                 || (scope_clicked
@@ -1167,45 +1156,6 @@ impl FolderBrowser {
                                     });
                                 }
                             });
-                            if let Some(preview) = &self.preview {
-                                ui.separator();
-                                ui.label(
-                                    "Preview — files are changed in memory until explicitly saved",
-                                );
-                                egui::ScrollArea::vertical()
-                                    .max_height(120.0)
-                                    .show(ui, |ui| {
-                                        for change in &preview.changes {
-                                            egui::CollapsingHeader::new(
-                                                change.path.display().to_string(),
-                                            )
-                                            .show(ui, |ui| {
-                                                ui.columns(2, |cols| {
-                                                    cols[0].label(
-                                                        RichText::new(&change.before).monospace(),
-                                                    );
-                                                    cols[1].label(
-                                                        RichText::new(&change.after).monospace(),
-                                                    );
-                                                });
-                                            })
-                                            .header_response
-                                            .on_hover_cursor(egui::CursorIcon::PointingHand);
-                                        }
-                                    });
-                            }
-                            if self.preview.is_some()
-                                && ui
-                                    .add_enabled(
-                                        self.preview
-                                            .as_ref()
-                                            .is_some_and(|p| !p.changes.is_empty()),
-                                        egui::Button::new("Apply preview to working copies"),
-                                    )
-                                    .clicked()
-                            {
-                                self.apply_replacement_preview(view);
-                            }
                             let dirty = pending_save_files(&self.working).len();
                             if dirty > 0 {
                                 ui.label(
@@ -1466,14 +1416,12 @@ impl FolderBrowser {
             });
         for id in removed {
             self.selected_hits.remove(&id);
-            self.preview = None;
         }
     }
 
     fn schedule_search(&mut self, now: f64) {
         self.search = None;
         self.results = None;
-        self.preview = None;
         self.selected_hits.clear();
         self.error = None;
         self.search_due_at = (!self.query.pattern.is_empty()).then_some(now + 0.25);
@@ -1501,7 +1449,6 @@ impl FolderBrowser {
         self.search_due_at = None;
         self.search = None;
         self.results = None;
-        self.preview = None;
         self.selected_hits.clear();
         self.error = None;
         self.searched_query = None;
@@ -1533,9 +1480,9 @@ impl FolderBrowser {
         self.search = Some(SearchJob { receiver, cancel });
         self.searched_query = Some(self.query.clone());
     }
-    fn prepare_replacements(&mut self, view: &InteractiveView, next: bool) {
+    fn replacement_plan(&mut self, view: &InteractiveView, next: bool) -> Option<SearchPreview> {
         if !self.results_current() {
-            return;
+            return None;
         }
         self.working = view.export_working_files();
         let selected = self
@@ -1557,22 +1504,28 @@ impl FolderBrowser {
             &self.working,
             next,
         ) {
-            Ok(preview) => self.preview = Some(preview),
-            Err(error) => self.error = Some(error.to_string()),
+            Ok(plan) => Some(plan),
+            Err(error) => {
+                self.error = Some(error.to_string());
+                None
+            }
         }
     }
-    fn apply_replacement_preview(&mut self, view: &mut InteractiveView) {
-        let Some(preview) = self.preview.take() else {
+    fn replace_matches(&mut self, view: &mut InteractiveView, next: bool) {
+        let Some(plan) = self.replacement_plan(view, next) else {
             return;
         };
-        match view.apply_search_preview(&preview) {
+        if plan.changes.is_empty() {
+            return;
+        }
+        match view.apply_search_preview(&plan) {
             Ok(_) => {
                 self.working = view.export_working_files();
                 if let Some(results) = &mut self.results {
                     if let Err(error) = search_session::advance_results(
                         results,
                         &mut self.selected_hits,
-                        &preview,
+                        &plan,
                         &self.working,
                     ) {
                         self.results = None;
@@ -1593,7 +1546,6 @@ impl FolderBrowser {
                 self.search_due_at = None;
                 self.searched_query = None;
                 self.results = None;
-                self.preview = None;
                 self.selected_hits.clear();
                 self.start_search(view);
             }
@@ -2562,8 +2514,14 @@ mod tests {
         for _ in 0..3 {
             dialog_frame(&mut browser, &mut view, &ctx, vec![]).drop_without_applying_deltas();
         }
-        browser.prepare_replacements(&view, false);
-        assert_eq!(browser.preview.as_ref().unwrap().changes.len(), 2);
+        assert_eq!(
+            browser
+                .replacement_plan(&view, false)
+                .unwrap()
+                .changes
+                .len(),
+            2
+        );
         for (label, side, path) in [
             ("LEFT", 0usize, "side-0.txt"),
             ("RIGHT", 1usize, "side-1.txt"),
@@ -2576,10 +2534,6 @@ mod tests {
             assert_eq!(browser.results_side, side);
             assert!(browser.search.is_none() && browser.search_due_at.is_none());
             assert!(browser.results_current());
-            assert!(
-                browser.preview.is_none(),
-                "scope change must invalidate a wider preview"
-            );
             assert_eq!(browser.results.as_ref().unwrap().files.len(), 2);
             assert_eq!(browser.selected_hits, BTreeSet::from([1, 2]));
             dialog_frame(&mut browser, &mut view, &ctx, vec![]).drop_without_applying_deltas();
@@ -2592,12 +2546,9 @@ mod tests {
                 browser.results_side, side,
                 "disabled toggle cannot change the results side"
             );
-            browser.prepare_replacements(&view, false);
-            assert_eq!(browser.preview.as_ref().unwrap().changes.len(), 1);
-            assert_eq!(
-                browser.preview.as_ref().unwrap().changes[0].path,
-                PathBuf::from(path)
-            );
+            let plan = browser.replacement_plan(&view, false).unwrap();
+            assert_eq!(plan.changes.len(), 1);
+            assert_eq!(plan.changes[0].path, PathBuf::from(path));
         }
         let both = ctx
             .read_response(egui::Id::new(("folder-search-scope", "BOTH")))
@@ -2619,8 +2570,14 @@ mod tests {
         click_dialog(&mut browser, &mut view, &ctx, left.center());
         assert_eq!(browser.results_side, 0);
         assert!(browser.results_current() && browser.search.is_none());
-        browser.prepare_replacements(&view, false);
-        assert_eq!(browser.preview.as_ref().unwrap().changes.len(), 2);
+        assert_eq!(
+            browser
+                .replacement_plan(&view, false)
+                .unwrap()
+                .changes
+                .len(),
+            2
+        );
         browser.scope = SearchScope::Left;
         browser.set_search_sources([None, Some(PathBuf::from("right-only.txt"))]);
         assert_eq!(
@@ -2838,22 +2795,8 @@ mod tests {
         let file = &browser.results.as_ref().unwrap().files[0];
         assert_eq!(file.working_file.text, "match new\nmatch added\n");
         assert_eq!(browser.selected_hits.len(), 2);
-        let revision = view.folder_revision_signature();
         browser.replacement = "found".into();
-        for _ in 0..2 {
-            browser.prepare_replacements(&view, false);
-            assert!(
-                browser.preview.is_some(),
-                "fresh results must support replacement"
-            );
-            assert_eq!(
-                view.folder_revision_signature(),
-                revision,
-                "Preview cannot mutate editor history"
-            );
-            assert_eq!(view.working_text(0), Some("match old\n"));
-        }
-        browser.apply_replacement_preview(&mut view);
+        browser.replace_matches(&mut view, false);
         assert_eq!(view.working_text(0), Some("found new\nfound added\n"));
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
@@ -3066,12 +3009,12 @@ mod tests {
     }
 
     #[test]
-    fn replace_next_and_all_preview_then_advance_working_copies_without_saving() {
+    fn replace_next_and_all_immediately_advance_working_copies_without_saving() {
         let root = std::env::temp_dir().join(format!("versus-next-replace-{}", std::process::id()));
         std::fs::create_dir_all(root.join("left")).unwrap();
         std::fs::create_dir_all(root.join("right")).unwrap();
         let paths = [root.join("left/a.txt"), root.join("right/a.txt")];
-        std::fs::write(&paths[0], "foo foo\n").unwrap();
+        std::fs::write(&paths[0], "foo foo foo\n").unwrap();
         std::fs::write(&paths[1], "foo\n").unwrap();
         let working: BTreeMap<_, _> = paths
             .iter()
@@ -3104,25 +3047,53 @@ mod tests {
             .iter()
             .flat_map(|file| file.hits.iter().map(|hit| hit.id))
             .collect();
-        browser.prepare_replacements(&view, true);
-        assert_eq!(
-            browser.preview.as_ref().unwrap().changes[0].hit_ids.len(),
-            1
-        );
-        assert_eq!(view.working_text(0), Some("foo foo\n"));
-        browser.apply_replacement_preview(&mut view);
-        assert_eq!(view.working_text(0), Some("long value foo\n"));
-        browser.prepare_replacements(&view, true);
-        browser.apply_replacement_preview(&mut view);
-        assert_eq!(view.working_text(0), Some("long value long value\n"));
-        browser.prepare_replacements(&view, false);
-        browser.apply_replacement_preview(&mut view);
+        let ctx = egui::Context::default();
+        set_theme(&ctx, egui::Theme::Dark);
+        browser.open_search();
+        for _ in 0..3 {
+            dialog_frame(&mut browser, &mut view, &ctx, vec![]).drop_without_applying_deltas();
+        }
+        // Replacing text with itself is a no-op, including for undo history.
+        browser.replacement = "foo".into();
+        let next = ctx.read_response(egui::Id::new("Replace Next")).unwrap();
+        click_dialog(&mut browser, &mut view, &ctx, next.rect.center());
+        assert_eq!(view.working_text(0), Some("foo foo foo\n"));
+        assert!(!view.can_undo_batch());
+        browser.replacement = "long value".into();
+        for (action, expected_left, expected_right, remaining) in [
+            ("Replace Next", "long value foo foo\n", "foo\n", 3),
+            ("Replace Next", "long value long value foo\n", "foo\n", 2),
+            (
+                "Replace All",
+                "long value long value long value\n",
+                "long value\n",
+                0,
+            ),
+        ] {
+            let button = ctx.read_response(egui::Id::new(action)).unwrap();
+            assert!(button.enabled());
+            click_dialog(&mut browser, &mut view, &ctx, button.rect.center());
+            assert_eq!(view.working_text(0), Some(expected_left));
+            assert_eq!(view.working_text(1), Some(expected_right));
+            assert_eq!(browser.selected_hits.len(), remaining);
+            let output = dialog_frame(&mut browser, &mut view, &ctx, vec![]);
+            assert!(!output.shapes.iter().any(|shape| matches!(&shape.shape,
+                egui::Shape::Text(text) if text.galley.text().contains("Apply preview") || text.galley.text().starts_with("Preview —"))));
+            output.drop_without_applying_deltas();
+        }
         assert_eq!(view.working_text(1), Some("long value\n"));
         assert!(browser.results.as_ref().unwrap().files.is_empty());
-        assert_eq!(std::fs::read_to_string(&paths[0]).unwrap(), "foo foo\n");
+        assert_eq!(std::fs::read_to_string(&paths[0]).unwrap(), "foo foo foo\n");
         assert_eq!(std::fs::read_to_string(&paths[1]).unwrap(), "foo\n");
         browser.undo_batch(&mut view, false);
         assert_eq!(view.working_text(1), Some("foo\n"));
+        assert_eq!(view.working_text(0), Some("long value long value foo\n"));
+        browser.undo_batch(&mut view, true);
+        assert_eq!(
+            view.working_text(0),
+            Some("long value long value long value\n")
+        );
+        assert_eq!(view.working_text(1), Some("long value\n"));
         assert!(
             browser.search.is_some() && browser.search_due_at.is_none(),
             "Undo must refresh immediately"

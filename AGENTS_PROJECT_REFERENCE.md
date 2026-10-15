@@ -104,19 +104,20 @@ APIs and must fail cleanly when unavailable.
   icons, and external Replace Next/All icons. Undo, Redo, and Refresh follow the
   scope buttons, with search status below. A neutral LEFT/RIGHT view toggle
   spans the results column. LEFT/RIGHT scope selects that results side and disables
-  the opposite view toggle; BOTH enables both. Replacement previews include only
+  the opposite view toggle; BOTH enables both. Replacement actions include only
   matches in the selected scope, while hidden-side results and exclusions remain
   cached. Results stream in batches while searching; each virtualized row shows
   a line number, bounded highlighted text preview, and a hover X for exclusion.
   The empty-state hint is confined to the
   results panel. Refresh repopulates exclusions and rereads clean files from disk,
-  while dirty working copies take precedence. Replace actions preview included
-  targets before applying an undoable working-copy batch. Partial, cancelled,
+  while dirty working copies take precedence. Replace Next/All immediately apply
+  included targets as an undoable working-copy batch, without a replacement
+  preview or Apply step. Partial, cancelled,
   failed, and stale searches cannot authorize replacements. Applied
   replacements advance the original result set using exact byte edits, without
   re-searching replacement text. Option changes and undo invalidate stale targets;
-  scope changes clear previews without discarding search results. It supports
-  plain text/regex, case, and whole-word matching. Batch undo is atomic across
+  scope changes retain search results and limit the next replacement action.
+  It supports plain text/regex, case, and whole-word matching. Batch undo is atomic across
   participating files; newer edits or ignored-range changes
   in those files must be undone first. Binary, non-text, and files above the 32 MiB
   text limit are skipped. Saving remains an explicit operation. With Run Diff on,
@@ -127,15 +128,17 @@ APIs and must fail cleanly when unavailable.
   navigation share the same state and difference-path snapshots; unchanged frames
   do not rebuild them. Tree replacement and working-copy overlays invalidate the
   cache. Identical folder roots are valid and produce no differences.
-- `src/app/search_session.rs` prepares Next/All previews and remaps remaining
-  original search hits after apply, preserving aliases, selections and byte anchors.
+- `src/app/search_session.rs` prepares Next/All replacement transactions and remaps
+  remaining original search hits after apply, preserving aliases, selections and
+  byte anchors.
   It neither starts searches or diffs nor modifies files.
-- Applying a refreshed search preview reconciles stale clean editor documents
-  only on staged clones, through an undoable protected text splice, then applies
+- Applying a replacement from refreshed search results reconciles stale clean
+  editor documents only on staged clones, through an undoable protected text
+  splice, then applies
   the replacement batch. All participants validate before publication. Batch
   Undo returns to refreshed disk text; earlier editor history remains available.
-  Dirty documents, identity changes, and protected overlap fail safely. Preview
-  alone does not update editor state; saves retain the refreshed byte fingerprint.
+  Dirty documents, identity changes, and protected overlap fail safely.
+  Saves retain the refreshed byte fingerprint.
 - `src/app/search_result_rows.rs` paints bounded text previews and hover removal
   controls without loading files or modifying search data.
 - `src/app/find_icons.rs` embeds the official Codicons font for the five find/replace
