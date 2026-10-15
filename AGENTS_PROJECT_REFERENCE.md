@@ -73,6 +73,8 @@ APIs and must fail cleanly when unavailable.
   rows use each side’s original line number and filtered display position.
   Next/previous difference navigation leaves one visible context row above the
   target in Diff and Merge, clamped at the start of the file or folder listing.
+  Editable Merge bounds navigation against current visible rows and pane height
+  before painting, avoiding a one-frame snap when jumping near the file end.
   Switching an open merge pair to Diff paints aligned read-only rows through the
   File Diff painter, with one source header and Refresh in the header toolbar.
   Read-only row visibility and widths are cached per comparison/preferences/font;

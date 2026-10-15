@@ -104,6 +104,7 @@ pub(super) struct InteractiveView {
     destination: [usize; 2],
     replace: bool,
     scroll: [f32; 2],
+    pending_navigation_scroll: [bool; 2],
     generation: u64,
     side_generation: [u64; 2],
     selected_side: usize,
@@ -195,6 +196,7 @@ impl InteractiveView {
         self.side_files[side] = None;
         self.side_generation[side] = self.side_generation[side].wrapping_add(1);
         self.scroll[side] = 0.0;
+        self.pending_navigation_scroll[side] = false;
         self.selected[side] = 0..0;
         self.destination[side] = 0;
         self.expanded[side].clear();
@@ -649,6 +651,7 @@ impl InteractiveView {
         for side in 0..2 {
             self.side_generation[side] = self.side_generation[side].wrapping_add(1);
         }
+        self.pending_navigation_scroll = [false; 2];
         self.loaded_paths = Some(paths);
         self.invalidate_diff();
         self.sync_editor_cursor(0);
@@ -929,6 +932,7 @@ impl InteractiveView {
     /// Editor and transfer paths call this after every mutation so an older
     /// background result cannot paint alignment for new working-copy text.
     pub(super) fn invalidate_diff(&mut self) {
+        self.pending_navigation_scroll = [false; 2];
         self.publish_active();
         if !self.editing {
             if let (Some(cached), Some(diff)) = (&self.readonly_presentation, &self.diff) {
@@ -1571,6 +1575,7 @@ impl InteractiveView {
                         number.saturating_sub(1)
                     };
                     self.scroll[side] = display_line.saturating_sub(1) as f32 * row_height;
+                    self.pending_navigation_scroll[side] = true;
                 }
             }
         } else if let Some(display_index) = self.readonly_display_index(row_index) {
@@ -2051,6 +2056,7 @@ impl InteractiveView {
             .as_ref()
             .is_some_and(|projection| projection.spans.is_empty())
         {
+            self.pending_navigation_scroll[side] = false;
             ui.centered_and_justified(|ui| {
                 ui.label(
                     RichText::new("No differences with the current options.").color(palette.muted),
@@ -2143,6 +2149,15 @@ impl InteractiveView {
             });
         let merge_controls = self.editing && self.has_actual_pair();
         let text_height = (height - if merge_controls { 150.0 } else { 5.0 }).max(60.0);
+        let content_height = (visible_lines.len().max(1) as f32 * row_height).max(row_height);
+        if std::mem::take(&mut self.pending_navigation_scroll[side]) {
+            // TextEdit paints inside ScrollArea, before its final offset clamp.
+            // Bound jumps using current row/viewport geometry so an EOF jump
+            // cannot paint at an impossible offset and snap back next frame.
+            // Extra TextEdit padding can increase the actual range; manual
+            // scrolling still uses that full range without this navigation cap.
+            self.scroll[side] = self.scroll[side].min((content_height - text_height).max(0.0));
+        }
         let mut pending_transfer = None;
         let mut pending_context = None;
         let output = egui::ScrollArea::vertical()
@@ -2156,7 +2171,6 @@ impl InteractiveView {
                 let width = ui.available_width().max(180.0);
                 let text_width = (width - number_width - gutter_width - 12.0).max(80.0);
                 let origin = ui.cursor().min;
-                let content_height = (visible_lines.len().max(1) as f32 * row_height).max(row_height);
                 let gutter_x = if side == 0 {
                     origin.x + width - gutter_width
                 } else {
@@ -4163,23 +4177,27 @@ mod tests {
         )
     }
     fn click(view: &mut InteractiveView, ctx: &egui::Context, id: egui::Id) {
+        click_frame(view, ctx, id).drop_without_applying_deltas();
+    }
+    fn click_frame(
+        view: &mut InteractiveView,
+        ctx: &egui::Context,
+        id: egui::Id,
+    ) -> egui::FullOutput {
         let position = ctx.read_response(id).unwrap().rect.center();
-        for pressed in [true, false] {
-            frame(
-                view,
-                ctx,
-                vec![
-                    egui::Event::PointerMoved(position),
-                    egui::Event::PointerButton {
-                        pos: position,
-                        button: egui::PointerButton::Primary,
-                        pressed,
-                        modifiers: egui::Modifiers::NONE,
-                    },
-                ],
-            )
-            .drop_without_applying_deltas();
-        }
+        let pointer = |pressed| {
+            vec![
+                egui::Event::PointerMoved(position),
+                egui::Event::PointerButton {
+                    pos: position,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]
+        };
+        frame(view, ctx, pointer(true)).drop_without_applying_deltas();
+        frame(view, ctx, pointer(false))
     }
     #[test]
     fn merge_difference_navigation_highlights_and_scrolls_only_corresponding_sides() {
@@ -4346,6 +4364,85 @@ mod tests {
                     assert_eq!(view.working_text(1), Some(texts[1].as_str()));
                     assert!(!view.workspace.as_ref().unwrap().can_undo());
                     output.drop_without_applying_deltas();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn merge_navigation_near_file_end_settles_on_the_click_frame() {
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            for zoom in [1.0, 2.0] {
+                for count in [12, 240] {
+                    for filtered in [false, true] {
+                        let ctx = egui::Context::default();
+                        set_theme(&ctx, theme);
+                        ctx.set_zoom_factor(zoom);
+                        let text: String = (0..count)
+                            .map(|line| format!("fn chunk_{line}() {{}}\n"))
+                            .collect();
+                        let mut view = view(&text, &text);
+                        view.editor_context = Some(ctx.clone());
+                        view.run_diff = true;
+                        view.merge_options = [filtered, false, false];
+                        view.diff = Some(readonly_comparison(count));
+                        view.diff_rows = vec![count - 3];
+                        for _ in 0..3 {
+                            frame(&mut view, &ctx, vec![]).drop_without_applying_deltas();
+                        }
+                        let geometry = |output: &egui::FullOutput| {
+                            let highlights: Vec<_> = output
+                                .shapes
+                                .iter()
+                                .filter_map(|shape| match &shape.shape {
+                                    egui::Shape::Rect(rect)
+                                        if rect.fill
+                                            == Palette::for_context(&ctx)
+                                                .accent
+                                                .gamma_multiply(0.13) =>
+                                    {
+                                        Some((rect.rect, shape.clip_rect))
+                                    }
+                                    _ => None,
+                                })
+                                .collect();
+                            let text: Vec<_> = output
+                                .shapes
+                                .iter()
+                                .filter_map(|shape| match &shape.shape {
+                                    egui::Shape::Text(text)
+                                        if text.galley.text().contains("chunk_") =>
+                                    {
+                                        Some((text.pos, text.galley.size(), shape.clip_rect))
+                                    }
+                                    _ => None,
+                                })
+                                .collect();
+                            (highlights, text)
+                        };
+                        for action in ["Next difference", "Previous difference", "Next difference"]
+                        {
+                            let first = click_frame(&mut view, &ctx, egui::Id::new(action));
+                            let first_geometry = geometry(&first);
+                            first.drop_without_applying_deltas();
+                            assert_eq!(first_geometry.0.len(), 2);
+                            assert_eq!(first_geometry.1.len(), 2);
+                            let clicked_scroll = view.scroll;
+                            for _ in 0..4 {
+                                let output = frame(&mut view, &ctx, vec![]);
+                                let settled_geometry = geometry(&output);
+                                output.drop_without_applying_deltas();
+                                assert_eq!(
+                                    first_geometry, settled_geometry,
+                                    "{action} must settle on the first frame, including when the target cannot scroll to the top: theme={theme:?}, zoom={zoom}, count={count}, filtered={filtered}"
+                                );
+                                assert_eq!(view.scroll, clicked_scroll);
+                            }
+                        }
+                        assert_eq!(view.working_text(0), Some(text.as_str()));
+                        assert_eq!(view.working_text(1), Some(text.as_str()));
+                        assert!(!view.workspace.as_ref().unwrap().can_undo());
+                    }
                 }
             }
         }
