@@ -4132,10 +4132,18 @@ fn state_color(state: &DirectoryEntryState, palette: Palette) -> Color32 {
 
 fn state_bar_color(state: &DirectoryEntryState, palette: Palette, ctx: &egui::Context) -> Color32 {
     let color = state_color(state, palette);
-    if ctx.theme() == egui::Theme::Light {
-        color.lerp_to_gamma(Color32::WHITE, 0.4)
-    } else {
-        color
+    if ctx.theme() != egui::Theme::Light {
+        return color;
+    }
+    // Thin bars need saturated shades against the light background.
+    match state {
+        DirectoryEntryState::Different => Color32::from_rgb(236, 150, 0),
+        DirectoryEntryState::LeftOnly => Color32::from_rgb(0, 164, 187),
+        DirectoryEntryState::RightOnly => Color32::from_rgb(148, 76, 232),
+        DirectoryEntryState::TypeMismatch | DirectoryEntryState::Error(_) => {
+            Color32::from_rgb(235, 55, 82)
+        }
+        DirectoryEntryState::Same => color,
     }
 }
 
