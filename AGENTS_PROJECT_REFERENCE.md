@@ -41,7 +41,8 @@ APIs and must fail cleanly when unavailable.
   blank-line paragraphs and can expand into line arrows. The lower management
   section, manual selected-range transfers/replacement targets, manual chunk
   editing, and manually ignored line ranges are removed, including their context
-  menus and state. Editors use the reclaimed pane height. Text editing and
+  menus and state. Editors use the reclaimed pane height, including short/empty
+  files, with horizontal scrollbars at each pane's bottom. Text editing and
   transactional undo/redo remain; diff results only assist display and navigation.
   Automatic merging belongs only to the separate three-way CLI workflow.
   File-pair history uses canonical tagged snapshots and survives navigation and

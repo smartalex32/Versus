@@ -2096,7 +2096,9 @@ impl InteractiveView {
                 let text_x = numbers_x + number_width + 4.0;
                 let text_rect = Rect::from_min_size(
                     egui::pos2(text_x, origin.y + text_padding),
-                    egui::vec2(text_width, content_height),
+                    // Short/empty files still fill the viewport so their
+                    // horizontal scrollbar sits at the bottom of the pane.
+                    egui::vec2(text_width, content_height.max(text_height - text_padding)),
                 );
                 let mut highlight_slots = Vec::new();
                 // The editable surface still owns its TextEdit/history, but
@@ -2202,7 +2204,7 @@ impl InteractiveView {
                     };
                     let horizontal = egui::ScrollArea::horizontal()
                         .id_salt(("interactive-horizontal", self.side_generation[side], side))
-                        .auto_shrink([false, true])
+                        .auto_shrink([false, false])
                         .max_width(text_width)
                         .show(ui, |ui| {
                             egui::TextEdit::multiline(&mut next)
@@ -2212,6 +2214,7 @@ impl InteractiveView {
                                 .interactive(self.editing)
                                 .desired_width(text_width)
                                 .desired_rows(1)
+                                .min_size(egui::vec2(text_width, ui.available_height()))
                                 .frame(egui::Frame::NONE)
                                 .layouter(&mut layouter)
                                 .show(ui)
@@ -4272,6 +4275,75 @@ mod tests {
         );
         assert_eq!(view.scroll[0], view.scroll[1]);
     }
+    #[test]
+    fn merge_content_fills_each_pane_and_horizontal_bars_stay_at_the_bottom() {
+        let wide_line = "long content ".repeat(100);
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            for zoom in [1.0, 2.0] {
+                for text in [
+                    String::new(),
+                    wide_line.clone(),
+                    format!("{wide_line}\n").repeat(100),
+                ] {
+                    let ctx = egui::Context::default();
+                    set_theme(&ctx, theme);
+                    ctx.set_zoom_factor(zoom);
+                    let mut view = view(&text, &text);
+                    for _ in 0..3 {
+                        frame(&mut view, &ctx, vec![]).drop_without_applying_deltas();
+                    }
+                    for side in 0..2usize {
+                        let track = ctx
+                            .read_response(egui::Id::new(("merge-transfer-track", side)))
+                            .unwrap()
+                            .rect;
+                        let editor = ctx
+                            .read_response(egui::Id::new((
+                                "two-way-edit",
+                                view.side_generation[side],
+                                side,
+                            )))
+                            .unwrap()
+                            .rect;
+                        assert!(
+                            editor.height() >= track.height() - 12.0,
+                            "content must fill even an empty pane: {theme:?}, {zoom}, {editor:?}, {track:?}"
+                        );
+                        if !text.is_empty() {
+                            let point = egui::pos2(
+                                if side == 0 {
+                                    track.left() - 100.0
+                                } else {
+                                    track.right() + 100.0
+                                },
+                                track.bottom() - 8.0,
+                            );
+                            // Long files must keep their horizontal bar visible
+                            // both at the start and after independent vertical scrolling.
+                            for offset in [0.0, 120.0] {
+                                if offset > 0.0 && text.lines().count() == 1 {
+                                    continue;
+                                }
+                                view.scroll[side] = offset;
+                                frame(&mut view, &ctx, vec![egui::Event::PointerMoved(point)])
+                                    .drop_without_applying_deltas();
+                                let output =
+                                    frame(&mut view, &ctx, vec![egui::Event::PointerMoved(point)]);
+                                assert_eq!(
+                                    output.platform_output.cursor_icon,
+                                    egui::CursorIcon::PointingHand,
+                                    "horizontal bar should be at pane bottom: {theme:?}, {zoom}, side={side}, lines={}, offset={offset}, point={point:?}",
+                                    text.lines().count()
+                                );
+                                output.drop_without_applying_deltas();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn merge_editors_fill_the_panes_without_lower_management_controls() {
         let text: String = (0..200)
