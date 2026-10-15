@@ -515,6 +515,8 @@ cargo build --release --locked --offline
 The checked-in `.cargo/config.toml` directs Cargo to `vendor/` and forces offline
 resolution. The command must work without DNS, package repositories, or Internet
 access when `Cargo.lock` and `vendor/` are present.
+`Cargo.toml` selects the modified `vendor/egui` as a local package, so Cargo
+automatically rebuilds its caret and scrollbar changes in existing build caches.
 
 To refresh locked dependencies on a connected machine after intentionally changing
 `Cargo.toml` or `Cargo.lock`, run:
@@ -531,6 +533,7 @@ environment. A separate Rust toolchain bundle is required where Rust is not alre
 installed; it is intentionally outside this repository.
 The vendor tree includes a [native drop-position patch](docs/vendor-winit-drop-position.md).
 Reapply it and update its checksums after refreshing dependencies.
+Retain the local egui path patch and its checked-in caret/scrollbar changes too.
 
 On Linux, install the host development libraries required by the native windowing
 backend, then use the same Cargo command. `scripts/build-linux.sh` lists the

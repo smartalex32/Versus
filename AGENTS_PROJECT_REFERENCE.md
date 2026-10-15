@@ -221,10 +221,11 @@ APIs and must fail cleanly when unavailable.
   cursor. Its optional `TextCursorStyle::max_height` only caps the painted caret,
   preserving native blinking, selection and scroll geometry. Merge scopes it to
   the editor font height plus native caret margins, excluding padded diff-row
-  spacing; other text fields retain the default. After changing vendored egui,
-  clean its cached package for each build
-  profile (`cargo clean -p egui` and `cargo clean --release -p egui`) before
-  validating the rebuilt app.
+  spacing; other text fields retain the default. `Cargo.toml` explicitly patches
+  egui to the local `vendor/egui` package, so Cargo tracks these modified sources
+  and rebuilds them after updates without manual cache cleaning. Keep this path
+  patch when refreshing dependencies; treating modified egui as an immutable
+  registry package can reuse obsolete API definitions from an existing build.
   Footer guidance updates independently on the left. Activity status only
   renders while a loader, comparison, or save is running; it sits right of the
   legend in Diff and left of the Unsaved Changes/Save Both group in Merge.
