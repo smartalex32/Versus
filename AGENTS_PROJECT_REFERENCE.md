@@ -213,6 +213,12 @@ APIs and must fail cleanly when unavailable.
   status, and text. Up/Down tree navigation preserves focus side and Tab escapes.
   Focusable file panes support keyboard scrolling. Empty panes show persistent
   drop outlines; toolbar press feedback precedes release activation.
+  Shared vendored egui scrollbars honor the theme's interaction cursor while
+  hovered or dragged, covering horizontal/vertical bars in comparisons, editors,
+  trees, and dialogs. Disabled bars and disabled scrollbar input keep the default
+  cursor. After changing vendored egui, clean its cached package for each build
+  profile (`cargo clean -p egui` and `cargo clean --release -p egui`) before
+  validating the rebuilt app.
   Footer guidance updates independently on the left. Activity status only
   renders while a loader, comparison, or save is running; it sits right of the
   legend in Diff and left of the Unsaved Changes/Save Both group in Merge.

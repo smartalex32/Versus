@@ -1332,6 +1332,13 @@ impl Prepared {
             // and to avoid producing jitter in "thin widget" heuristics there.
             // Also: it make sense to detect any hover where the scroll bar _will_ be.
             let response = ui.interact(max_bar_rect, interact_id, sense);
+            if scroll_source.scroll_bar
+                && ui.is_enabled()
+                && (response.hovered() || response.dragged())
+                && let Some(cursor) = ui.visuals().interact_cursor
+            {
+                ui.ctx().set_cursor_icon(cursor);
+            }
 
             response.widget_info(|| WidgetInfo::new(crate::WidgetType::ScrollBar));
 

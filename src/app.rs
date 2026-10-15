@@ -5903,6 +5903,108 @@ mod tests {
     }
 
     #[test]
+    fn scrollbars_use_pointer_for_tracks_and_dragging_but_not_when_disabled() {
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            for enabled in [true, false] {
+                for interactive in [true, false] {
+                    let ctx = egui::Context::default();
+                    set_theme(&ctx, theme);
+                    let render = |events| {
+                        let mut scroll_id = egui::Id::NULL;
+                        let output = ctx.run_ui(
+                            egui::RawInput {
+                                screen_rect: Some(Rect::from_min_size(
+                                    Pos2::ZERO,
+                                    egui::vec2(400.0, 300.0),
+                                )),
+                                events,
+                                ..Default::default()
+                            },
+                            |ui| {
+                                ui.add_enabled_ui(enabled, |ui| {
+                                    scroll_id = egui::ScrollArea::both()
+                                        .id_salt("pointer-scrollbar-test")
+                                        .scroll_source(if interactive {
+                                            egui::scroll_area::ScrollSource::default()
+                                        } else {
+                                            egui::scroll_area::ScrollSource::NONE
+                                        })
+                                        .scroll_bar_visibility(
+                                            egui::scroll_area::ScrollBarVisibility::AlwaysVisible,
+                                        )
+                                        .max_width(200.0)
+                                        .max_height(120.0)
+                                        .show(ui, |ui| {
+                                            ui.allocate_space(egui::vec2(1000.0, 1000.0));
+                                        })
+                                        .id;
+                                });
+                            },
+                        );
+                        (output, scroll_id)
+                    };
+                    for _ in 0..3 {
+                        render(vec![]).0.drop_without_applying_deltas();
+                    }
+                    let (output, scroll_id) = render(vec![]);
+                    output.drop_without_applying_deltas();
+                    for axis in 0..2usize {
+                        let rect = ctx.read_response(scroll_id.with(axis)).unwrap().rect;
+                        let expected = if enabled && interactive {
+                            egui::CursorIcon::PointingHand
+                        } else {
+                            egui::CursorIcon::Default
+                        };
+                        for fraction in [0.05, 0.75] {
+                            let mut point = rect.center();
+                            point[axis] = egui::lerp(rect.min[axis]..=rect.max[axis], fraction);
+                            let (output, _) = render(vec![egui::Event::PointerMoved(point)]);
+                            let actual = output.platform_output.cursor_icon;
+                            output.drop_without_applying_deltas();
+                            assert_eq!(
+                                actual, expected,
+                                "theme={theme:?}, axis={axis}, enabled={enabled}, interactive={interactive}"
+                            );
+                        }
+                        if enabled && interactive {
+                            let start = rect.center();
+                            render(vec![
+                                egui::Event::PointerMoved(start),
+                                egui::Event::PointerButton {
+                                    pos: start,
+                                    button: egui::PointerButton::Primary,
+                                    pressed: true,
+                                    modifiers: Default::default(),
+                                },
+                            ])
+                            .0
+                            .drop_without_applying_deltas();
+                            let mut outside = start;
+                            outside[1 - axis] -= 30.0;
+                            outside[axis] += 20.0;
+                            let (output, _) = render(vec![egui::Event::PointerMoved(outside)]);
+                            let actual = output.platform_output.cursor_icon;
+                            output.drop_without_applying_deltas();
+                            assert_eq!(
+                                actual, expected,
+                                "dragging scrollbar must keep pointer cursor"
+                            );
+                            render(vec![egui::Event::PointerButton {
+                                pos: outside,
+                                button: egui::PointerButton::Primary,
+                                pressed: false,
+                                modifiers: Default::default(),
+                            }])
+                            .0
+                            .drop_without_applying_deltas();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn merge_run_diff_checkbox_uses_pointer_cursor() {
         let ctx = egui::Context::default();
         apply_theme(&ctx);
