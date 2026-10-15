@@ -33,9 +33,9 @@ APIs and must fail cleanly when unavailable.
 - `src/app/interactive_view.rs` renders the two-way editing workspace. Each side
   has its own text buffer, line numbers, dirty state, scroll position, and explicit
   Save Left/Save Right disk icon beside Browse, plus Save Both in the footer,
-  with a pending-content preview. Save Both shares per-file save eligibility and
-  previews only saveable sides. File content retains File Diff’s header/divider
-  spacing above the first row. Selection
+  with a pending-content preview for active files. Save Both also saves retained
+  dirty files from folder-wide replacement after the modal is closed. File content
+  retains File Diff’s header/divider spacing above the first row. Selection
   transfers can insert at a chosen line or replace an explicitly selected target.
   Accept All Left/Right copy one side into the other as a single transaction, while
   honoring destination protection. Automatic merging belongs only to the separate
@@ -53,8 +53,9 @@ APIs and must fail cleanly when unavailable.
   Find and Replace magnifying glass on the left, followed by the change count
   while Run Diff is on. Full icon/text legends are always visible and centered
   in the footer, including Conflict in Merge, alongside Save Both and Unsaved
-  Changes. Narrow layouts wrap legend entries within this footer. Each file
-  side has a Back button before its LEFT/RIGHT label to return to its own tree.
+  Changes. Unsaved Changes sits immediately left of Save Both; ordinary guidance
+  remains left-aligned in the footer. Narrow layouts wrap legend entries within
+  this footer. Each file side has a Back button before its LEFT/RIGHT label to return to its own tree.
   Zoom stays on the right; comparison options and difference navigation follow it
   only while Run Diff is enabled. Hidden Merge option states are retained. Each
   side loads and scrolls independently; transfers require two loaded files.
@@ -103,7 +104,10 @@ APIs and must fail cleanly when unavailable.
   muted italic hints, colored LEFT/RIGHT/BOTH scope controls, inline search-option
   icons, and external Replace Next/All icons. Undo, Redo, and Refresh follow the
   scope buttons, with search status below. A neutral LEFT/RIGHT view toggle
-  spans the results column. LEFT/RIGHT scope selects that results side and disables
+  spans the results column. Its LEFT (X)/RIGHT (X) labels show each side's included
+  match count, including streamed updates and exclusions. File names remain in
+  the results list; there is no separate matches/files summary line.
+  LEFT/RIGHT scope selects that results side and disables
   the opposite view toggle; BOTH enables both. Replacement actions include only
   matches in the selected scope, while hidden-side results and exclusions remain
   cached. Results stream in batches while searching; each virtualized row shows
@@ -112,7 +116,8 @@ APIs and must fail cleanly when unavailable.
   results panel. Refresh repopulates exclusions and rereads clean files from disk,
   while dirty working copies take precedence. Replace Next/All immediately apply
   included targets as an undoable working-copy batch, without a replacement
-  preview or Apply step. Partial, cancelled,
+  preview or Apply step. The modal has no working-copy, unsaved-change, or save
+  controls; changes are saved from the main workspace. Partial, cancelled,
   failed, and stale searches cannot authorize replacements. Applied
   replacements advance the original result set using exact byte edits, without
   re-searching replacement text. Option changes and undo invalidate stale targets;
@@ -208,8 +213,8 @@ APIs and must fail cleanly when unavailable.
   drop outlines; toolbar press feedback precedes release activation.
   Footer guidance updates independently on the left. Activity status only
   renders while a loader, comparison, or save is running; it sits right of the
-  legend in Diff and immediately left of Save Both in Merge. Completed-action
-  messages remain in the left guidance area. Deduplicated errors use this activity
+  legend in Diff and left of the Unsaved Changes/Save Both group in Merge.
+  Completed-action messages remain in the left guidance area. Deduplicated errors use this activity
   area for an N errors summary with hover details; pointer movement or clicks
   in either pane dismiss errors without changing working copies or history.
   The zoom percentage precedes adjacent magnifier −/+ buttons immediately left

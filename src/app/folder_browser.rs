@@ -93,7 +93,6 @@ pub(super) struct FolderBrowser {
     selected_hits: BTreeSet<u64>,
     working: BTreeMap<PathBuf, WorkingFile>,
     working_revision: Option<u64>,
-    pending_save: bool,
     save: Option<SaveJob>,
 }
 
@@ -141,7 +140,6 @@ impl FolderBrowser {
             selected_hits: BTreeSet::new(),
             working: BTreeMap::new(),
             working_revision: None,
-            pending_save: false,
             save: None,
         }
     }
@@ -827,7 +825,7 @@ impl FolderBrowser {
             _ => None,
         }
     }
-    fn begin_save(&mut self, view: &InteractiveView) {
+    pub(super) fn begin_save(&mut self, view: &InteractiveView) {
         if self.save.is_some() || view.is_saving() {
             return;
         }
@@ -839,7 +837,6 @@ impl FolderBrowser {
         // its physical identity once, using its original native save path.
         let files = pending_save_files(&self.working);
         if files.is_empty() {
-            self.pending_save = false;
             return;
         }
         let total = files.len();
@@ -867,7 +864,6 @@ impl FolderBrowser {
             total,
             completed: 0,
         });
-        self.pending_save = false;
         self.error = None;
     }
     pub(super) fn poll_save(&mut self, view: &mut InteractiveView, ctx: &egui::Context) {
@@ -1156,75 +1152,12 @@ impl FolderBrowser {
                                     });
                                 }
                             });
-                            let dirty = pending_save_files(&self.working).len();
-                            if dirty > 0 {
-                                ui.label(
-                                    RichText::new(format!(
-                                        "{dirty} files have unsaved replacements"
-                                    ))
-                                    .color(Palette::for_context(ctx).changed),
-                                );
-                            }
-                            if dirty > 0
-                                && ui
-                                    .add_enabled(
-                                        !self.is_saving() && !view.is_saving(),
-                                        egui::Button::new("Preview Save pending files"),
-                                    )
-                                    .clicked()
-                            {
-                                self.pending_save = true;
-                            }
-                            if let Some(save) = &self.save {
-                                ui.spinner();
-                                ui.label(format!(
-                                    "Saving {} of {} files…",
-                                    save.completed.min(save.total),
-                                    save.total
-                                ));
-                            }
-                            if self.pending_save {
-                                ui.separator();
-                                ui.label("Save these working copies to their original files?");
-                                egui::ScrollArea::vertical()
-                                    .max_height(120.0)
-                                    .show(ui, |ui| {
-                                        for (path, file, _) in pending_save_files(&self.working) {
-                                            egui::CollapsingHeader::new(path.display().to_string())
-                                                .show(ui, |ui| {
-                                                    ui.columns(2, |columns| {
-                                                        columns[0].label("Loaded file");
-                                                        columns[0].label(
-                                                            RichText::new(
-                                                                file.baseline_text()
-                                                                    .unwrap_or_default(),
-                                                            )
-                                                            .monospace(),
-                                                        );
-                                                        columns[1].label("Pending content");
-                                                        columns[1].label(
-                                                            RichText::new(&file.text).monospace(),
-                                                        );
-                                                    });
-                                                })
-                                                .header_response
-                                                .on_hover_cursor(egui::CursorIcon::PointingHand);
-                                        }
-                                    });
-                                ui.horizontal(|ui| {
-                                    if ui.button("Save pending files").clicked() {
-                                        self.begin_save(view);
-                                    }
-                                    if ui.button("Cancel save").clicked() {
-                                        self.pending_save = false;
-                                    }
-                                });
-                            }
                             if let Some(error) = &self.error {
                                 ui.colored_label(Palette::for_context(ctx).error, error);
                             }
                         });
                     let right = &mut columns[1];
+                    let counts = self.search_match_counts();
                     right.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 3.0;
                         let palette = Palette::for_context(ui.ctx());
@@ -1235,7 +1168,7 @@ impl FolderBrowser {
                                 .add_enabled_ui(enabled, |ui| {
                                     search_choice_button(
                                         ui,
-                                        label,
+                                        &format!("{label} ({})", counts[side]),
                                         palette.text,
                                         self.results_side == side,
                                         egui::Id::new(("folder-search-view", side)),
@@ -1302,6 +1235,20 @@ impl FolderBrowser {
         .clicked();
     }
 
+    fn search_match_counts(&self) -> [usize; 2] {
+        let mut counts = [0; 2];
+        if let Some(results) = &self.results {
+            for file in &results.files {
+                counts[file.side] += file
+                    .hits
+                    .iter()
+                    .filter(|hit| self.selected_hits.contains(&hit.id))
+                    .count();
+            }
+        }
+        counts
+    }
+
     fn search_results_panel(&mut self, ui: &mut egui::Ui, height: f32) {
         let palette = Palette::for_context(ui.ctx());
         let mut removed = Vec::new();
@@ -1324,8 +1271,6 @@ impl FolderBrowser {
                         Hit(&'a versus::SearchFileResults, &'a versus::SearchHit),
                     }
                     let mut rows = Vec::new();
-                    let mut matches = 0;
-                    let mut files = 0;
                     for file in results
                         .files
                         .iter()
@@ -1339,17 +1284,14 @@ impl FolderBrowser {
                         if hits.is_empty() {
                             continue;
                         }
-                        files += 1;
-                        matches += hits.len();
                         rows.push(Row::File(file));
                         rows.extend(hits.into_iter().map(|hit| Row::Hit(file, hit)));
                     }
-                    ui.label(format!("{matches} matches in {files} files"));
                     if !rows.is_empty() {
                         let row_height = control_extent(ui);
                         egui::ScrollArea::vertical()
                             .id_salt(("folder-search-results-list", self.results_side))
-                            .max_height((height - 48.0).max(30.0))
+                            .max_height((height - 18.0).max(30.0))
                             .auto_shrink([false, false])
                             .show_rows(ui, row_height, rows.len(), |ui, range| {
                                 for index in range {
@@ -2279,7 +2221,7 @@ mod tests {
             assert!((left_view.width() - right_view.width()).abs() < 1.0);
             assert!((left_view.left() - (results.left() - 9.0)).abs() < 1.0);
             assert!((right_view.right() - (results.right() + 9.0)).abs() < 1.0);
-            for label in ["LEFT", "RIGHT"] {
+            for label in ["LEFT (0)", "RIGHT (0)"] {
                 assert!(
                     output.shapes.iter().any(|shape| matches!(&shape.shape,
                     egui::Shape::Text(text) if text.galley.text() == label
@@ -2698,6 +2640,7 @@ mod tests {
         sender.send(Ok(SearchEvent::File(left))).unwrap();
         browser.poll(&ctx);
         assert!(browser.search.is_some());
+        assert_eq!(browser.search_match_counts(), [1, 0]);
         assert!(
             !browser.results_current(),
             "partial output cannot authorize replacements"
@@ -2711,6 +2654,7 @@ mod tests {
             .rect;
         click_dialog(&mut browser, &mut view, &ctx, remove.center());
         assert!(!browser.selected_hits.contains(&0));
+        assert_eq!(browser.search_match_counts(), [0, 0]);
         sender
             .send(Ok(SearchEvent::Hits {
                 path: PathBuf::from("side-0.txt"),
@@ -2734,6 +2678,7 @@ mod tests {
         browser.poll(&ctx);
         assert!(browser.results_current());
         assert_eq!(browser.selected_hits, BTreeSet::from([1, 2]));
+        assert_eq!(browser.search_match_counts(), [1, 1]);
         assert_eq!(browser.results.as_ref().unwrap().files[0].hits.len(), 2);
         let right_toggle = ctx
             .read_response(egui::Id::new(("folder-search-view", 1usize)))
@@ -2748,6 +2693,12 @@ mod tests {
         );
         assert_eq!(browser.results.as_ref().unwrap().files.len(), 2);
         let output = dialog_frame(&mut browser, &mut view, &ctx, vec![]);
+        for label in ["LEFT (1)", "RIGHT (1)", "side-1.txt"] {
+            assert!(output.shapes.iter().any(|shape| matches!(&shape.shape,
+                egui::Shape::Text(text) if text.galley.text() == label)));
+        }
+        assert!(!output.shapes.iter().any(|shape| matches!(&shape.shape,
+            egui::Shape::Text(text) if text.galley.text().contains("matches in"))));
         assert!(output.shapes.iter().any(|shape| matches!(&shape.shape,
             egui::Shape::Text(text) if text.galley.text() == "1: right match")));
         assert!(!output.shapes.iter().any(|shape| matches!(&shape.shape,
@@ -3076,9 +3027,23 @@ mod tests {
             assert_eq!(view.working_text(0), Some(expected_left));
             assert_eq!(view.working_text(1), Some(expected_right));
             assert_eq!(browser.selected_hits.len(), remaining);
+            assert_eq!(
+                browser.search_match_counts(),
+                if remaining == 0 {
+                    [0, 0]
+                } else {
+                    [remaining - 1, 1]
+                }
+            );
             let output = dialog_frame(&mut browser, &mut view, &ctx, vec![]);
             assert!(!output.shapes.iter().any(|shape| matches!(&shape.shape,
-                egui::Shape::Text(text) if text.galley.text().contains("Apply preview") || text.galley.text().starts_with("Preview —"))));
+                egui::Shape::Text(text) if text.galley.text().contains("Apply preview")
+                    || text.galley.text().starts_with("Preview —")
+                    || text.galley.text().contains("unsaved replacements")
+                    || text.galley.text().contains("working copies")
+                    || text.galley.text().contains("Save pending")
+                    || text.galley.text().contains("Cancel save")
+                    || text.galley.text().contains("matches in"))));
             output.drop_without_applying_deltas();
         }
         assert_eq!(view.working_text(1), Some("long value\n"));
@@ -3433,6 +3398,109 @@ mod tests {
         browser.poll_comparisons(&view, &ctx, true);
         assert!(browser.overlays.is_empty());
         assert!(browser.overlay_job.is_none());
+    }
+
+    #[test]
+    fn folder_replacements_save_from_workspace_without_opening_the_files() {
+        let root = std::env::temp_dir().join(format!(
+            "versus-footer-replacement-save-{}",
+            std::process::id()
+        ));
+        let roots = [root.join("left"), root.join("right")];
+        for folder in &roots {
+            fs::create_dir_all(folder).unwrap();
+        }
+        let paths = roots.each_ref().map(|folder| folder.join("item.txt"));
+        for path in &paths {
+            fs::write(path, "match\n").unwrap();
+        }
+        let ctx = egui::Context::default();
+        set_theme(&ctx, egui::Theme::Dark);
+        let mut view = InteractiveView::default();
+        view.set_editing(true, [false; 3]);
+        let mut browser = FolderBrowser::new(roots.clone());
+        browser.query = SearchQuery::plain("match");
+        browser.replacement = "changed".into();
+        browser.searched_query = Some(browser.query.clone());
+        browser.results = Some(
+            versus::search_roots(
+                &browser.sources,
+                SearchScope::Both,
+                &browser.query,
+                None,
+                &BTreeMap::new(),
+            )
+            .unwrap(),
+        );
+        browser.selected_hits = browser
+            .results
+            .as_ref()
+            .unwrap()
+            .files
+            .iter()
+            .flat_map(|file| file.hits.iter().map(|hit| hit.id))
+            .collect();
+        browser.replace_matches(&mut view, false);
+        assert!(view.any_dirty());
+        assert!(view.working_text(0).is_none() && view.working_text(1).is_none());
+        for path in &paths {
+            assert_eq!(fs::read_to_string(path).unwrap(), "match\n");
+        }
+        let mut app = VersusApp::default();
+        app.merge_mode = true;
+        app.interactive = Some(view);
+        app.source_paths = roots.clone().map(Some);
+        app.source_kinds = [Some(SourceKind::Folder); 2];
+        app.merge_folders = Some(browser);
+        let render = |app: &mut VersusApp, events| {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0))),
+                    events,
+                    ..Default::default()
+                },
+                |ui| app.render(ui),
+            )
+        };
+        for _ in 0..3 {
+            render(&mut app, vec![]).drop_without_applying_deltas();
+        }
+        let save = ctx.read_response(egui::Id::new("Save Both")).unwrap();
+        assert!(save.enabled());
+        for pressed in [true, false] {
+            render(
+                &mut app,
+                vec![
+                    egui::Event::PointerMoved(save.rect.center()),
+                    egui::Event::PointerButton {
+                        pos: save.rect.center(),
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: Default::default(),
+                    },
+                ],
+            )
+            .drop_without_applying_deltas();
+        }
+        assert!(app.merge_folders.as_ref().unwrap().is_saving());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.merge_folders.as_ref().unwrap().is_saving() {
+            app.poll_merge_save_owners(&ctx);
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        for path in &paths {
+            assert_eq!(fs::read_to_string(path).unwrap(), "changed\n");
+        }
+        assert!(!app.interactive.as_ref().unwrap().any_dirty());
+        assert!(
+            app.merge_folders
+                .as_ref()
+                .unwrap()
+                .error_details()
+                .is_empty()
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

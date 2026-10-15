@@ -115,6 +115,7 @@ pub(super) struct InteractiveView {
     from_folders: bool,
     editor_context: Option<egui::Context>,
     pending_save: Option<Vec<usize>>,
+    save_all_requested: bool,
     error: Option<String>,
     status: String,
 }
@@ -398,6 +399,23 @@ impl InteractiveView {
                 || self.active_file(side).is_some_and(|file| {
                     matches!(file.fingerprint, versus::FileFingerprint::Missing)
                 }))
+    }
+    /// Folder-wide replacement can make retained documents dirty while they
+    /// are not open in either editor. The app routes this explicit Save Both
+    /// request through its search owner so every retained copy is saved.
+    pub(super) fn has_retained_dirty_documents(&self) -> bool {
+        self.documents.iter().any(|(identity, retained)| {
+            retained.document.is_dirty()
+                && !self
+                    .side_sources
+                    .iter()
+                    .flatten()
+                    .chain(self.paths.iter().flat_map(|paths| paths.iter()))
+                    .any(|source| self.key_for(source) == *identity)
+        })
+    }
+    pub(super) fn take_save_all_requested(&mut self) -> bool {
+        std::mem::take(&mut self.save_all_requested)
     }
     pub(super) fn request_side_save(&mut self, side: usize) {
         if self.can_save_side(side) {
@@ -1218,6 +1236,7 @@ impl InteractiveView {
         workspace_footer_height(
             ui,
             self.editing,
+            self.any_dirty(),
             &self.footer_legend_icons(),
             self.footer_legend_counts(),
         )
@@ -2738,16 +2757,43 @@ impl InteractiveView {
     }
     fn footer(&mut self, ui: &mut egui::Ui) -> Rect {
         let icons = self.footer_legend_icons();
-        let row = workspace_footer_layout(ui, self.editing, &icons, self.footer_legend_counts());
+        let dirty = self.any_dirty();
+        let row =
+            workspace_footer_layout(ui, self.editing, dirty, &icons, self.footer_legend_counts());
         ui.scope_builder(egui::UiBuilder::new().max_rect(row.info), |ui| {
-            footer_guidance(ui, self.guidance_message(), self.any_dirty());
+            footer_guidance(ui, self.guidance_message());
         });
         ui.scope_builder(egui::UiBuilder::new().max_rect(row.legend), |ui| {
             bottom_legend(ui, &icons, self.footer_legend_counts());
         });
+        if let Some(dirty) = row.dirty {
+            ui.scope_builder(
+                egui::UiBuilder::new()
+                    .max_rect(dirty)
+                    .layout(egui::Layout::right_to_left(egui::Align::Center)),
+                |ui| {
+                    let response = ui.add(
+                        egui::Label::new(
+                            RichText::new("Unsaved Changes")
+                                .strong()
+                                .size(11.0)
+                                .color(Palette::for_context(ui.ctx()).changed),
+                        )
+                        .truncate(),
+                    );
+                    ui.interact(
+                        response.rect,
+                        egui::Id::new("workspace-unsaved"),
+                        Sense::hover(),
+                    )
+                    .on_hover_text("Changes remain in memory until saved.");
+                },
+            );
+        }
         if let Some(save) = row.save {
             let save_sides: Vec<_> = (0..2).filter(|side| self.can_save_side(*side)).collect();
-            let enabled = !save_sides.is_empty();
+            let retained_dirty = self.has_retained_dirty_documents();
+            let enabled = !self.is_saving() && (!save_sides.is_empty() || retained_dirty);
             ui.scope_builder(
                 egui::UiBuilder::new()
                     .max_rect(save)
@@ -2755,7 +2801,11 @@ impl InteractiveView {
                 |ui| {
                     if captioned_icon_button(ui, ToolbarIcon::Save, enabled, "Save Both").clicked()
                     {
-                        self.request_save(save_sides);
+                        if retained_dirty {
+                            self.save_all_requested = true;
+                        } else {
+                            self.request_save(save_sides);
+                        }
                     }
                 },
             );
@@ -5000,6 +5050,61 @@ mod tests {
             assert!(left.top() >= 0.0);
         }
     }
+    #[test]
+    fn unsaved_indicator_sits_between_activity_and_save_with_guidance_on_left() {
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            for zoom in [1.0, 2.0] {
+                let ctx = egui::Context::default();
+                set_theme(&ctx, theme);
+                ctx.set_zoom_factor(zoom);
+                let mut view = view("left\n", "right\n");
+                view.workspace
+                    .as_mut()
+                    .unwrap()
+                    .set_text(TwoWaySide::Left, "changed\n");
+                for _ in 0..3 {
+                    frame(&mut view, &ctx, vec![]).drop_without_applying_deltas();
+                }
+                let dirty = ctx
+                    .read_response(egui::Id::new("workspace-unsaved"))
+                    .unwrap()
+                    .rect;
+                let save = ctx.read_response(egui::Id::new("Save Both")).unwrap().rect;
+                let guidance = ctx
+                    .read_response(egui::Id::new("workspace-guidance"))
+                    .unwrap()
+                    .rect;
+                let legend = ctx
+                    .read_response(egui::Id::new("workspace-legend"))
+                    .unwrap()
+                    .rect;
+                assert!(guidance.right() <= legend.left());
+                let status = ctx
+                    .read_response(egui::Id::new("workspace-status"))
+                    .unwrap()
+                    .rect;
+                assert!(legend.right() <= status.left());
+                assert!(status.right() <= dirty.left());
+                assert!(dirty.right() < save.left());
+                assert!((dirty.center().y - save.center().y).abs() < 1.0);
+                let output = frame(&mut view, &ctx, vec![]);
+                assert!(output.shapes.iter().any(|shape| matches!(&shape.shape,
+                    egui::Shape::Text(text) if text.galley.text() == "Unsaved Changes"
+                        && text.galley.job.sections.iter().all(|section| section.format.color == Palette::for_context(&ctx).changed)
+                        && shape.clip_rect.contains_rect(text.galley.rect.translate(text.pos.to_vec2())))));
+                output.drop_without_applying_deltas();
+                view.move_history(false);
+                for _ in 0..3 {
+                    frame(&mut view, &ctx, vec![]).drop_without_applying_deltas();
+                }
+                assert!(
+                    ctx.read_response(egui::Id::new("workspace-unsaved"))
+                        .is_none()
+                );
+            }
+        }
+    }
+
     #[test]
     fn save_both_tracks_per_side_save_availability_and_only_previews_changed_files() {
         let ctx = egui::Context::default();

@@ -73,14 +73,16 @@ and ignored-range changes. They are also available in the toolbar;
 Ctrl/Command+Z and Ctrl+Y or Command+Shift+Z work while editing.
 
 Use the **Save Left** or **Save Right** disk icon immediately to the right of
-each pane’s Browse button, or **Save Both** in the bottom row, to review a preview
-and write the selected working copies. Save Both is enabled only when either
-per-file Save is active, and previews only files ready to save. Versus checks that the files have not
-changed on disk since they were opened before replacing them. Interactive text files are limited
+each pane’s Browse button to preview and save that file. **Save Both** in the
+bottom row saves pending changes on both sides, including replacements in unopened
+folder files. When only the open files have changes, it uses the usual save preview.
+Versus checks that the files have not changed on disk since they were opened before
+replacing them. Interactive text files are limited
 to 32 MiB. UTF-8 with or without a BOM and UTF-16 little- and big-endian text retain
 their encoding; original line endings are preserved where possible. Cancelled or
 failed saves leave the working copies intact. Unsaved changes are marked
-independently for each pane.
+independently for each pane. The footer's **Unsaved Changes** indicator sits to the
+left of **Save Both**; normal guidance remains on the bottom left.
 
 For folder pairs, Merge opens a lazy browser that enumerates directory entries and
 basic metadata as folders are expanded. It does not compare file contents unless
@@ -103,7 +105,9 @@ are tooltip-equipped VS Code icons inside the Find field. Search starts after
 250 ms without typing; button actions start immediately. Every search collects
 both sides, and matches appear progressively in the right results
 panel, which fills the right half by default with a centered empty-state hint.
-A neutral **LEFT / RIGHT** toggle spans that panel’s width. Choosing **LEFT** or
+A neutral **LEFT (X) / RIGHT (X)** toggle spans that panel’s width and shows each
+side's included match count. File names remain above their matches without a
+separate matches/files summary. Choosing **LEFT** or
 **RIGHT** switches the results to that side, disables the opposite toggle, and
 limits replacement to the chosen side. **BOTH** enables both toggles. Scope changes
 reuse cached results immediately without another search. Rows show the line
@@ -114,9 +118,10 @@ Undo, Redo, and Refresh sit beside the scope controls, with search status below.
 changes, while preserving unsaved working copies. The **Replace Next** and
 **Replace All** icons beside the Replace field immediately replace the next
 included match or all included matches in working copies, with no preview or Apply
-step. Each action is one undoable batch. Remaining original matches advance after
-each action,
-so repeated Replace Next actions stay accurate when replacement lengths change.
+step. The modal has no save controls or unsaved-change text; close it and save
+from the main workspace. Each action is one undoable batch. Remaining original
+matches advance after each action, so repeated Replace Next actions stay accurate
+when replacement lengths change.
 Undo, Redo, Refresh, and search-option buttons start any needed search immediately;
 the typing delay applies only to edits in Find.
 With Run Diff enabled, folder statuses include staged working copies and ignored

@@ -1475,6 +1475,7 @@ impl VersusApp {
                 let footer_height = workspace_footer_height(
                     ui,
                     false,
+                    false,
                     &DIFF_LEGEND_ICONS,
                     self.comparison_counts(),
                 );
@@ -1920,6 +1921,16 @@ impl VersusApp {
                 self.render_bottom_status(ui, Some(&mut view));
             });
         });
+        if view.take_save_all_requested() {
+            if let Some(browser) = self.merge_folders.as_mut() {
+                browser.begin_save(&view);
+            } else {
+                let browser = self
+                    .merge_file_search
+                    .get_or_insert_with(|| FolderBrowser::new_search(view.current_sources()));
+                browser.begin_save(&view);
+            }
+        }
         view.render_previews(ui.ctx());
         if self.merge_folders.is_none() {
             if let Some(paths) = view.take_loaded_sources() {
@@ -3328,7 +3339,13 @@ impl VersusApp {
     }
 
     fn footer(&mut self, ui: &mut egui::Ui) {
-        let row = workspace_footer_layout(ui, false, &DIFF_LEGEND_ICONS, self.comparison_counts());
+        let row = workspace_footer_layout(
+            ui,
+            false,
+            false,
+            &DIFF_LEGEND_ICONS,
+            self.comparison_counts(),
+        );
         let guidance = self
             .selected
             .as_ref()
@@ -3336,7 +3353,7 @@ impl VersusApp {
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| self.message.clone());
         ui.scope_builder(egui::UiBuilder::new().max_rect(row.info), |ui| {
-            footer_guidance(ui, &guidance, false);
+            footer_guidance(ui, &guidance);
         });
         ui.scope_builder(egui::UiBuilder::new().max_rect(row.legend), |ui| {
             bottom_legend(ui, &DIFF_LEGEND_ICONS, self.comparison_counts());
@@ -4345,12 +4362,29 @@ struct WorkspaceFooterLayout {
     info: Rect,
     legend: Rect,
     status: Rect,
+    dirty: Option<Rect>,
     save: Option<Rect>,
 }
 
-fn footer_side_width(width: f32, with_save: bool) -> f32 {
+fn footer_side_width(ui: &egui::Ui, width: f32, with_save: bool, with_dirty: bool) -> f32 {
+    let dirty_width = ui
+        .painter()
+        .layout_no_wrap(
+            "Unsaved Changes".into(),
+            FontId::proportional(11.0),
+            Palette::for_context(ui.ctx()).changed,
+        )
+        .size()
+        .x;
+    let save_and_dirty = with_dirty.then(|| {
+        dirty_width
+            + 40.0
+            + with_save
+                .then(|| captioned_icon_width(ui, "Save Both") + ui.spacing().item_spacing.x)
+                .unwrap_or_default()
+    });
     (width * 0.20)
-        .max(if with_save { 160.0 } else { 128.0 })
+        .max(save_and_dirty.unwrap_or(if with_save { 160.0 } else { 128.0 }))
         .min(260.0)
         .min(width / 2.0)
 }
@@ -4358,11 +4392,12 @@ fn footer_side_width(width: f32, with_save: bool) -> f32 {
 fn workspace_footer_height(
     ui: &egui::Ui,
     with_save: bool,
+    with_dirty: bool,
     icons: &[StatusIcon],
     counts: Option<[usize; 6]>,
 ) -> f32 {
     let width = ui.available_width();
-    let legend_width = width - 2.0 * footer_side_width(width, with_save);
+    let legend_width = width - 2.0 * footer_side_width(ui, width, with_save, with_dirty);
     let rows = legend_rows_in_width(ui, icons, counts, legend_width)
         .len()
         .max(1);
@@ -4372,15 +4407,16 @@ fn workspace_footer_height(
 fn workspace_footer_layout(
     ui: &mut egui::Ui,
     with_save: bool,
+    with_dirty: bool,
     icons: &[StatusIcon],
     counts: Option<[usize; 6]>,
 ) -> WorkspaceFooterLayout {
-    let height = workspace_footer_height(ui, with_save, icons, counts);
+    let height = workspace_footer_height(ui, with_save, with_dirty, icons, counts);
     let extent = control_extent(ui);
     let (row, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), height), Sense::hover());
     // Symmetric side areas keep the legend centered. At high zoom its entries
     // wrap inside this same footer, with guidance, activity and Save alongside.
-    let side = footer_side_width(row.width(), with_save);
+    let side = footer_side_width(ui, row.width(), with_save, with_dirty);
     let line_top = row.center().y - extent / 2.0;
     let line_bottom = line_top + extent;
     let info = Rect::from_min_max(
@@ -4399,11 +4435,30 @@ fn workspace_footer_layout(
             egui::pos2(row.right(), line_bottom),
         )
     });
+    let dirty = with_dirty.then(|| {
+        let right = save.map_or(row.right(), |save| {
+            save.left() - ui.spacing().item_spacing.x
+        });
+        let width = ui
+            .painter()
+            .layout_no_wrap(
+                "Unsaved Changes".into(),
+                FontId::proportional(11.0),
+                Palette::for_context(ui.ctx()).changed,
+            )
+            .size()
+            .x
+            .min((right - legend.right() - ui.spacing().item_spacing.x).max(0.0));
+        Rect::from_min_max(
+            egui::pos2(right - width, line_top),
+            egui::pos2(right, line_bottom),
+        )
+    });
     let status = Rect::from_min_max(
         egui::pos2(legend.right(), line_top),
         egui::pos2(
-            save.map_or(row.right(), |save| {
-                save.left() - ui.spacing().item_spacing.x
+            dirty.or(save).map_or(row.right(), |dirty| {
+                dirty.left() - ui.spacing().item_spacing.x
             }),
             line_bottom,
         ),
@@ -4412,21 +4467,15 @@ fn workspace_footer_layout(
         info,
         legend,
         status,
+        dirty,
         save,
     }
 }
 
-fn footer_guidance(ui: &mut egui::Ui, text: &str, dirty: bool) {
+fn footer_guidance(ui: &mut egui::Ui, text: &str) {
     let palette = Palette::for_context(ui.ctx());
     ui.set_clip_rect(ui.clip_rect().intersect(ui.max_rect()));
     ui.horizontal(|ui| {
-        if dirty {
-            ui.label(
-                RichText::new("Unsaved Changes")
-                    .strong()
-                    .color(palette.changed),
-            );
-        }
         let available = ui.available_rect_before_wrap();
         ui.interact(
             available,
