@@ -330,5 +330,15 @@ were actually performed.
 
 The shared guide, `.codex/` roles/configuration, and `.agents/skills/` were checked
 against [Codex-App](https://github.com/smartalex32/Codex-App) commit
-`67cabb07d2345053322491c0308357d2e8ecd104` on 2026-10-13 and match that revision.
+`8474f5d4c3061caf988fe5ebceb77ffae9d7bca1` on 2026-10-15 and match that revision.
 Keep this project reference specific to Versus when refreshing the template.
+
+The template includes 27 Matt Pocock skills imported from
+[`mattpocock/skills` at `49dd158d1076134a641b33efb035946536778336`](https://github.com/mattpocock/skills/commit/49dd158d1076134a641b33efb035946536778336),
+with their supporting files, Codex invocation policies, and
+[MIT license](.agents/skills/LICENSE.mattpocock). Existing shared roles,
+configuration, and the three original skills are unchanged. Before first using
+these imported engineering workflows, follow
+[setup-matt-pocock-skills](.agents/skills/setup-matt-pocock-skills/SKILL.md) to
+configure this project's issue tracker, triage labels, and domain documentation.
+That workflow setup is separate from refreshing the template files.
