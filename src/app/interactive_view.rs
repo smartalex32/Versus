@@ -952,6 +952,7 @@ impl InteractiveView {
                     .into(),
             );
         }
+        let before = self.history_diff_snapshot();
         for path in &self.batches[&id] {
             let document = &mut self.documents.get_mut(path).unwrap().document;
             let moved = if redo {
@@ -969,7 +970,7 @@ impl InteractiveView {
             self.batch_redo.push(id);
         }
         self.refresh_active();
-        self.invalidate_diff();
+        self.invalidate_history_diff(before);
         Ok(())
     }
     pub(super) fn can_undo_batch(&self) -> bool {
@@ -1036,6 +1037,7 @@ impl InteractiveView {
             } else {
                 active_paths.iter().map(|p|self.key_for(p)).find(|key|self.documents.get(key).is_some_and(|retained|if redo{retained.document.next_redo_tag()}else{retained.document.next_undo_tag()}==Some(tag))).unwrap()
             };
+            let before = self.history_diff_snapshot();
             let document = &mut self.documents.get_mut(&key).unwrap().document;
             let moved = if redo {
                 document.redo_expected(tag)
@@ -1044,7 +1046,7 @@ impl InteractiveView {
             };
             debug_assert!(moved);
             self.refresh_active();
-            self.invalidate_diff();
+            self.invalidate_history_diff(before);
         }
     }
     /// Editor and transfer paths call this after every mutation so an older
@@ -1112,8 +1114,8 @@ impl InteractiveView {
                 .unwrap_or_default()
         }
     }
-    fn invalidate_edited_diff(&mut self, side: usize, before: &str, range: Range<usize>) {
-        let mut presentation = (self.editing
+    fn capture_merge_presentation(&self) -> Option<PendingMergePresentation> {
+        (self.editing
             && self.run_diff
             && (self.diff.is_some() || self.pending_merge_presentation.is_some()))
         .then(|| PendingMergePresentation {
@@ -1123,7 +1125,45 @@ impl InteractiveView {
                 .pending_merge_presentation
                 .as_ref()
                 .map_or(self.diff_rows.len(), |pending| pending.changes),
-        });
+        })
+    }
+    fn history_diff_snapshot(&self) -> Option<[String; 2]> {
+        (self.editing
+            && self.run_diff
+            && (self.diff.is_some() || self.pending_merge_presentation.is_some()))
+        .then(|| {
+            self.workspace.as_ref().map(|workspace| {
+                std::array::from_fn(|side| workspace.text(side_of(side)).to_owned())
+            })
+        })
+        .flatten()
+    }
+    fn invalidate_history_diff(&mut self, before: Option<[String; 2]>) {
+        let mut presentation = before
+            .as_ref()
+            .and_then(|_| self.capture_merge_presentation());
+        let mut cursors = [None; 2];
+        self.invalidate_diff();
+        if let (Some(before), Some(presentation), Some(workspace)) =
+            (before, &mut presentation, &self.workspace)
+        {
+            for side in 0..2 {
+                let after = workspace.text(side_of(side));
+                if let Some((range, replacement)) = external_refresh_edit(&before[side], after) {
+                    cursors[side] = Some(range.start + replacement.len());
+                    presentation.sides[side].rebase(&before[side], range, after);
+                }
+            }
+        }
+        self.pending_merge_presentation = presentation;
+        for (side, cursor) in cursors.into_iter().enumerate() {
+            if let Some(cursor) = cursor {
+                self.restore_editor_byte_cursor(side, cursor);
+            }
+        }
+    }
+    fn invalidate_edited_diff(&mut self, side: usize, before: &str, range: Range<usize>) {
+        let mut presentation = self.capture_merge_presentation();
         let shared_file = self.side_sources[0]
             .as_ref()
             .zip(self.side_sources[1].as_ref())
@@ -2606,22 +2646,7 @@ impl InteractiveView {
                         // character offsets are no longer valid after this
                         // source mutation; restore it from the exact source
                         // byte position on the next full render.
-                        let updated = self.workspace.as_ref().unwrap().text(source).to_owned();
-                        let updated_display = updated.replace("\r\n", "\n").replace('\r', "\n");
-                        let cursor = egui::text::CCursor::new(original_byte_to_normalized_chars(
-                            &updated,
-                            caret_byte.min(updated.len()),
-                        ));
-                        let mut state =
-                            egui::TextEdit::load_state(ui.ctx(), editor_id).unwrap_or_default();
-                        state
-                            .cursor
-                            .set_char_range(Some(egui::text::CCursorRange::one(cursor)));
-                        state.store(ui.ctx(), editor_id);
-                        self.editor_projection[side] = Some(EditorProjection {
-                            text: updated_display.clone(),
-                            source_lines: (0..text_segments(&updated_display).len()).collect(),
-                        });
+                        self.restore_editor_byte_cursor(side, caret_byte);
                         self.invalidate_edited_diff(side, &current, range);
                     }
                 }
@@ -2805,6 +2830,36 @@ impl InteractiveView {
             }
             Err(e) => self.error = Some(e.to_string()),
         }
+    }
+    /// Restore cursor coordinates through a full source view before the next
+    /// frame projects them into the filtered editor.
+    fn restore_editor_byte_cursor(&mut self, side: usize, byte: usize) {
+        let Some(ctx) = &self.editor_context else {
+            return;
+        };
+        let Some(workspace) = &self.workspace else {
+            return;
+        };
+        let updated = workspace.text(side_of(side));
+        let displayed = updated.replace("\r\n", "\n").replace('\r', "\n");
+        let position = original_byte_to_normalized_chars(updated, byte.min(updated.len()));
+        let id = egui::Id::new(("two-way-edit", self.side_generation[side], side));
+        let mut state = egui::TextEdit::load_state(ctx, id).unwrap_or_default();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(position),
+            )));
+        state.store(ctx, id);
+        self.caret[side] = displayed
+            .chars()
+            .take(position)
+            .filter(|c| *c == '\n')
+            .count();
+        self.editor_projection[side] = Some(EditorProjection {
+            source_lines: (0..text_segments(&displayed).len()).collect(),
+            text: displayed,
+        });
     }
     fn sync_editor_cursor(&mut self, side: usize) {
         let (Some(ctx), Some(workspace)) = (&self.editor_context, &self.workspace) else {
@@ -3652,6 +3707,168 @@ mod tests {
             visible_chunk_runs(&(0..6), &[0, 2, 3, 5]),
             vec![0..1, 2..4, 5..6]
         );
+    }
+
+    #[test]
+    fn merge_undo_redo_shortcuts_keep_the_diff_view_stable() {
+        let left = "prefix\r\nold\r\nsame\r\nlater\r\nsuffix\r\n";
+        let right = "prefix\nnew\nsame\nlaterR\nsuffix\n";
+        for side in 0..2usize {
+            for filtered in [true, false] {
+                for settled in [false, true] {
+                    let ctx = egui::Context::default();
+                    let mut view = view(left, right);
+                    view.run_diff = true;
+                    view.merge_options = [filtered, true, true];
+                    view.diff = compare_loaded_text(
+                        [left, right],
+                        &AtomicBool::new(false),
+                        &FileViewOptions::default(),
+                        [&[], &[]],
+                    )
+                    .unwrap();
+                    for _ in 0..3 {
+                        frame(&mut view, &ctx, vec![]).drop_without_applying_deltas();
+                    }
+                    view.caret[side] = 1;
+                    view.sync_editor_cursor(side);
+                    ctx.memory_mut(|memory| memory.request_focus(view.editor_id(side)));
+                    frame(&mut view, &ctx, vec![]).drop_without_applying_deltas();
+                    frame(
+                        &mut view,
+                        &ctx,
+                        vec![egui::Event::Text("!β\nsecond".into())],
+                    )
+                    .drop_without_applying_deltas();
+                    view.diff_not_before = Some(Instant::now() + Duration::from_secs(60));
+                    frame(&mut view, &ctx, vec![]).drop_without_applying_deltas();
+                    if settled {
+                        view.diff_not_before = None;
+                        for _ in 0..100 {
+                            view.poll_diff(&ctx);
+                            if view.diff.is_some() {
+                                break;
+                            }
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        assert!(view.diff.is_some() && view.pending_merge_presentation.is_none());
+                        frame(&mut view, &ctx, vec![]).drop_without_applying_deltas();
+                    }
+                    let edited = view.working_text(side).unwrap().to_owned();
+                    let edited_projection =
+                        view.editor_projection[side].as_ref().unwrap().text.clone();
+                    let original = if side == 0 { left } else { right };
+                    for key in [egui::Key::Z, egui::Key::Y] {
+                        let events = [true, false]
+                            .into_iter()
+                            .map(|pressed| egui::Event::Key {
+                                key,
+                                physical_key: None,
+                                pressed,
+                                repeat: false,
+                                modifiers: egui::Modifiers::CTRL,
+                            })
+                            .collect();
+                        frame(&mut view, &ctx, events).drop_without_applying_deltas();
+                        let expected = if key == egui::Key::Z {
+                            if filtered {
+                                if side == 0 {
+                                    "old\nlater\n".into()
+                                } else {
+                                    "new\nlaterR\n".into()
+                                }
+                            } else {
+                                original.replace("\r\n", "\n")
+                            }
+                        } else {
+                            edited_projection.clone()
+                        };
+                        assert_eq!(
+                            view.working_text(side),
+                            Some(if key == egui::Key::Z {
+                                original
+                            } else {
+                                &edited
+                            })
+                        );
+                        assert_eq!(
+                            view.editor_projection[side].as_ref().unwrap().text,
+                            expected,
+                            "Ctrl+{key:?} must not expand/redecorate the file while refreshing: side={side}, filtered={filtered}"
+                        );
+                        assert!(view.pending_merge_presentation.is_some());
+                        view.diff_not_before = Some(Instant::now() + Duration::from_secs(60));
+                    }
+                    frame(&mut view, &ctx, vec![egui::Event::Text("?".into())])
+                        .drop_without_applying_deltas();
+                    assert!(
+                        view.working_text(side).unwrap().contains("second?"),
+                        "typing after redo should continue at the edited position: side={side}, filtered={filtered}, text={:?}",
+                        view.working_text(side)
+                    );
+                    assert_eq!(
+                        view.working_text(1 - side),
+                        Some(if side == 0 { right } else { left })
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn replacement_batch_undo_redo_preserves_both_diff_panes() {
+        let left = "prefix\nleft match\nsuffix\n";
+        let right = "prefix\nright match\nsuffix\n";
+        let ctx = egui::Context::default();
+        let mut view = view(left, right);
+        let preview = preview_for(
+            &view,
+            &[("left.rs", 12..17, "found"), ("right.rs", 13..18, "found")],
+        );
+        view.apply_search_preview(&preview).unwrap();
+        view.run_diff = true;
+        view.merge_options = [true; 3];
+        view.diff = compare_loaded_text(
+            [view.working_text(0).unwrap(), view.working_text(1).unwrap()],
+            &AtomicBool::new(false),
+            &FileViewOptions::default(),
+            [&[], &[]],
+        )
+        .unwrap();
+        for _ in 0..3 {
+            frame(&mut view, &ctx, vec![]).drop_without_applying_deltas();
+        }
+        for (key, word) in [(egui::Key::Z, "match"), (egui::Key::Y, "found")] {
+            let events = [true, false]
+                .into_iter()
+                .map(|pressed| egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers: egui::Modifiers::CTRL,
+                })
+                .collect();
+            frame(&mut view, &ctx, events).drop_without_applying_deltas();
+            assert_eq!(
+                view.editor_projection[0].as_ref().unwrap().text,
+                format!("left {word}\n")
+            );
+            assert_eq!(
+                view.editor_projection[1].as_ref().unwrap().text,
+                format!("right {word}\n")
+            );
+            assert_eq!(
+                view.working_text(0),
+                Some(format!("prefix\nleft {word}\nsuffix\n").as_str())
+            );
+            assert_eq!(
+                view.working_text(1),
+                Some(format!("prefix\nright {word}\nsuffix\n").as_str())
+            );
+            assert!(view.pending_merge_presentation.is_some());
+            view.diff_not_before = Some(Instant::now() + Duration::from_secs(60));
+        }
     }
 
     #[test]

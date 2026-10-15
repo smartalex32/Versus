@@ -75,8 +75,9 @@ APIs and must fail cleanly when unavailable.
   target in Diff and Merge, clamped at the start of the file or folder listing.
   Editable Merge bounds navigation against current visible rows and pane height
   before painting, avoiding a one-frame snap when jumping near the file end.
-  Typing retains display-only diff decorations and filtering during the debounced
-  refresh. Actual byte anchors remap line numbers and inline spans; stale results
+  Typing and Undo/Redo retain display-only diff decorations and filtering during
+  the debounced refresh, including replacement-batch history on both open panes.
+  Source byte splices remap line numbers, inline spans, and restored cursors; stale results
   are cancelled and cannot supply navigation or completed folder comparison state.
   Fresh results replace that presentation, and disabling Run Diff clears it.
   Switching an open merge pair to Diff paints aligned read-only rows through the
