@@ -3144,17 +3144,23 @@ fn inline_action(
         ui.painter()
             .rect_filled(rect.shrink(1.0), 2.0, palette.hover);
     }
-    ui.painter().text(
-        rect.center(),
-        Align2::CENTER_CENTER,
-        glyph,
-        comparison_font(ui.ctx()),
-        if response.hovered() {
-            palette.accent
-        } else {
-            palette.text
-        },
+    let color = if response.hovered() {
+        palette.accent
+    } else {
+        palette.text
+    };
+    let stroke = Stroke::new(2.0, color);
+    let center = rect.center();
+    ui.painter().line_segment(
+        [center - egui::vec2(6.0, 0.0), center + egui::vec2(6.0, 0.0)],
+        stroke,
     );
+    if glyph == "+" {
+        ui.painter().line_segment(
+            [center - egui::vec2(0.0, 6.0), center + egui::vec2(0.0, 6.0)],
+            stroke,
+        );
+    }
     response
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text(label)
@@ -3187,9 +3193,9 @@ fn transfer_action(
     let point = |x: f32, y: f32| rect.center() + egui::vec2(x * direction, y);
     let stroke = Stroke::new(2.0, color);
     ui.painter()
-        .line_segment([point(-8.0, 0.0), point(8.0, 0.0)], stroke);
+        .line_segment([point(-5.0, 0.0), point(5.0, 0.0)], stroke);
     ui.painter().line(
-        vec![point(0.0, -5.0), point(8.0, 0.0), point(0.0, 5.0)],
+        vec![point(0.0, -5.0), point(5.0, 0.0), point(0.0, 5.0)],
         stroke,
     );
     response
