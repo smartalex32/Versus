@@ -10,16 +10,13 @@ mod save;
 mod search_modal;
 mod search_state;
 #[cfg(test)]
+#[path = "../../tests/unit/app/folder_browser/mod.rs"]
 mod tests;
 
 use super::*;
 use navigation::ListingJob;
 use overlay::{MergedFolderCache, OverlayJob};
-#[cfg(test)]
-use overlay::{build_merged_folder_cache, compare_overlay_files, overlay_signature};
 use save::SaveJob;
-#[cfg(test)]
-use save::{pending_save_files, retain_saved_snapshot};
 use search_state::SearchState;
 use std::collections::{BTreeMap, BTreeSet};
 use versus::{DirectoryEntryState, LazyDirectoryItem, WorkingFile};

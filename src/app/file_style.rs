@@ -254,4 +254,5 @@ fn append_piece(
 }
 
 #[cfg(test)]
+#[path = "../../tests/unit/app/file_style/mod.rs"]
 mod tests;

@@ -1,8 +1,6 @@
 //! Presentation for a retained, two-way interactive merge workspace.
 use super::*;
 mod projection;
-#[cfg(test)]
-use projection::remap_projection_cursor;
 use projection::{
     EditorProjection, MergeDecoration, MergePresentation, MergeProjection,
     PendingMergePresentation, editor_byte_edit, merge_projection,
@@ -138,6 +136,7 @@ use document::{external_refresh_edit, retained_file};
 use line_rendering::{append_code_line, inline_action, transfer_action};
 
 #[cfg(test)]
+#[path = "../../tests/unit/app/interactive_view/mod.rs"]
 mod tests;
 
 pub(super) fn side_of(side: usize) -> TwoWaySide {

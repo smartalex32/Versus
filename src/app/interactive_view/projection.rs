@@ -642,4 +642,5 @@ fn line_ending_at<'a>(original: &'a str, range: &Range<usize>) -> &'a str {
 }
 
 #[cfg(test)]
+#[path = "../../../tests/unit/app/interactive_view/projection_support.rs"]
 mod test_support;

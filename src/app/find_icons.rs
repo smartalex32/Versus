@@ -77,4 +77,5 @@ pub(crate) fn paint(ui: &egui::Ui, center: egui::Pos2, icon: FindIcon, color: eg
 }
 
 #[cfg(test)]
+#[path = "../../tests/unit/app/find_icons/mod.rs"]
 mod tests;

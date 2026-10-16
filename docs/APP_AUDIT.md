@@ -199,3 +199,22 @@ and offline release build passed. Independent read-only review found no behavior
 regressions. Its capability-ownership and stale-documentation findings were
 corrected before delivery. Supported-platform/native checks retain the limitations
 already listed above.
+
+## Test directory follow-up
+
+All first-party unit suites and test-only fixtures now live under `tests/unit/`,
+grouped by their owning capability. The existing integration targets remain in
+`tests/*.rs`. Production modules retain only test-gated path registrations; no
+test bodies or fixtures remain in `src/`. This supersedes the earlier physical
+test locations recorded above.
+
+The relocation preserves private access, platform conditions, logical Rust module
+names, and existing Cargo filters. Test-only imports moved with their suites.
+[`tests/README.md`](../tests/README.md) explains the layout, and the architecture
+guides and agent routing table point to the new paths.
+
+Validation on the macOS development host: all 299 relocated test functions were
+accounted for, and all 348 executed tests passed with exactly the same names as
+the preceding baseline and no compiler warnings. Formatter, diff whitespace
+check, documentation-link validation, and offline release build passed.
+Windows-only tests and supported-platform packaging were not run on this host.

@@ -353,4 +353,5 @@ impl<'a> Cursor<'a> {
 }
 
 #[cfg(test)]
+#[path = "../tests/unit/recent/mod.rs"]
 mod tests;

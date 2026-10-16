@@ -291,4 +291,5 @@ fn display_text(text: &str) -> String {
 }
 
 #[cfg(test)]
+#[path = "../../tests/unit/app/search_result_rows/mod.rs"]
 mod tests;

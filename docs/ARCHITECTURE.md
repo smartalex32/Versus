@@ -34,9 +34,8 @@ This page is the newcomer route. The linked guides answer focused questions with
 | [`src/app/search_session.rs`](../src/app/search_session.rs) | Prepares replacement plans and advances remaining search-hit snapshots; batch publication is owned by `InteractiveView`. |
 | [`src/core/`](../src/core/) | UI-independent comparison, editing, filesystem, search, and safe-save primitives; `file_view/` splits input decoding, alignment, and text projection. |
 | [`src/selection.rs`](../src/selection.rs), [`src/recent.rs`](../src/recent.rs), [`src/diagnostics.rs`](../src/diagnostics.rs) | Source classification, recent pairs, and local diagnostics. |
-| [`src/app/tests.rs`](../src/app/tests.rs), [`src/app/tests/`](../src/app/tests/) | App test index and focused suites for accessibility, navigation, Diff, Merge, session lifecycle, theme, chrome, and zoom. |
-| [`src/app/interactive_view/tests/`](../src/app/interactive_view/tests/), `src/app/folder_browser/tests/` | Focused editor/workspace and folder-browser tests. |
-| [`tests/`](../tests/) and `src/core/**/tests.rs` | Integration and core module-level behavioral tests. |
+| [`tests/unit/`](../tests/unit/), registered by test-only declarations in `src/` | Unit suites grouped by owning capability (CLI, core, app, editor, folder browser, and diagnostics). Their logical Rust modules remain under the owning `lib` or `versus` module. |
+| [`tests/`](../tests/) | Cargo integration-test targets such as CLI, comparison options, folder trees, and interactive editing. |
 
 ## Find a change by capability
 

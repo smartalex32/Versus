@@ -172,4 +172,5 @@ pub(crate) fn empty_diff_side(path: &std::path::Path) -> bool {
 }
 
 #[cfg(test)]
+#[path = "../tests/unit/selection/mod.rs"]
 mod tests;

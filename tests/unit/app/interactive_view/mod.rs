@@ -1,5 +1,6 @@
 //! Regression coverage organized by interactive workspace capability.
 
+use super::projection::remap_projection_cursor;
 use super::*;
 use support::*;
 

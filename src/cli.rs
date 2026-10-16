@@ -214,4 +214,5 @@ fn parse_merge(args: Vec<OsString>) -> Result<Command, String> {
 }
 
 #[cfg(test)]
+#[path = "../tests/unit/cli/mod.rs"]
 mod tests;

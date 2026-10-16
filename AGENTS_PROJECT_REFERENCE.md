@@ -24,31 +24,34 @@ operations stay inside their owner. Avoid forwarding modules and global helpers.
 
 | Task | Start / owned capability | Focused tests |
 | --- | --- | --- |
-| Process/CLI | `src/main.rs`, `src/cli.rs`, `src/core/merge.rs` | `tests/cli.rs`, `src/cli/tests.rs`, core merge tests |
-| Window/frame composition | `src/app.rs`, `app/workspace.rs` | `app/tests/merge_workspace.rs`, `app/operating_mode_tests.rs` |
-| Source paths/header/Browse | `src/selection.rs`, `app/source_controls.rs`, `app/session/source.rs` | selection tests; `app/tests/session_sources_*.rs` |
-| Comparison workers/publication | `app/session/comparison.rs`; state/order in `app/session.rs` | `app/tests/session_sources_lifecycle.rs`, `app/tests/refresh.rs` |
-| Diff/Merge transitions | `app/session/merge_workspace.rs`, `app/session/source.rs` | `app/operating_mode_tests.rs`, `app/tests/merge_workspace.rs` |
-| File Diff rendering | `app/file_diff.rs`; refresh/navigation in `app/session/navigation.rs` | `app/tests/file_diff.rs`, `difference_navigation.rs`, `refresh.rs` |
-| Folder Diff rendering | `app/folder_diff.rs`; aggregation in `core/tree.rs` | `app/tests/folder_diff.rs`, `tests/folder_tree.rs` |
-| Shared visuals/theme/geometry | `app/visuals/{theme,panels,status,footer,icons}.rs`, `app/file_style.rs` | `app/tests/{theme,workspace_chrome,zoom_input}.rs`, file-style tests |
-| Drops, error/status, leave protection | `app/{drop_targets,workspace_status,leave_dialog}.rs` | `app/tests/{drag_drop,workspace_chrome,accessibility}.rs` |
-| Editor document identity/pair lifecycle | `app/interactive_view/document.rs`; state in `interactive_view.rs` | `interactive_view/tests/{document_lifecycle,workspace_state}.rs` |
-| History/replacement transactions | `app/interactive_view/history.rs`, `core/interactive.rs` | `interactive_view/tests/history.rs`, `tests/interactive.rs` |
-| Editor input/render/controls | `interactive_view/{editor,readonly,line_rendering,editing_actions,toolbar}.rs` | `interactive_view/tests/{pane_painting,transfers,toolbar_footer,navigation}.rs` |
-| Merge display projections/diff | `interactive_view/{projection,diff}.rs` | `interactive_view/tests/editor_projection.rs` |
-| Folder Merge navigation | `app/folder_browser/navigation.rs`, `core/lazy_directory.rs` | `folder_browser/tests/navigation.rs`, working-file tests |
-| Working-copy folder statuses | `app/folder_browser/overlay.rs` | `folder_browser/tests/{overlay,cache}.rs` |
-| Find/Replace query/modal/results | `folder_browser/{search_state,search_modal,replacement}.rs`, `app/{search_session,search_result_rows}.rs`, `core/search_replace.rs` | `folder_browser/tests/{search,search_lifecycle,modal}.rs`, search-session/core tests |
-| Explicit saves and external-change checks | `core/work_files.rs`, `core/save.rs`, `interactive_view/editing_actions.rs`, `folder_browser/save.rs` | `tests/interactive.rs`, `folder_browser/tests/save.rs`, editor/core tests |
-| Text comparison algorithms | `core/file_view/{input,alignment,text}.rs`, `core/compare.rs` | `tests/file_view_options.rs`, `core/file_view/tests.rs`, `tests/core.rs` |
-| Chunks/text transactions | `core/{chunk_detection,text_lines,interactive}.rs` | `core/interactive/tests.rs`, `tests/interactive.rs` |
-| Recent pairs and diagnostics | `src/recent.rs`, `app/session/history.rs`, `src/diagnostics.rs` | module tests; `app/tests/recent_history.rs` |
+| Process/CLI | `src/main.rs`, `src/cli.rs`, `src/core/merge.rs` | `tests/cli.rs`, `tests/unit/cli/`, `tests/unit/core/merge/` |
+| Window/frame composition | `src/app.rs`, `src/app/workspace.rs` | `tests/unit/app/`, `tests/unit/app/operating_modes.rs` |
+| Source paths/header/Browse | `src/selection.rs`, `src/app/source_controls.rs`, `src/app/session/source.rs` | `tests/unit/selection/`, `tests/unit/app/`, `tests/unit/app/session_sources_interactions.rs` |
+| Comparison workers/publication | `src/app/session/comparison.rs`; state/order in `src/app/session.rs` | `tests/unit/app/session_sources_lifecycle.rs`, `tests/unit/app/session_sources_interactions.rs`, `tests/unit/app/refresh.rs` |
+| Diff/Merge transitions | `src/app/session/merge_workspace.rs`, `src/app/session/source.rs` | `tests/unit/app/operating_modes.rs`, `tests/unit/app/merge_workspace.rs` |
+| File Diff rendering | `src/app/file_diff.rs`; refresh/navigation in `src/app/session/navigation.rs` | `tests/unit/app/file_diff.rs`, `tests/unit/app/difference_navigation.rs`, `tests/unit/app/refresh.rs` |
+| Folder Diff rendering | `src/app/folder_diff.rs`; aggregation in `src/core/tree.rs` | `tests/unit/app/folder_diff.rs`, `tests/folder_tree.rs` |
+| Shared visuals/theme/geometry | `src/app/visuals/{theme,panels,status,footer,icons}.rs`, `src/app/file_style.rs` | `tests/unit/app/theme.rs`, `workspace_chrome.rs`, `zoom_input.rs`, `tests/unit/app/file_style/`, `tests/unit/app/find_icons/` |
+| Drops, error/status, leave protection | `src/app/{drop_targets,workspace_status,leave_dialog}.rs` | `tests/unit/app/{drag_drop,accessibility,workspace_chrome}.rs`, `tests/unit/native_drop/` |
+| Editor document identity/pair lifecycle | `src/app/interactive_view/document.rs`; state in `src/app/interactive_view.rs` | `tests/unit/app/interactive_view/{document_lifecycle,workspace_state}.rs` |
+| History/replacement transactions | `src/app/interactive_view/history.rs`, `src/core/interactive.rs` | `tests/unit/app/interactive_view/history.rs`, `tests/unit/core/interactive/`, `tests/interactive.rs` |
+| Editor input/render/controls | `src/app/interactive_view/{editor,readonly,line_rendering,editing_actions,toolbar}.rs` | `tests/unit/app/interactive_view/{pane_painting,transfers,toolbar_footer,navigation}.rs` |
+| Merge display projections/diff | `src/app/interactive_view/{projection,diff}.rs` | `tests/unit/app/interactive_view/{editor_projection,projection_support}.rs` |
+| Folder Merge navigation | `src/app/folder_browser/navigation.rs`, `src/core/lazy_directory.rs` | `tests/unit/app/folder_browser/navigation.rs`, `tests/unit/core/work_files/` |
+| Working-copy folder statuses | `src/app/folder_browser/overlay.rs` | `tests/unit/app/folder_browser/{overlay,cache}.rs` |
+| Find/Replace query/modal/results | `src/app/folder_browser/{search_state,search_modal,replacement}.rs`, `src/app/{search_session,search_result_rows}.rs`, `src/core/search_replace.rs` | `tests/unit/app/folder_browser/{search,search_lifecycle,modal}.rs`, `tests/unit/app/search_session/`, `tests/unit/app/search_result_rows/`, `tests/unit/core/search_replace/` |
+| Explicit saves and external-change checks | `src/core/work_files.rs`, `src/core/save.rs`, `src/app/interactive_view/editing_actions.rs`, `src/app/folder_browser/save.rs` | `tests/interactive.rs`, `tests/unit/app/folder_browser/save.rs`, `tests/unit/core/work_files/` |
+| Text comparison algorithms | `src/core/file_view/{input,alignment,text}.rs`, `src/core/compare.rs` | `tests/file_view_options.rs`, `tests/unit/core/file_view/`, `tests/core.rs` |
+| Chunks/text transactions | `src/core/{chunk_detection,text_lines,interactive}.rs` | `tests/unit/core/interactive/`, `tests/interactive.rs` |
+| Recent pairs and diagnostics | `src/recent.rs`, `src/app/session/history.rs`, `src/diagnostics.rs` | `tests/unit/recent/`, `tests/unit/app/recent_history.rs`, `tests/unit/diagnostics/` |
 | Release/compatibility | `.github/workflows/`, `scripts/`, vendor patches | baseline CI and packaged GUI checks; [platform guide](docs/architecture/platform.md) |
 
-Paths abbreviated as `app/`, `core/` or owner-relative children above are under
-`src/`. Brace notation lists files; it is not a literal pathname. Tests use
-capability submodules: search by the test function name if its qualified path moved.
+Production paths are rooted at `src/`. Unit tests and their test-only support live
+under `tests/unit/`; integration test targets are individual `tests/*.rs` files.
+Brace notation lists paths; it is not a literal pathname. Unit suites retain their
+logical Rust module names, so existing Cargo filters still work; their physical
+file paths do not appear in those filters. Search by test function name when a
+suite's physical path has moved.
 
 ### Parallel work
 
@@ -103,6 +106,12 @@ cargo test --locked --offline --bin versus app::folder_browser::tests
 cargo test --locked --offline --bin versus app::operating_mode_tests
 cargo test --locked --offline --test file_view_options
 ```
+
+Unit suite files live under `tests/unit/`, but are registered into their owning
+`lib` or `versus` binary module. The commands above intentionally keep the same
+module filters; only integration tests use the `--test <target>` form. See
+[`tests/README.md`](tests/README.md) for the physical layout and test-only support
+conventions.
 
 Choose the command matching the changed capability; the list is not a mandatory
 sequence. Full validation for a cross-capability refactor:

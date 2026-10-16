@@ -593,5 +593,5 @@ fn validate_batch_targets(
 }
 
 #[cfg(test)]
-#[path = "interactive/tests.rs"]
+#[path = "../../tests/unit/core/interactive/mod.rs"]
 mod tests;

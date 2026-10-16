@@ -64,5 +64,5 @@ impl ComparisonProgress {
 }
 
 #[cfg(test)]
-#[path = "progress/tests.rs"]
+#[path = "../../tests/unit/core/progress/mod.rs"]
 mod tests;

@@ -22,9 +22,6 @@ use std::{
 use input::{OptionalText, read_optional_text};
 use text::{comparable_lines, lines_for_view};
 
-#[cfg(test)]
-use alignment::{ALIGNMENT_CHARACTER_WORK_BUDGET, line_pair_cost};
-
 /// A UI-independent, aligned display model for comparing two text files.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FileComparison {
@@ -212,5 +209,5 @@ pub(super) fn cancelled(cancellation: &AtomicBool) -> bool {
 }
 
 #[cfg(test)]
-#[path = "file_view/tests.rs"]
+#[path = "../../tests/unit/core/file_view/mod.rs"]
 mod tests;

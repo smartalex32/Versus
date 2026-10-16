@@ -237,4 +237,5 @@ fn line_for_offset(text: &str, offset: usize) -> usize {
 }
 
 #[cfg(test)]
+#[path = "../../tests/unit/app/search_session/mod.rs"]
 mod tests;

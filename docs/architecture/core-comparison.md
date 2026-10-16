@@ -28,4 +28,4 @@ A core operation should accept explicit input and return a result or transaction
 
 ## Error and test ownership
 
-Core errors and shared result types are defined in the relevant modules and [`src/core/error.rs`](../../src/core/error.rs). Prefer returning typed errors at the core seam and translating them to user-facing text in the app or CLI. Module-local tests live beside the implementation under `src/core/<module>/tests.rs` or its test module; consult the module declaration before creating a new test file.
+Core errors and shared result types are defined in the relevant modules and [`src/core/error.rs`](../../src/core/error.rs). Prefer returning typed errors at the core seam and translating them to user-facing text in the app or CLI. Core unit suites live under `tests/unit/core/`, grouped by module or capability. Consult the owning source module's `#[cfg(test)]` registration before adding a suite; integration contracts remain in `tests/*.rs`.

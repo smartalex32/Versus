@@ -486,5 +486,5 @@ fn ensure_directory_chain(parent: &Path) -> Result<(), CompareError> {
 }
 
 #[cfg(test)]
-#[path = "work_files/tests.rs"]
+#[path = "../../tests/unit/core/work_files/mod.rs"]
 mod tests;

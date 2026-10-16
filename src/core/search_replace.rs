@@ -622,5 +622,5 @@ pub fn apply_preview(
 }
 
 #[cfg(test)]
-#[path = "search_replace/tests.rs"]
+#[path = "../../tests/unit/core/search_replace/mod.rs"]
 mod tests;

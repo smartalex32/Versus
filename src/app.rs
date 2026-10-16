@@ -21,14 +21,14 @@ mod find_icons;
 mod folder_browser;
 mod interactive_view;
 mod session;
-#[cfg(test)]
-use session::{ComparisonJob, FileJob, LoadedFile, SourceJob};
 use session::{MergeExit, RecentStore, Session};
 #[cfg(test)]
+#[path = "../tests/unit/app/operating_modes.rs"]
 mod operating_mode_tests;
 mod search_result_rows;
 mod search_session;
 #[cfg(test)]
+#[path = "../tests/unit/app/mod.rs"]
 mod tests;
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 use folder_browser::FolderBrowser;

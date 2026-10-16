@@ -57,4 +57,5 @@ fn screen_point_to_egui_position(
 }
 
 #[cfg(all(test, windows))]
+#[path = "../tests/unit/native_drop/mod.rs"]
 mod tests;

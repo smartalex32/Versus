@@ -429,4 +429,5 @@ fn panic_payload_ref(info: &PanicHookInfo<'_>) -> String {
 }
 
 #[cfg(test)]
+#[path = "../tests/unit/diagnostics/mod.rs"]
 mod tests;

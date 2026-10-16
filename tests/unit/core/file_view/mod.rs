@@ -1,3 +1,4 @@
+use super::alignment::{ALIGNMENT_CHARACTER_WORK_BUDGET, line_pair_cost};
 use super::*;
 use crate::{CompareErrorKind, DEFAULT_TEXT_SIZE_LIMIT};
 use std::{

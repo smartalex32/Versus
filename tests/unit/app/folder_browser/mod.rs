@@ -1,5 +1,7 @@
 //! Shared fixtures and capability test modules for FolderBrowser.
 
+use super::overlay::{build_merged_folder_cache, compare_overlay_files, overlay_signature};
+use super::save::{pending_save_files, retain_saved_snapshot};
 use super::search_state::SearchJob;
 use super::*;
 use std::fs;
@@ -110,17 +112,10 @@ fn click_dialog(
     }
 }
 
-#[path = "tests/cache.rs"]
 mod cache;
-#[path = "tests/modal.rs"]
 mod modal;
-#[path = "tests/navigation.rs"]
 mod navigation;
-#[path = "tests/overlay.rs"]
 mod overlay;
-#[path = "tests/save.rs"]
 mod save;
-#[path = "tests/search.rs"]
 mod search;
-#[path = "tests/search_lifecycle.rs"]
 mod search_lifecycle;

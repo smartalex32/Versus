@@ -24,4 +24,5 @@ pub fn themed_icon(dark_mode: bool) -> IconData {
 }
 
 #[cfg(test)]
+#[path = "../tests/unit/logo/mod.rs"]
 mod tests;

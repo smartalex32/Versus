@@ -1,5 +1,6 @@
 //! Shared app fixtures and capability test index.
 
+use super::session::{ComparisonJob, FileJob, LoadedFile, SourceJob};
 use super::*;
 use crate::app::session::FileView;
 use crate::app::visuals::status::StatusIcon;

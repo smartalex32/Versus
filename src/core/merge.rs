@@ -251,5 +251,5 @@ fn edits(base: &[String], side: &[String]) -> Vec<Edit> {
 }
 
 #[cfg(test)]
-#[path = "merge/tests.rs"]
+#[path = "../../tests/unit/core/merge/mod.rs"]
 mod tests;
