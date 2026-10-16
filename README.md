@@ -6,6 +6,11 @@ mapped drives and UNC paths on Windows and mounted network filesystems on Linux
 work through the same local APIs as other paths. Versus does not implement network
 authentication or make outbound network requests at runtime.
 
+The [Software Requirements Specification](docs/SRS.md) defines the current scope
+and verification criteria. The [application audit](docs/APP_AUDIT.md) records the
+cleanup findings and recommended structure improvements. The
+[original PRD](docs/PRD.md) is retained as a historical roadmap.
+
 ## Use
 
 Choose **Folder Diff** or **File Diff** in the centered header to start a
@@ -34,8 +39,9 @@ selection that spans hidden lines.
 Run Diff sits in the header beside the theme button; when enabled, the refresh
 icon appears immediately to its right. Merge keeps New comparison (+) on the left
 of the button line, followed by a magnifying-glass **Find and Replace** icon in
-folder workspaces. Zoom remains on the right. With Run Diff enabled, the comparison options appear immediately to
-the right of zoom, followed by difference navigation. A change count appears
+file and folder workspaces. Zoom remains on the right. With Run Diff enabled, the
+comparison options appear immediately to the right of zoom, followed by difference
+navigation. A change count appears
 beside the left-side actions, using the same style as Diff. The legends are
 centered below the panes with full icons and text, including Conflict in Merge.
 The full legend stays visible regardless of Run Diff. It shares the footer with
@@ -289,7 +295,8 @@ Click them to reduce or enlarge the interface. Hold
 scrolls the comparison. Command + wheel also works on macOS. Use
 Ctrl + / Ctrl - / Ctrl 0 (Command on macOS) for the keyboard shortcuts,
 or click the percentage to reset to 100%. Zoom is restored across launches;
-source paths and compared content are not saved. Row and control heights follow font metrics while staying compact at
+compared content is not saved. Recent source pairs are stored separately as described
+above. Row and control heights follow font metrics while staying compact at
 the default size. Toolbar buttons highlight when pressed and activate on release;
 releasing outside cancels the action.
 
@@ -316,8 +323,9 @@ behavior. Each invocation opens its own window. Closing normally returns zero,
 including when files differ; this is a visual comparison, not a command-line
 equality check. `--help` and `--version` print without opening a window. Invalid
 arguments return 2; failure to start the window returns 1. Read failures appear
-in the window. Save editor buffers first: Versus reads files from disk and never
-writes back to them.
+in the window. Save IDE buffers before launching: Versus initially reads disk
+content. These commands open Diff; switching to Merge permits explicit saves to
+the selected paths.
 
 Use the installed executable on your PATH, or replace `versus` with its quoted
 full path (`Versus.exe` on Windows or `Versus.AppImage` on Linux). In PowerShell,

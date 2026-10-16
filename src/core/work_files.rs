@@ -119,10 +119,6 @@ impl WorkingFile {
         }
     }
 
-    pub fn set_path(&mut self, path: PathBuf) {
-        self.path = Some(path);
-    }
-
     pub fn identity_key(&self) -> PathBuf {
         self.identity.clone().unwrap_or_else(|| {
             self.path

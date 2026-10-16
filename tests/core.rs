@@ -402,28 +402,25 @@ fn cancellation_stops_directory_scan() {
 }
 
 #[test]
-fn three_way_merge_marks_conflicts_and_applies_choices() {
-    let options = FileCompareOptions::default();
-    let diff = compare_three_texts("one\ntwo\n", "one\nleft\n", "one\nright\n", &options).unwrap();
+fn three_way_merge_marks_conflicts_and_identical_changes() {
+    let diff = merge_three_way_text("one\ntwo\n", "one\nleft\n", "one\nright\n").unwrap();
     assert_eq!(diff.hunks[0].kind, MergeHunkKind::Conflict);
-    assert!(diff.merged.contains("<<<<<<< LEFT"));
     assert_eq!(
-        render_three_way(&diff, &[Some(MergeChoice::Right)]),
-        "one\nright\n"
+        diff.merged,
+        "one\n<<<<<<< OURS\nleft\n=======\nright\n>>>>>>> THEIRS\n"
     );
-    let same = compare_three_texts("a\n", "b\n", "b\n", &options).unwrap();
+    let same = merge_three_way_text("a\n", "b\n", "b\n").unwrap();
     assert_eq!(same.hunks[0].kind, MergeHunkKind::Identical);
 }
 
 #[test]
 fn three_way_merge_preserves_prepend_middle_and_append_insert_positions() {
-    let options = FileCompareOptions::default();
     for (left, expected) in [
         ("start\na\nb\n", "start\na\nb\n"),
         ("a\nmiddle\nb\n", "a\nmiddle\nb\n"),
         ("a\nb\nend\n", "a\nb\nend\n"),
     ] {
-        let diff = compare_three_texts("a\nb\n", left, "a\nb\n", &options).unwrap();
+        let diff = merge_three_way_text("a\nb\n", left, "a\nb\n").unwrap();
         assert_eq!(diff.hunks[0].kind, MergeHunkKind::LeftOnly);
         assert_eq!(diff.merged, expected);
     }
@@ -431,8 +428,7 @@ fn three_way_merge_preserves_prepend_middle_and_append_insert_positions() {
 
 #[test]
 fn adjacent_merge_edits_do_not_conflict() {
-    let options = FileCompareOptions::default();
-    let diff = compare_three_texts("a\nb\n", "left\nb\n", "a\nright\n", &options).unwrap();
+    let diff = merge_three_way_text("a\nb\n", "left\nb\n", "a\nright\n").unwrap();
     assert!(
         diff.hunks
             .iter()
@@ -443,13 +439,11 @@ fn adjacent_merge_edits_do_not_conflict() {
 
 #[test]
 fn same_anchor_insertion_and_replacement_are_conflicts_without_panicking() {
-    let options = FileCompareOptions::default();
     for (left, right) in [
         ("left\nb\n", "insert\na\nb\n"),
         ("insert\na\nb\n", "right\nb\n"),
     ] {
-        let result =
-            std::panic::catch_unwind(|| compare_three_texts("a\nb\n", left, right, &options));
+        let result = std::panic::catch_unwind(|| merge_three_way_text("a\nb\n", left, right));
         let diff = result.expect("merge must not panic").unwrap();
         assert!(
             diff.hunks
@@ -461,12 +455,10 @@ fn same_anchor_insertion_and_replacement_are_conflicts_without_panicking() {
 
 #[test]
 fn small_three_way_inputs_never_panic_and_unchanged_side_uses_changed_text() {
-    let options = FileCompareOptions::default();
     let inputs = ["", "a\n", "b\n", "a\na\n", "a\nb\n", "b\na\n", "b\nb\n"];
     for base in inputs {
         for changed in inputs {
-            let result =
-                std::panic::catch_unwind(|| compare_three_texts(base, changed, base, &options));
+            let result = std::panic::catch_unwind(|| merge_three_way_text(base, changed, base));
             let diff = result.expect("merge must not panic").unwrap();
             assert_eq!(diff.merged, changed, "base={base:?}, changed={changed:?}");
         }

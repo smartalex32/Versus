@@ -562,7 +562,6 @@ impl InteractiveView {
         self.workspace.as_ref().map(|w| w.text(side_of(side)))
     }
     #[cfg(test)]
-    #[allow(dead_code)]
     pub(super) fn editor_id(&self, side: usize) -> egui::Id {
         egui::Id::new(("two-way-edit", self.side_generation[side], side))
     }

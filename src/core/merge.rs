@@ -1,4 +1,4 @@
-use super::{CompareError, DEFAULT_TEXT_SIZE_LIMIT, FileCompareOptions, read_text};
+use super::{CompareError, DEFAULT_TEXT_SIZE_LIMIT, read_text};
 use similar::{ChangeTag, TextDiff as SimilarTextDiff};
 use std::{ops::Range, path::Path};
 
@@ -9,24 +9,13 @@ pub enum MergeHunkKind {
     Identical,
     Conflict,
 }
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum MergeChoice {
-    Left,
-    Right,
-}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MergeHunk {
     pub base_range: Range<usize>,
-    pub merged_range: Range<usize>,
-    pub left: Vec<String>,
-    pub right: Vec<String>,
     pub kind: MergeHunkKind,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ThreeWayDiff {
-    pub base: Vec<String>,
-    pub left: Vec<String>,
-    pub right: Vec<String>,
     pub hunks: Vec<MergeHunk>,
     pub merged: String,
 }
@@ -34,18 +23,6 @@ pub struct ThreeWayDiff {
 struct Edit {
     range: Range<usize>,
     replacement: Vec<String>,
-}
-
-pub fn compare_three_way(
-    base: impl AsRef<Path>,
-    left: impl AsRef<Path>,
-    right: impl AsRef<Path>,
-) -> Result<ThreeWayDiff, CompareError> {
-    compare_three_way_text(
-        &read_text(base.as_ref(), DEFAULT_TEXT_SIZE_LIMIT)?,
-        &read_text(left.as_ref(), DEFAULT_TEXT_SIZE_LIMIT)?,
-        &read_text(right.as_ref(), DEFAULT_TEXT_SIZE_LIMIT)?,
-    )
 }
 
 /// Reads bounded UTF-8 inputs and performs a conventional CLI-style three-way
@@ -61,39 +38,19 @@ pub fn merge_three_way(
         &read_text(theirs.as_ref(), DEFAULT_TEXT_SIZE_LIMIT)?,
     )
 }
-pub fn compare_three_way_text(
-    base: &str,
-    left: &str,
-    right: &str,
-) -> Result<ThreeWayDiff, CompareError> {
-    compare_three_way_text_with_labels(base, left, right, "LEFT", "RIGHT")
-}
-
-/// Performs a conventional three-way merge with caller-supplied conflict labels.
+/// Performs a conventional three-way merge with `OURS` / `THEIRS` conflict labels.
 ///
 /// This is intentionally independent of the desktop editing workflow.  In
 /// particular, it combines edits relative to the base instead of making either
-/// side the preferred result.  The CLI uses the conventional `OURS` and
-/// `THEIRS` labels while the legacy comparison API keeps its `LEFT` and `RIGHT`
-/// labels.
+/// side the preferred result.
 pub fn merge_three_way_text(
     base: &str,
     ours: &str,
     theirs: &str,
 ) -> Result<ThreeWayDiff, CompareError> {
-    compare_three_way_text_with_labels(base, ours, theirs, "OURS", "THEIRS")
-}
-
-fn compare_three_way_text_with_labels(
-    base: &str,
-    left: &str,
-    right: &str,
-    left_label: &str,
-    right_label: &str,
-) -> Result<ThreeWayDiff, CompareError> {
     let base_lines = lines(base);
-    let left_lines = lines(left);
-    let right_lines = lines(right);
+    let left_lines = lines(ours);
+    let right_lines = lines(theirs);
     let left_edits = edits(&base_lines, &left_lines);
     let right_edits = edits(&base_lines, &right_lines);
     let mut output = Vec::new();
@@ -147,26 +104,16 @@ fn compare_three_way_text_with_labels(
                 MergeHunkKind::Conflict
             };
             if kind == MergeHunkKind::Conflict {
-                output.push(format!("<<<<<<< {left_label}"));
+                output.push("<<<<<<< OURS".into());
                 output.extend(left_replacement.clone());
                 output.push("=======".into());
                 output.extend(right_replacement.clone());
-                output.push(format!(">>>>>>> {right_label}"));
+                output.push(">>>>>>> THEIRS".into());
             } else {
                 output.extend(left_replacement.clone());
             }
-            let merged_start = output
-                .len()
-                .saturating_sub(if kind == MergeHunkKind::Conflict {
-                    left_replacement.len() + right_replacement.len() + 3
-                } else {
-                    left_replacement.len()
-                });
             hunks.push(MergeHunk {
                 base_range: start..end,
-                merged_range: merged_start..output.len(),
-                left: left_replacement,
-                right: right_replacement,
                 kind,
             });
             index = end;
@@ -174,26 +121,18 @@ fn compare_three_way_text_with_labels(
             r += right_count;
         } else if left_active {
             let e = next_l.unwrap();
-            let merged_start = output.len();
             output.extend(e.replacement.clone());
             hunks.push(MergeHunk {
                 base_range: e.range.clone(),
-                merged_range: merged_start..output.len(),
-                left: e.replacement.clone(),
-                right: Vec::new(),
                 kind: MergeHunkKind::LeftOnly,
             });
             index = e.range.end;
             l += 1;
         } else {
             let e = next_r.unwrap();
-            let merged_start = output.len();
             output.extend(e.replacement.clone());
             hunks.push(MergeHunk {
                 base_range: e.range.clone(),
-                merged_range: merged_start..output.len(),
-                left: Vec::new(),
-                right: e.replacement.clone(),
                 kind: MergeHunkKind::RightOnly,
             });
             index = e.range.end;
@@ -202,9 +141,6 @@ fn compare_three_way_text_with_labels(
     }
     output.extend_from_slice(&base_lines[index..]);
     Ok(ThreeWayDiff {
-        base: base_lines,
-        left: left_lines,
-        right: right_lines,
         hunks,
         merged: output.join("\n"),
     })
@@ -266,47 +202,6 @@ fn render_edits(base: &[String], start: usize, end: usize, edits: &[Edit]) -> Ve
     }
     rendered.extend_from_slice(&base[cursor..end]);
     rendered
-}
-/// Compares editable buffers. Merge semantics normalize CRLF/LF; whitespace options only
-/// affect 2-way display, because discarding whitespace during a merge would lose source data.
-pub fn compare_three_texts(
-    base: &str,
-    left: &str,
-    right: &str,
-    _options: &FileCompareOptions,
-) -> Result<ThreeWayDiff, CompareError> {
-    compare_three_way_text(base, left, right)
-}
-
-/// Returns a new merged buffer with one hunk resolved. `merged_range` is line based,
-/// so the UI can use it directly for a selected hunk without parsing conflict markers.
-pub fn resolve_merge_hunk(
-    diff: &ThreeWayDiff,
-    hunk_index: usize,
-    use_left: bool,
-) -> Option<String> {
-    let hunk = diff.hunks.get(hunk_index)?;
-    let mut lines: Vec<String> = diff.merged.split('\n').map(str::to_owned).collect();
-    let replacement = if use_left { &hunk.left } else { &hunk.right };
-    lines.splice(hunk.merged_range.clone(), replacement.iter().cloned());
-    Some(lines.join("\n"))
-}
-
-/// Renders a merge using a choice for each hunk. Missing choices retain the current
-/// hunk rendering, including conflict markers, so callers may resolve incrementally.
-pub fn render_three_way(diff: &ThreeWayDiff, choices: &[Option<MergeChoice>]) -> String {
-    let mut lines: Vec<String> = diff.merged.split('\n').map(str::to_owned).collect();
-    for (index, hunk) in diff.hunks.iter().enumerate().rev() {
-        let Some(Some(choice)) = choices.get(index) else {
-            continue;
-        };
-        let replacement = match choice {
-            MergeChoice::Left => &hunk.left,
-            MergeChoice::Right => &hunk.right,
-        };
-        lines.splice(hunk.merged_range.clone(), replacement.iter().cloned());
-    }
-    lines.join("\n")
 }
 fn lines(text: &str) -> Vec<String> {
     text.strip_prefix('\u{feff}')

@@ -276,10 +276,6 @@ impl TwoWayWorkspace {
     pub fn has_unsaved_changes(&self) -> bool {
         self.is_dirty(TwoWaySide::Left) || self.is_dirty(TwoWaySide::Right)
     }
-    pub fn mark_saved(&mut self, side: TwoWaySide) {
-        self.saved[side.index()] = self.text[side.index()].clone();
-        self.documents[side.index()].mark_saved_text(self.saved[side.index()].clone());
-    }
     pub fn mark_saved_text(&mut self, side: TwoWaySide, saved: impl Into<String>) {
         self.saved[side.index()] = saved.into();
         self.documents[side.index()].mark_saved_text(self.saved[side.index()].clone());
