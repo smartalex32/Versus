@@ -75,7 +75,7 @@ The core/UI separation is useful and should remain. `search_session.rs` and
 painting can evolve without owning filesystem work. Prefer small interfaces that
 hide state and ordering rules; splitting files alone does not create that depth.
 
-| Priority | Current evidence | Proposed change and acceptance criteria |
+| Priority | Audit-baseline evidence | Change and acceptance criteria |
 | --- | --- | --- |
 | 1 | `VersusApp` still owns mode transitions, jobs, folder/file rendering and shared painting in `app.rs`, even after test extraction. `set_workspace_merge`, `switch_comparison_mode` and `poll_*` jointly guard retained edits and stale work. | Extract a session module that owns mode transitions and worker publication through a small interface. Keep UI widgets in the app. Preserve independent Merge sides, retained working-copy Diff, cancellation and generation checks; verify with existing operating-mode/refresh tests before moving more rendering. |
 | 2 | `FolderBrowser` owns lazy listings, search debounce/results, save ownership and folder overlay caches in one state struct. `new_search` and `set_search_sources` already support file-only search without enumeration. | Extract search-session ownership from directory navigation: query/options, current job, selected hits and results. Keep the app's transaction coordinator responsible for canonical documents and atomic batch history. Preserve both-side collection, cached scope changes, stale-search rejection and Save Both after dismissal. |
@@ -162,3 +162,40 @@ Final follow-up validation on the macOS development host:
 
 Windows/Linux packaging and native interaction checks retain the limitations
 listed above; no supported-platform release artifact was produced by this host.
+
+## Capability-oriented follow-up after `48a9f6ba`
+
+The remaining large implementations were separated by capability while retaining
+their state owners and existing application/core interfaces. Parent files now
+show state and orchestration; child files group complete operations. Shared visual
+dependencies name their defining module. Non-painting row anchors/filtering and
+result summaries live with Session rather than renderers. No forwarding framework,
+dependency or new product behavior was introduced.
+
+| Entry file | Before | After |
+| --- | ---: | ---: |
+| `src/app.rs` | 3,935 | 144 |
+| `src/app/interactive_view.rs` | 2,950 | 152 |
+| `src/app/folder_browser.rs` | 1,741 | 222 |
+| `src/app/session.rs` | 1,457 | 229 |
+| `src/core/file_view.rs` | 921 | 216 |
+
+These counts describe entry-file navigation, not deleted functionality or a measure
+of module depth. The largest first-party production Rust file is now 645 lines.
+The app/editor/folder test suites are also grouped by capability with shared
+fixtures. All 299 source test functions remain; platform conditions are unchanged.
+Some fully qualified test paths changed to include the new capability grouping.
+
+The [architecture guide](ARCHITECTURE.md), six focused guides, and
+[glossary](../GLOSSARY.md) provide the human route through the application.
+`AGENTS.md` and the shorter `AGENTS_PROJECT_REFERENCE.md` route agents by task,
+file ownership, invariants and test command. The SRS implementation map was updated
+to point at the new owners. Platform and vendor constraints were retained in the
+platform guide and linked from the agent reference.
+
+Validation on the macOS development host: all 348 baseline tests passed, with no
+compiler warnings; formatter, diff whitespace check, documentation-link validation
+and offline release build passed. Independent read-only review found no behavior
+regressions. Its capability-ownership and stale-documentation findings were
+corrected before delivery. Supported-platform/native checks retain the limitations
+already listed above.

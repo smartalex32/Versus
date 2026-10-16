@@ -1,7 +1,8 @@
 use super::*;
+use crate::{CompareErrorKind, DEFAULT_TEXT_SIZE_LIMIT};
 use std::{
     fs,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 fn sandbox(name: &str) -> PathBuf {

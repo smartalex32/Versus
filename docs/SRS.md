@@ -258,16 +258,16 @@ distinct state changes.
 
 | Requirements | Implementation evidence | Verification |
 | --- | --- | --- |
-| SRC-01–05 | `selection.rs`, `app/session.rs` transitions, `app.rs` drop/exit handlers | `selection` unit tests; `app::tests`; `app::operating_mode_tests`; native picker/drop/close checks |
-| SRC-06 | `recent.rs`, `app.rs::RecentStore` | Recent-history round-trip/error tests; app recent-session tests |
-| DIF-01–03 | `core/directory.rs`, `core/tree.rs`, folder UI in `app.rs` | `tests/core.rs`, `tests/folder_tree.rs`; folder UI navigation/refresh tests |
-| DIF-04–08 | `core/file_view.rs`, shared `app/file_style.rs`, file UI in `app.rs` | `tests/file_view_options.rs`; file alignment/filter/navigation/refresh UI tests |
-| EDT-01–03 | `core/interactive.rs`, `core/chunk_detection.rs`, `app/interactive_view.rs` | `tests/interactive.rs`; document identity, transfer and pair-history unit tests |
+| SRC-01–05 | `selection.rs`, `app/session/source.rs`, `app/drop_targets.rs`, `app/leave_dialog.rs` | `selection` unit tests; `app::tests`; `app::operating_mode_tests`; native picker/drop/close checks |
+| SRC-06 | `recent.rs`, `app/session/history.rs` | Recent-history round-trip/error tests; app recent-session tests |
+| DIF-01–03 | `core/directory.rs`, `core/tree.rs`, folder UI in `app/folder_diff.rs` | `tests/core.rs`, `tests/folder_tree.rs`; folder UI navigation/refresh tests |
+| DIF-04–08 | `core/file_view.rs`, shared `app/file_style.rs`, `app/file_diff.rs` painting and `app/session/navigation.rs` row filtering/anchors | `tests/file_view_options.rs`; file alignment/filter/navigation/refresh UI tests |
+| EDT-01–03 | `core/interactive.rs`, `core/chunk_detection.rs`, `app/interactive_view/document.rs`, `app/interactive_view/history.rs` | `tests/interactive.rs`; document identity, transfer and pair-history unit tests |
 | EDT-04–08 | `app/session.rs`, `app/interactive_view.rs`, `app/interactive_view/projection.rs`, `app/folder_browser.rs`, `core/lazy_directory.rs` | Operating-mode tests; decoration, stale-worker, independent-pane and overlay tests |
 | FND-01–06 | `core/search_replace.rs`, `app/search_session.rs`, `app/folder_browser.rs`, `app/folder_browser/search_state.rs`, `app/search_result_rows.rs` | Search/session unit tests; modal, streaming, replacement and batch-history tests |
-| SAV-01–04 | `core/work_files.rs`, `core/save.rs`, interactive/folder save workers | Core/interactive save tests; UI preview, retained-save and failure tests |
+| SAV-01–04 | `core/work_files.rs`, `core/save.rs`, `app/interactive_view/editing_actions.rs`, `app/folder_browser/save.rs` | Core/interactive save tests; UI preview, retained-save and failure tests |
 | CLI-01–03 | `cli.rs`, `main.rs`, `core/merge.rs` | Parser tests; `tests/cli.rs`; core merge insertion/overlap/conflict regressions |
-| UI-01–03, LOG-01 | Shared UI helpers; `diagnostics.rs` | Headless egui geometry/interaction tests; diagnostic queue/rotation tests; native accessibility checks |
+| UI-01–03, LOG-01 | `app/visuals/`, `app/workspace_status.rs`; `diagnostics.rs` | Headless egui geometry/interaction tests; diagnostic queue/rotation tests; native accessibility checks |
 | NFR-01–04 | Core IO and worker owners | Cancellation, error, size-limit and no-follow tests; source review; mounted-share/manual responsiveness checks |
 | NFR-05–07 | `.cargo/config.toml`, Cargo manifest, vendor patches, scripts and workflows | Offline format/test/release build; Windows CI; Linux baseline packaging, glibc/FIPS checks and Xvfb/nxagent GUI smoke tests |
 

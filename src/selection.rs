@@ -148,5 +148,28 @@ pub fn pick_path(
     }
 }
 
+pub(crate) fn absolute_path(path: &str) -> PathBuf {
+    absolute_native_path(PathBuf::from(path))
+}
+
+pub(crate) fn absolute_native_path(path: PathBuf) -> PathBuf {
+    if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(&path))
+            .unwrap_or(path)
+    }
+}
+
+pub(crate) fn empty_diff_side(path: &std::path::Path) -> bool {
+    path.as_os_str() == "/dev/null"
+        || (cfg!(windows)
+            && path
+                .as_os_str()
+                .to_str()
+                .is_some_and(|name| name.eq_ignore_ascii_case("NUL")))
+}
+
 #[cfg(test)]
 mod tests;

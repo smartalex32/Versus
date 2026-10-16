@@ -4,6 +4,8 @@
 //! slowly acquiring a nearly-the-same version of the File Diff presentation.
 
 use super::*;
+use crate::app::visuals::status::{paint_status_icon, state_bar_color, state_color, status_icon};
+use crate::app::visuals::theme::Palette;
 use std::ops::Range;
 
 /// Paint the fill, alternating band, selection overlay, and state stripe for a

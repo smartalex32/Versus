@@ -6,6 +6,10 @@ mapped drives and UNC paths on Windows and mounted network filesystems on Linux
 work through the same local APIs as other paths. Versus does not implement network
 authentication or make outbound network requests at runtime.
 
+New contributors: start with the [architecture guide](docs/ARCHITECTURE.md) for
+capability ownership, data flows, test locations, and platform constraints.
+Domain names are defined in the [glossary](GLOSSARY.md).
+
 The [Software Requirements Specification](docs/SRS.md) defines the current scope
 and verification criteria. The [application audit](docs/APP_AUDIT.md) records the
 cleanup findings and recommended structure improvements. The

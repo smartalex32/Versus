@@ -5,6 +5,7 @@
 //! file, which keeps a large result list inexpensive to paint.
 
 use super::*;
+use crate::app::visuals::theme::{Palette, control_extent};
 
 const CONTEXT_BYTES: usize = 72;
 const MATCH_BYTES: usize = 96;

@@ -1,4 +1,5 @@
 use super::*;
+use crate::app::visuals::theme::{Palette, comparison_font, comparison_row_height, set_theme};
 
 #[test]
 fn changed_text_uses_the_same_state_palette_as_a_file_row() {

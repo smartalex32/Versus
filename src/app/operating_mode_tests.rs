@@ -1,4 +1,5 @@
 use super::*;
+use crate::app::visuals::theme::set_theme;
 use std::{
     path::PathBuf,
     sync::{
