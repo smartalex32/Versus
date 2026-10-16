@@ -21,7 +21,9 @@ APIs and must fail cleanly when unavailable.
 
 - Rust 1.95 with `eframe`/`egui` (the `glow` backend) for the native UI.
 - `similar` for text differences and `rfd` for native path pickers.
-- `src/app.rs` renders the existing comparison workspace, the Diff/Merge toggle,
+- `src/app/session.rs` owns source/mode transitions, retained workspaces,
+  comparison jobs, and ordered publication of background results. `src/app.rs`
+  owns window interaction and renders the comparison workspace, the Diff/Merge toggle,
   and shared comparison-panel styling for source pickers and empty drop targets,
   file/folder navigation, and mode-specific comparison options. Diff preferences
   are kept separately from Merge preferences; enabling Run Diff for the first time
@@ -88,6 +90,9 @@ APIs and must fail cleanly when unavailable.
   documents, edits, and history survive switching; Refresh compares working copies
   without reloading disk bytes. Browse continues opening files in this retained
   workspace. Direct File Diff sessions retain their existing disk refresh path.
+- `src/app/interactive_view/projection.rs` owns pending diff decorations, filtered
+  editor projections, byte/line remapping, and cursor restoration. Canonical
+  documents, pair history and save identity remain in `InteractiveView`.
 - `src/app/folder_browser.rs` enumerates one directory level at a time through
   `directory_entries_for_root`, which reads entry metadata and relative paths
   without comparing file contents. Each Merge side enumerates, expands, and scrolls
@@ -138,6 +143,10 @@ APIs and must fail cleanly when unavailable.
   navigation share the same state and difference-path snapshots; unchanged frames
   do not rebuild them. Tree replacement and working-copy overlays invalidate the
   cache. Identical folder roots are valid and produce no differences.
+- `src/app/folder_browser/search_state.rs` owns query/options, search debounce,
+  cancellable streaming workers, scope/view selection and included results. It
+  has no directory-navigation state. Replacement application and save ownership
+  remain coordinated through `FolderBrowser` and `InteractiveView`.
 - `src/app/search_session.rs` prepares Next/All replacement transactions and remaps
   remaining original search hits after apply, preserving aliases, selections and
   byte anchors.
@@ -154,13 +163,16 @@ APIs and must fail cleanly when unavailable.
   controls in a dedicated font family. Body fonts are unchanged. Attribution and
   the CC BY 4.0 license are included under `assets/codicons/` and copied into Windows
   and both Linux binary packages; no network access or new crates are needed.
-- `src/core/interactive.rs` owns canonical editable documents, automatic chunk
-  detection, byte-preserving transfers, and transactional undo/redo. Chunk
+- `src/core/interactive.rs` owns canonical editable documents, byte-preserving
+  transfers, and transactional undo/redo. `src/core/chunk_detection.rs` owns pure
+  automatic chunk detection, called through the workspace's chunk interface. Chunk
   detection prioritizes recognized syntax blocks and falls back to blank-line
   paragraphs. Generic insertion/replacement primitives support inline transfers,
   Accept All, and search replacement. Manual chunk and ignored-range state and
   management APIs are removed.
-- `src/core/work_files.rs` owns lazy directory entries and text working copies.
+- `src/core/lazy_directory.rs` owns shallow directory metadata listing and
+  no-follow root/ancestor validation. Existing `work_files` and crate-root listing
+  exports remain available. `src/core/work_files.rs` owns text working copies.
   It records the exact original bytes for external-change checks and supports
   UTF-8 (with or without BOM) and BOM-marked UTF-16 little/big endian, up to the
   32 MiB text limit. Saves retain the source encoding and use safe replacement; a
@@ -278,6 +290,10 @@ APIs and must fail cleanly when unavailable.
   comparison and working-copy comparison workers convert panics to errors rather
   than leaving active jobs stuck. Shutdown flush waits for at most 500 ms.
 - `tests/` covers externally observable comparison and filesystem behavior.
+  Unit and headless UI tests live in each module's separate `tests.rs` file under
+  `src/<module>/`, retaining private-state access through `#[cfg(test)] mod tests`.
+  Test-only editor fixtures live beside those test modules; production files
+  contain module declarations rather than inline test bodies.
 - `.cargo/config.toml` replaces crates.io with the checked-in `vendor/` tree and
   forces Cargo offline.
 - `scripts/vendor-dependencies.ps1` refreshes `vendor/` only on a connected machine;

@@ -65,7 +65,10 @@ No additional obsolete UI feature path was confirmed. This does not claim that a
 possible dead code is mathematically excluded, particularly for exported library
 interfaces and conditional platform code.
 
-## Recommended structure improvements
+## Structure improvements
+
+The following recommendations were implemented in the structural follow-up on
+the same branch. The table retains the acceptance criteria used for that work.
 
 The core/UI separation is useful and should remain. `search_session.rs` and
 `file_style.rs` already demonstrate focused modules: result remapping and file
@@ -80,13 +83,13 @@ hide state and ordering rules; splitting files alone does not create that depth.
 | 4 | `core/work_files.rs` combines text encoding/fingerprints/saving with `LazyDirectorySide`, `LazyDirectoryItem` and metadata traversal. | Separate lazy listing into a core module, retaining the existing interface initially. No symlink traversal, content reads on expansion or change to root/ancestor validation. Validate lazy listing and no-follow regressions. |
 | 5 | `core/interactive.rs` combines history/byte transactions with `detect_chunks`, `StructuralKind`, `LexState` and brace heuristics. | Extract chunk detection as a pure text-to-chunks module. Preserve chunk IDs/ranges and heuristic fallback; use existing chunk and transfer tests. Avoid language-parser dependencies or changing heuristics during the move. |
 
-Implement these in separate behavior-preserving changes, starting with one module
-and its tests. Do not introduce a generic worker framework solely because channel
+Keep future extractions in separate behavior-preserving changes with their tests.
+Do not introduce a generic worker framework solely because channel
 and cancellation code repeats: comparison, search streaming and saves have
 different publication and data-integrity rules. A refactor must reduce what callers
 need to know, not spread the same flags and invariants across more files.
 
-## Validation record
+## Initial audit validation
 
 Checks run with Rust 1.95 on the macOS development host:
 
@@ -104,5 +107,58 @@ Checks run with Rust 1.95 on the macOS development host:
 Windows/Linux packaging, GUI launches, native accessibility, pickers, actual
 network mounts and native drops were not exercised in this audit; those require
 their CI/runtime environments. No interactive supported-platform evaluation is
-implied by headless egui tests on the development host. No changes were committed
-or pushed.
+implied by headless egui tests on the development host. The initial audit was
+subsequently committed as `c0cb31c5` and pushed to the audit branch.
+
+## Structural follow-up
+
+- `app/session.rs` now owns source and mode transitions, retained workspace state,
+  comparison workers, cancellation and ordered result publication. The window
+  renders that state and calls the session's transition methods. Polling order,
+  Diff/Merge preferences, independent Merge sides and retained edits are preserved.
+- `app/folder_browser/search_state.rs` owns search query/options, debounce,
+  worker cancellation/streaming, selected hits, scope and displayed side.
+  `FolderBrowser` retains directory navigation, save ownership and replacement
+  coordination with `InteractiveView`. Scope changes still reuse both-side results.
+- `app/interactive_view/projection.rs` owns derived pending decorations, rebasing,
+  filtered editor/source mappings and cursor restoration. Canonical documents,
+  pair history and save identity remain in the editor owner.
+- `core/lazy_directory.rs` owns shallow metadata listings and no-follow path
+  validation, preserving the existing public exports through `work_files`.
+- `core/chunk_detection.rs` owns pure automatic chunk detection with unchanged
+  IDs and heuristics. `core/text_lines.rs` shares the exact line segmentation used
+  by chunk detection and byte-preserving editing, avoiding duplicated rules.
+- Every remaining inline unit/headless UI test module has moved into a dedicated
+  `<module>/tests.rs`. Existing integration tests remain in `tests/`. Test-only
+  editor fixtures/inspection helpers also live in test files and are excluded
+  from production builds. Existing module paths and all test names are retained.
+
+The refactor introduces no dependency or user-visible behavior changes. Session,
+search and editor-presentation extraction received independent read-only review;
+no actionable behavior regressions were found. Windows-specific tests remain
+guarded by their existing platform conditions.
+
+Production entry-file sizes after extraction (lines, excluding the new modules
+and separate tests):
+
+| File | Audit baseline | After structural follow-up |
+| --- | ---: | ---: |
+| `src/app.rs` | 5,248 | 3,935 |
+| `src/app/interactive_view.rs` | 6,083 | 2,950 |
+| `src/app/folder_browser.rs` | 3,616 | 1,741 |
+| `src/core/interactive.rs` | 941 | 597 |
+| `src/core/work_files.rs` | 813 | 490 |
+
+Final follow-up validation on the macOS development host:
+
+- `cargo test --locked --offline`: all 348 tests passed with no compiler warnings.
+  Compared the executed names with the audit baseline: no added or missing tests.
+- `cargo fmt --check`, `git diff --check`, and
+  `cargo build --release --locked --offline`: passed.
+- Verified all 299 first-party source test functions, including platform-guarded
+  tests, remain in dedicated test files. Windows-only tests were not executed here.
+- Reviewed module interfaces and the complete diff; updated project-reference and
+  SRS implementation pointers. Local documentation links resolve.
+
+Windows/Linux packaging and native interaction checks retain the limitations
+listed above; no supported-platform release artifact was produced by this host.
