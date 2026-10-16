@@ -23,3 +23,7 @@ desktop.ini
 /AppDir/
 /portable-linux/
 /linuxdeploy.AppImage
+
+# Local diagnostics beside a copied executable.
+versus.log
+versus.log.1

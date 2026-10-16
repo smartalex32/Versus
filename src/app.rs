@@ -1,6 +1,16 @@
 use crate::recent::{RecentComparison, RecentComparisons};
 use crate::selection::{self, ComparisonMode, SelectionMode, SourceKind};
+mod file_style;
+mod find_icons;
+mod folder_browser;
+mod interactive_view;
+#[cfg(test)]
+mod operating_mode_tests;
+mod search_result_rows;
+mod search_session;
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, Vec2};
+use folder_browser::FolderBrowser;
+use interactive_view::InteractiveView;
 use std::{
     path::PathBuf,
     sync::{
@@ -81,12 +91,13 @@ struct ComparisonJob {
     roots: [PathBuf; 2],
     started: Instant,
     progress: Arc<ComparisonProgress>,
+    logged_progress: Option<(ProgressStage, u64, Option<u64>)>,
+    last_progress_log: Instant,
 }
 
 struct FileJob {
     receiver: Receiver<Result<Option<LoadedFile>, CompareError>>,
     cancellation: Arc<AtomicBool>,
-    started: Instant,
     progress: Arc<ComparisonProgress>,
     ignore_line_endings: bool,
 }
@@ -175,6 +186,7 @@ struct FileView {
     error_icon: StatusIcon,
     scroll_y: f32,
     content_widths: [f32; 2],
+    gutter_extra: f32,
     counts: [usize; 6],
     visible_rows: Vec<usize>,
     difference_rows: Vec<usize>,
@@ -191,7 +203,25 @@ impl Drop for FileView {
     }
 }
 
+struct MergePaneHeaders {
+    files: [Option<PathBuf>; 2],
+    back: [bool; 2],
+    save: [bool; 2],
+    dirty: [bool; 2],
+}
+
 pub struct VersusApp {
+    interactive: Option<InteractiveView>,
+    merge_mode: bool,
+    merge_folders: Option<FolderBrowser>,
+    /// Find/replace has its own lightweight owner for direct file merge sessions.
+    /// It deliberately never enumerates sources, so files keep their editor view.
+    merge_file_search: Option<FolderBrowser>,
+    merge_file_open: bool,
+    merge_file_sides: [bool; 2],
+    folder_diff_settings: Option<[bool; 3]>,
+    logged_errors: Vec<String>,
+    pending_merge_exit: Option<MergeExit>,
     comparison_mode: ComparisonMode,
     file_view: Option<FileView>,
     paths: [String; 2],
@@ -223,6 +253,7 @@ pub struct VersusApp {
     preferences_context: Option<egui::Context>,
     folder_differences: Vec<PathBuf>,
     pane_rects: [Rect; 2],
+    source_header_rects: [Rect; 2],
     native_drag_position: Option<Pos2>,
     drop_hover_side: Option<usize>,
     drop_message: Option<String>,
@@ -231,9 +262,26 @@ pub struct VersusApp {
     recent_message: Option<String>,
 }
 
+#[derive(Clone)]
+enum MergeExit {
+    Close,
+    New,
+    Mode(ComparisonMode),
+    Recent(RecentComparison),
+}
+
 impl Default for VersusApp {
     fn default() -> Self {
         Self {
+            interactive: None,
+            merge_mode: false,
+            merge_folders: None,
+            merge_file_search: None,
+            merge_file_open: false,
+            merge_file_sides: [false; 2],
+            folder_diff_settings: None,
+            logged_errors: Vec::new(),
+            pending_merge_exit: None,
             comparison_mode: ComparisonMode::Folder,
             file_view: None,
             paths: Default::default(),
@@ -263,6 +311,7 @@ impl Default for VersusApp {
             preferences_context: None,
             folder_differences: Vec::new(),
             pane_rects: [Rect::NOTHING; 2],
+            source_header_rects: [Rect::NOTHING; 2],
             native_drag_position: None,
             drop_hover_side: None,
             drop_message: None,
@@ -274,6 +323,9 @@ impl Default for VersusApp {
 }
 
 impl VersusApp {
+    pub(super) fn report_startup_error(&mut self, error: String) {
+        self.error = Some(error);
+    }
     pub fn new(
         cc: &eframe::CreationContext<'_>,
         launch: Option<crate::cli::LaunchRequest>,
@@ -328,7 +380,57 @@ impl VersusApp {
         }
     }
 
+    /// The editor is the source of truth for direct-file merge dirtiness. Keep
+    /// the search owner's cached save snapshot current once ordinary editing has
+    /// returned to a clean state, without cloning buffers on every keystroke.
+    fn sync_file_search_when_clean(&mut self) {
+        let Some(view) = self.interactive.as_ref().filter(|view| !view.any_dirty()) else {
+            return;
+        };
+        if let Some(browser) = &mut self.merge_file_search {
+            browser.sync_working_files(view);
+        }
+    }
+
+    fn poll_merge_save_owners(&mut self, ctx: &egui::Context) {
+        if let (Some(browser), Some(view)) = (&mut self.merge_folders, &mut self.interactive) {
+            browser.poll_save(view, ctx);
+        }
+        if let (Some(browser), Some(view)) = (&mut self.merge_file_search, &mut self.interactive) {
+            browser.poll_save(view, ctx);
+        }
+        self.sync_file_search_when_clean();
+        let external_save_busy = self
+            .merge_folders
+            .as_ref()
+            .is_some_and(FolderBrowser::is_saving)
+            || self
+                .merge_file_search
+                .as_ref()
+                .is_some_and(FolderBrowser::is_saving);
+        if let Some(view) = &mut self.interactive {
+            view.set_external_save_busy(external_save_busy);
+        }
+    }
+
     fn open_recent(&mut self, entry: RecentComparison) {
+        self.sync_file_search_when_clean();
+        if self
+            .interactive
+            .as_ref()
+            .is_some_and(|view| view.any_dirty() || view.is_saving())
+            || self
+                .merge_folders
+                .as_ref()
+                .is_some_and(|browser| browser.any_dirty() || browser.is_saving())
+            || self
+                .merge_file_search
+                .as_ref()
+                .is_some_and(FolderBrowser::is_saving)
+        {
+            self.pending_merge_exit = Some(MergeExit::Recent(entry));
+            return;
+        }
         self.new_comparison();
         self.comparison_mode = entry.mode;
         for (side, path) in entry.paths.into_iter().enumerate() {
@@ -364,6 +466,9 @@ impl VersusApp {
     }
 
     fn invalidate(&mut self) {
+        if let Some(browser) = &mut self.merge_folders {
+            browser.invalidate_comparison_cache();
+        }
         self.file_view = None;
         if let Some(job) = self.job.take() {
             job.cancellation.store(true, Ordering::Relaxed);
@@ -385,6 +490,13 @@ impl VersusApp {
 
     fn select_path(&mut self, side: usize, path: PathBuf) {
         self.invalidate();
+        if self.merge_mode || (self.merge_file_open && self.interactive.is_some()) {
+            self.merge_file_sides[side] = false;
+            self.merge_file_open = self.merge_file_sides.iter().any(|open| *open);
+            if let Some(view) = &mut self.interactive {
+                view.open_side(side, None);
+            }
+        }
         self.drop_message = None;
         self.launch_mode = None;
         let path = absolute_native_path(path);
@@ -449,6 +561,46 @@ impl VersusApp {
     }
 
     fn switch_comparison_mode(&mut self, mode: ComparisonMode) {
+        self.sync_file_search_when_clean();
+        if self.merge_mode
+            && mode == ComparisonMode::Folder
+            && self.merge_folders.is_some()
+            && self.source_kinds == [Some(SourceKind::Folder); 2]
+        {
+            self.merge_file_sides = [false; 2];
+            self.merge_file_open = false;
+            if let Some(view) = &mut self.interactive {
+                view.open_sources([None, None]);
+            }
+            self.comparison_mode = mode;
+            return;
+        }
+        if self.comparison_mode != mode
+            && (self
+                .interactive
+                .as_ref()
+                .is_some_and(|view| view.any_dirty() || view.is_saving())
+                || self
+                    .merge_folders
+                    .as_ref()
+                    .is_some_and(|browser| browser.any_dirty() || browser.is_saving())
+                || self
+                    .merge_file_search
+                    .as_ref()
+                    .is_some_and(FolderBrowser::is_saving))
+        {
+            self.pending_merge_exit = Some(MergeExit::Mode(mode));
+            return;
+        }
+        if self.merge_file_open
+            && mode == ComparisonMode::Folder
+            && self.merge_folders.is_some()
+            && self.source_kinds == [Some(SourceKind::Folder); 2]
+        {
+            self.merge_file_open = false;
+            self.comparison_mode = mode;
+            return;
+        }
         if self.comparison_mode == mode {
             if mode == ComparisonMode::Folder
                 && self
@@ -465,6 +617,37 @@ impl VersusApp {
     }
 
     fn new_comparison(&mut self) {
+        self.sync_file_search_when_clean();
+        if self
+            .interactive
+            .as_ref()
+            .is_some_and(InteractiveView::is_saving)
+            || self
+                .merge_folders
+                .as_ref()
+                .is_some_and(FolderBrowser::is_saving)
+            || self
+                .merge_file_search
+                .as_ref()
+                .is_some_and(FolderBrowser::is_saving)
+            || self
+                .interactive
+                .as_ref()
+                .is_some_and(InteractiveView::any_dirty)
+            || self
+                .merge_folders
+                .as_ref()
+                .is_some_and(FolderBrowser::any_dirty)
+        {
+            self.pending_merge_exit = Some(MergeExit::New);
+            return;
+        }
+        self.interactive = self.merge_mode.then(InteractiveView::default);
+        self.merge_folders = None;
+        self.merge_file_search = None;
+        self.merge_file_open = false;
+        self.merge_file_sides = [false; 2];
+        self.folder_diff_settings = None;
         self.invalidate();
         self.paths = Default::default();
         self.source_paths = [None, None];
@@ -481,14 +664,17 @@ impl VersusApp {
 
     fn start_selected_comparison(&mut self) {
         self.error = self.source_errors.iter().flatten().next().cloned();
-        if self.error.is_some() {
+        if self.error.is_some() && !self.merge_mode {
             self.message = "Cannot open selected source. Choose another file or folder.".into();
             return;
         }
-        if self.source_jobs.iter().any(Option::is_some) {
+        if self.source_jobs.iter().any(Option::is_some) && !self.merge_mode {
             return;
         }
-        if let Some(requested_mode) = self.launch_mode.take() {
+        if let Some(requested_mode) = self
+            .launch_mode
+            .take_if(|_| self.source_jobs.iter().all(Option::is_none))
+        {
             if let Some(mode) = requested_mode {
                 let expected = match mode {
                     ComparisonMode::File => SourceKind::File,
@@ -512,6 +698,40 @@ impl VersusApp {
                     _ => ComparisonMode::File,
                 };
             }
+        }
+        let retained_file_session = self.merge_file_open
+            && self.interactive.is_some()
+            && self.merge_folders.is_none()
+            && selection::selection_mode(self.source_kinds) == SelectionMode::File;
+        if self.merge_mode || retained_file_session {
+            let recent_mode = match selection::selection_mode(self.source_kinds) {
+                SelectionMode::File
+                    if self
+                        .source_kinds
+                        .iter()
+                        .all(|kind| *kind == Some(SourceKind::File)) =>
+                {
+                    Some(ComparisonMode::File)
+                }
+                SelectionMode::Folder
+                    if self
+                        .source_kinds
+                        .iter()
+                        .all(|kind| *kind == Some(SourceKind::Folder)) =>
+                {
+                    Some(ComparisonMode::Folder)
+                }
+                _ => None,
+            };
+            if let Some(mode) = recent_mode {
+                self.record_recent(mode, self.comparison_paths());
+            }
+            self.open_interactive_sources();
+            return;
+        }
+        if self.merge_file_open && self.merge_folders.is_none() {
+            self.merge_file_open = false;
+            self.merge_file_sides = [false; 2];
         }
         match selection::selection_mode(self.source_kinds) {
             SelectionMode::File => {
@@ -577,19 +797,46 @@ impl VersusApp {
         let worker_progress = progress.clone();
         let ignore_whitespace = self.ignore_whitespace;
         let ignore_line_endings = self.ignore_line_endings;
+        crate::diagnostics::info(format!(
+            "Folder comparison started: left={} right={} ignore_whitespace={ignore_whitespace} ignore_line_endings={ignore_line_endings}",
+            roots[0].display(),
+            roots[1].display()
+        ));
         std::thread::spawn(move || {
-            let result = versus::compare_directories(
-                &worker_roots[0],
-                &worker_roots[1],
-                &DirectoryCompareOptions {
-                    cancellation: Some(worker_cancellation),
-                    ignore_whitespace,
-                    ignore_line_endings,
-                    progress: Some(worker_progress),
-                    ..Default::default()
-                },
-            )
-            .map(|diff| FolderTree::from_diff(&diff));
+            let result = crate::diagnostics::catch_worker("Folder comparison", || {
+                let diff = versus::compare_directories(
+                    &worker_roots[0],
+                    &worker_roots[1],
+                    &DirectoryCompareOptions {
+                        cancellation: Some(worker_cancellation.clone()),
+                        ignore_whitespace,
+                        ignore_line_endings,
+                        progress: Some(worker_progress.clone()),
+                        ..Default::default()
+                    },
+                )?;
+                crate::diagnostics::info(format!(
+                    "Folder content comparison finished: {} entries; cancelled={}; building tree",
+                    diff.entries.len(),
+                    diff.cancelled
+                ));
+                worker_progress.begin(ProgressStage::BuildingTree, None);
+                if worker_cancellation.load(Ordering::Relaxed) {
+                    return Ok(FolderTree::from_diff(&versus::DirectoryDiff {
+                        entries: vec![],
+                        cancelled: true,
+                    }));
+                }
+                let tree = FolderTree::from_diff(&diff);
+                worker_progress.begin(ProgressStage::Finished, Some(diff.entries.len() as u64));
+                worker_progress.advance(diff.entries.len() as u64);
+                Ok::<_, CompareError>(tree)
+            })
+            .map_err(|message| CompareError {
+                path: None,
+                kind: versus::CompareErrorKind::Io,
+                message,
+            });
             let _ = sender.send(result);
         });
         self.job = Some(ComparisonJob {
@@ -598,15 +845,36 @@ impl VersusApp {
             roots,
             started: Instant::now(),
             progress,
+            logged_progress: None,
+            last_progress_log: Instant::now(),
         });
         self.error = None;
         self.message = "Scanning folders and comparing file contents…".into();
     }
 
     fn poll_comparison(&mut self, ctx: &egui::Context) {
-        let Some(job) = &self.job else {
+        let Some(job) = &mut self.job else {
             return;
         };
+        let snapshot = job.progress.snapshot();
+        let state = (snapshot.stage, snapshot.completed, snapshot.total);
+        if job.logged_progress != Some(state)
+            && (job
+                .logged_progress
+                .is_none_or(|last| last.0 != snapshot.stage)
+                || job.last_progress_log.elapsed() >= Duration::from_secs(1))
+        {
+            crate::diagnostics::info(format!(
+                "Folder comparison progress: {:?} {}/{}",
+                snapshot.stage,
+                snapshot.completed,
+                snapshot
+                    .total
+                    .map_or_else(|| "unknown".into(), |total| total.to_string())
+            ));
+            job.logged_progress = Some(state);
+            job.last_progress_log = Instant::now();
+        }
         let result = match job.receiver.try_recv() {
             Ok(result) => Some(result.map_err(|error| error.to_string())),
             Err(TryRecvError::Disconnected) => Some(Err(
@@ -617,11 +885,16 @@ impl VersusApp {
         if let Some(result) = result {
             let job = self.job.take().unwrap();
             if job.cancellation.load(Ordering::Relaxed) {
+                crate::diagnostics::info("Folder comparison cancelled");
                 self.message = "Comparison cancelled.".into();
                 return;
             }
             match result {
                 Ok(mut tree) => {
+                    crate::diagnostics::info(format!(
+                        "Folder comparison result received after {:.3}s",
+                        job.started.elapsed().as_secs_f64()
+                    ));
                     let same_roots = self.roots.as_ref() == Some(&job.roots);
                     if same_roots {
                         let anchor = self.tree.as_ref().and_then(|previous| {
@@ -679,11 +952,15 @@ impl VersusApp {
                         .collect();
                     self.counts = count_entries(&tree);
                     self.tree = Some(tree);
+                    if let Some(browser) = &mut self.merge_folders {
+                        browser.invalidate_comparison_cache();
+                    }
                     self.roots = Some(job.roots);
                     self.elapsed = Some(job.started.elapsed());
                     self.message = "Comparison complete.".into();
                 }
                 Err(error) => {
+                    crate::diagnostics::error(format!("Folder comparison failed: {error}"));
                     self.error = Some(error);
                     self.message =
                         "Comparison failed. Check the folder paths and access permissions.".into();
@@ -756,7 +1033,6 @@ impl VersusApp {
             job: (ready && !type_mismatch).then_some(FileJob {
                 receiver,
                 cancellation,
-                started: Instant::now(),
                 progress,
                 ignore_line_endings,
             }),
@@ -765,6 +1041,7 @@ impl VersusApp {
             error_icon: if type_mismatch { StatusIcon::TypeMismatch } else { StatusIcon::Error },
             scroll_y: 0.0,
             content_widths: [0.0; 2],
+            gutter_extra: 0.0,
             counts: [0; 6],
             visible_rows: Vec::new(),
             difference_rows: Vec::new(),
@@ -809,15 +1086,24 @@ impl VersusApp {
                     view.counts = [0; 6];
                     view.content_widths = [0.0; 2];
                     let font_width = comparison_font(ctx).size;
+                    let mut max_line_number = 1;
                     for row in &comparison.rows {
                         view.counts[state_index(&row.state)] += 1;
                         for (side, line) in [&row.left, &row.right].into_iter().enumerate() {
-                            if let Some((_, text)) = line {
+                            if let Some((number, text)) = line {
+                                max_line_number = max_line_number.max(*number);
                                 view.content_widths[side] = view.content_widths[side].max(
-                                    96.0 + (text.len() + text.matches('\t').count() * 3) as f32
-                                        * font_width,
+                                    (file_style::TEXT_OFFSET + 28.0)
+                                        + (text.len() + text.matches('\t').count() * 3) as f32
+                                            * font_width,
                                 );
                             }
+                        }
+                    }
+                    view.gutter_extra = file_style::gutter_extra(max_line_number);
+                    for width in &mut view.content_widths {
+                        if *width > 0.0 {
+                            *width += view.gutter_extra;
                         }
                     }
                     view.comparison = Some(comparison);
@@ -932,7 +1218,7 @@ impl VersusApp {
             };
             if let Some(target) = target {
                 if let Some(index) = view.visible_rows.iter().position(|row| *row == target) {
-                    view.scroll_y = index as f32 * view.row_height;
+                    view.scroll_y = index.saturating_sub(1) as f32 * view.row_height;
                     view.navigation_row = Some(target);
                     view.navigation_scroll_pending = true;
                 }
@@ -990,7 +1276,7 @@ impl VersusApp {
                 .iter()
                 .position(|row| row.node.relative_path == path)
             {
-                self.tree_scroll_y = index as f32 * self.row_height;
+                self.tree_scroll_y = index.saturating_sub(1) as f32 * self.row_height;
             }
             self.selected = Some(path);
         }
@@ -998,105 +1284,50 @@ impl VersusApp {
 
     fn progress_indicator(&self, ui: &mut egui::Ui) {
         let palette = Palette::for_context(ui.ctx());
-        if let Some(message) = &self.drop_message {
-            status_label(ui, message, palette.error);
-            return;
-        }
         let file_job = self.file_view.as_ref().and_then(|view| view.job.as_ref());
         let job = file_job
-            .map(|job| (&job.progress, job.started))
-            .or_else(|| self.job.as_ref().map(|job| (&job.progress, job.started)));
-        if let Some((progress, started)) = job {
+            .map(|job| (&job.progress, &job.cancellation, "Cancel file comparison"))
+            .or_else(|| {
+                self.job
+                    .as_ref()
+                    .map(|job| (&job.progress, &job.cancellation, "Cancel folder comparison"))
+            });
+        if let Some((progress, cancel, tooltip)) = job {
             let snapshot = progress.snapshot();
             ui.horizontal(|ui| {
-                ui.spinner();
-                let total = snapshot.total.filter(|total| *total > 0);
-                let show_bar = total.is_some() && ui.available_width() >= 300.0;
-                let reserve = if show_bar {
-                    90.0 + ui.spacing().item_spacing.x
-                } else {
-                    0.0
-                } + if file_job.is_some() {
-                    control_extent(ui) + ui.spacing().item_spacing.x
-                } else {
-                    0.0
-                };
+                let extent = control_extent(ui);
+                let reserve = extent + ui.spacing().item_spacing.x;
+                if ui.available_width() > 2.0 * extent {
+                    ui.spinner();
+                }
                 let width = (ui.available_width() - reserve).max(0.0);
                 ui.allocate_ui_with_layout(
-                    egui::vec2(width, control_extent(ui)),
+                    egui::vec2(width, extent),
                     egui::Layout::left_to_right(egui::Align::Center),
                     |ui| {
-                        status_label(
-                            ui,
-                            &progress_text(snapshot, started, Instant::now()),
-                            palette.text,
-                        );
+                        header_progress_label(ui, snapshot, palette.text);
                     },
                 );
-                if show_bar {
-                    ui.add(
-                        egui::ProgressBar::new(snapshot.completed as f32 / total.unwrap() as f32)
-                            .desired_width(90.0),
-                    );
-                }
-                if let Some(job) = file_job {
-                    if icon_button(
-                        ui,
-                        ToolbarIcon::Cancel,
-                        !job.cancellation.load(Ordering::Relaxed),
-                        "Cancel file comparison",
-                    )
-                    .clicked()
-                    {
-                        job.cancellation.store(true, Ordering::Relaxed);
-                    }
+                if icon_button(
+                    ui,
+                    ToolbarIcon::Cancel,
+                    !cancel.load(Ordering::Relaxed),
+                    tooltip,
+                )
+                .clicked()
+                {
+                    cancel.store(true, Ordering::Relaxed);
                 }
             });
             ui.ctx().request_repaint_after(Duration::from_millis(60));
         } else if self.source_jobs.iter().any(Option::is_some) {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                status_label(ui, "Opening selected sources…", palette.text);
-            });
+            header_status_label(ui, "Opening selected sources…", palette.text);
             ui.ctx().request_repaint_after(Duration::from_millis(60));
-        } else if let Some(error) = self
-            .file_view
-            .as_ref()
-            .and_then(|view| view.error.as_ref())
-            .or(self.error.as_ref())
-        {
-            status_label(ui, error, palette.error);
-        } else if self.tree.is_some()
-            || self
-                .file_view
-                .as_ref()
-                .is_some_and(|view| view.comparison.is_some())
-        {
-            status_label(ui, &self.navigation_status(), palette.muted);
         }
     }
 
     fn drag_and_drop(&mut self, ui: &mut egui::Ui) {
-        let (hovering, frame_position, retained_position) = ui.input(|input| {
-            (
-                !input.raw.hovered_files.is_empty(),
-                // A position delivered with Drop is more precise than a later
-                // live-cursor sample taken when the UI redraws.
-                input.raw.events.iter().rev().find_map(|event| match event {
-                    egui::Event::PointerMoved(position) => Some(*position),
-                    _ => None,
-                }),
-                // Native drags can report PointerGone after the drag position
-                // in the same frame. Keep that position for hit testing the drop.
-                input.pointer.interact_pos(),
-            )
-        });
-        let position = frame_position
-            .or(self.native_drag_position.take())
-            .or(retained_position);
-        let dropped = ui
-            .ctx()
-            .input_mut(|input| std::mem::take(&mut input.raw.dropped_files));
+        let (hovering, position, dropped) = native_drop_frame(ui, self.native_drag_position.take());
         let side =
             position.and_then(|pos| self.pane_rects.iter().position(|rect| rect.contains(pos)));
         if hovering {
@@ -1109,38 +1340,13 @@ impl VersusApp {
                 self.drop_hover_side = side;
             }
             if let Some(side) = side.or(self.drop_hover_side) {
-                let rect = self.pane_rects[side].shrink(3.0);
-                let palette = Palette::for_context(ui.ctx());
-                // Draw above the empty-state text and rows. Native
-                // drops are hit-tested by geometry, not intercepted by widgets.
-                let painter = ui.ctx().layer_painter(egui::LayerId::new(
-                    egui::Order::Foreground,
-                    egui::Id::new("native-drop-highlight"),
-                ));
-                painter.rect_filled(rect, 4, palette.accent.gamma_multiply(0.1));
-                painter.rect_stroke(
-                    rect,
-                    4,
-                    Stroke::new(3.0, palette.accent),
-                    egui::StrokeKind::Inside,
-                );
-                let label = painter.layout_no_wrap(
-                    format!(
+                paint_native_drop_highlight(
+                    ui.ctx(),
+                    self.pane_rects[side],
+                    &format!(
                         "Drop a file or folder on {}",
                         if side == 0 { "LEFT" } else { "RIGHT" }
                     ),
-                    FontId::proportional(16.0),
-                    palette.text,
-                );
-                let label_rect = Rect::from_center_size(
-                    egui::pos2(rect.center().x, rect.top() + 64.0),
-                    label.size() + egui::vec2(24.0, 16.0),
-                );
-                painter.rect_filled(label_rect, 4, palette.panel);
-                painter.galley(
-                    label_rect.center() - label.size() * 0.5,
-                    label,
-                    palette.text,
                 );
             }
         }
@@ -1153,6 +1359,17 @@ impl VersusApp {
             if dropped.len() == 1 && !dropped[0].path().as_os_str().is_empty() && target.is_some() {
                 let side = target.unwrap();
                 let path = dropped[0].path().to_path_buf();
+                if self.merge_file_open && !self.merge_mode {
+                    if let Some(view) = &mut self.interactive {
+                        if let Some(paths) = view.pair_paths() {
+                            let mut paths = paths.clone();
+                            paths[side] = absolute_native_path(path);
+                            view.open_pair(paths);
+                            ui.ctx().request_repaint();
+                            return;
+                        }
+                    }
+                }
                 // A drop in a drilled-down file view retains the other displayed
                 // file, rather than accidentally pairing it with the folder root.
                 if let Some(view) = self.file_view.as_ref().filter(|view| view.from_folders) {
@@ -1182,6 +1399,7 @@ impl VersusApp {
     }
 
     fn render(&mut self, ui: &mut egui::Ui) {
+        self.dismiss_errors_on_pane_input(ui);
         self.preferences_context = Some(ui.ctx().clone());
         // egui separates modified wheel input from scrolling and smooths it.
         // Apply each delta once, including its tail across repaint frames.
@@ -1201,7 +1419,7 @@ impl VersusApp {
                 egui::Event::Key { key: egui::Key::Tab, pressed: true, modifiers, .. } if modifiers.shift))) {
                 "Browse right folder"
             } else {
-                "Folder Compare"
+                "Folder Diff"
             };
             ui.memory_mut(|memory| {
                 memory.move_focus(egui::FocusDirection::None);
@@ -1247,17 +1465,20 @@ impl VersusApp {
             .show(ui, |ui| {
                 self.header(ui);
                 ui.add_space(5.0);
-                self.legend(ui);
-                ui.add_space(5.0);
-                if self.file_view.is_some() {
-                    self.pane_rects = split_rect(ui.available_rect_before_wrap());
-                    self.file_area(ui);
+                if self.interactive.is_some() && (self.merge_mode || self.merge_file_open) {
+                    self.interactive_area(ui);
                     return;
                 }
+                self.legend(ui);
+                ui.add_space(5.0);
                 let available = ui.available_rect_before_wrap();
-                let footer_height = ui.spacing().interact_size.y
-                    + ui.text_style_height(&egui::TextStyle::Monospace).ceil()
-                    + ui.spacing().item_spacing.y;
+                let footer_height = workspace_footer_height(
+                    ui,
+                    false,
+                    false,
+                    &DIFF_LEGEND_ICONS,
+                    self.comparison_counts(),
+                );
                 let footer_rect = Rect::from_min_max(
                     egui::pos2(
                         available.left(),
@@ -1275,20 +1496,517 @@ impl VersusApp {
                 self.pane_rects = split_rect(tree_rect);
                 ui.scope_builder(egui::UiBuilder::new().max_rect(tree_rect), |ui| {
                     ui.set_clip_rect(ui.clip_rect().intersect(tree_rect));
-                    self.tree_area(ui, (tree_rect.height() - 2.0).max(0.0));
+                    if self.file_view.is_some() {
+                        self.file_area(ui);
+                    } else {
+                        self.tree_area(ui, (tree_rect.height() - 2.0).max(0.0));
+                    }
                 });
                 ui.scope_builder(egui::UiBuilder::new().max_rect(footer_rect), |ui| {
                     ui.set_clip_rect(ui.clip_rect().intersect(footer_rect));
                     self.footer(ui);
                 });
             });
+        self.sync_folder_merge_diff();
+        self.sync_working_folder_diff(ui.ctx());
         self.drag_and_drop(ui);
+        self.merge_exit_dialog(ui.ctx());
+    }
+
+    fn workspace_mode_toggle(&mut self, ui: &mut egui::Ui) {
+        let mut merge = self.merge_mode;
+        for (enabled, label, tooltip) in [
+            (
+                false,
+                "Diff",
+                "Inspect differences using comparison preferences",
+            ),
+            (
+                true,
+                "Merge",
+                "Edit and transfer content; comparison is optional",
+            ),
+        ] {
+            if workspace_mode_button(ui, label, merge == enabled)
+                .on_hover_text(tooltip)
+                .clicked()
+            {
+                merge = enabled;
+            }
+        }
+        if merge != self.merge_mode {
+            self.set_workspace_merge(merge);
+            ui.ctx().request_repaint();
+        }
+    }
+
+    fn set_workspace_merge(&mut self, merge: bool) {
+        if self.merge_mode == merge {
+            return;
+        }
+        self.merge_mode = merge;
+        // A folder result produced in the other mode has different comparison
+        // preferences. Force its replacement when Merge is entered again.
+        self.folder_diff_settings = None;
+        if merge {
+            if self.merge_folders.is_some() {
+                self.tree = None;
+                self.merge_folders
+                    .as_mut()
+                    .unwrap()
+                    .invalidate_comparison_cache();
+            }
+            if let Some(job) = self.job.take() {
+                job.cancellation.store(true, Ordering::Relaxed);
+            }
+            if let Some(view) = &mut self.file_view {
+                if let Some(job) = view.job.take() {
+                    job.cancellation.store(true, Ordering::Relaxed);
+                }
+            }
+            self.interactive
+                .get_or_insert_with(InteractiveView::default);
+            if !self.merge_file_open && self.merge_folders.is_none() {
+                if let Some(file) = &self.file_view {
+                    if file.from_folders {
+                        if let Some(roots) = &self.roots {
+                            self.merge_folders = Some(FolderBrowser::new(roots.clone()));
+                        }
+                    }
+                    let paths = file.paths.clone();
+                    self.interactive.as_mut().unwrap().open_pair(paths);
+                    self.merge_file_open = true;
+                    self.merge_file_sides = [true; 2];
+                } else {
+                    self.open_interactive_sources();
+                }
+            }
+        } else if !self.merge_file_open && self.merge_folders.is_some() && self.roots.is_some() {
+            self.start_comparison();
+        }
+        let prefs = [
+            self.show_only_differences,
+            self.ignore_whitespace,
+            self.ignore_line_endings,
+        ];
+        if let Some(view) = &mut self.interactive {
+            view.set_editing(merge, prefs);
+        }
+    }
+
+    fn open_interactive_sources(&mut self) {
+        self.sync_file_search_when_clean();
+        let folder_sources: [Option<PathBuf>; 2] = std::array::from_fn(|side| {
+            (self.source_kinds[side] == Some(SourceKind::Folder))
+                .then(|| self.source_paths[side].clone())
+                .flatten()
+        });
+        let previous_roots = self.merge_folders.as_ref().map(FolderBrowser::source_roots);
+        let view = self
+            .interactive
+            .get_or_insert_with(InteractiveView::default);
+        view.set_editing(
+            self.merge_mode,
+            [
+                self.show_only_differences,
+                self.ignore_whitespace,
+                self.ignore_line_endings,
+            ],
+        );
+        let current = view.current_sources();
+        let files = std::array::from_fn(|side| match self.source_kinds[side] {
+            Some(SourceKind::File) => self.source_paths[side].clone(),
+            Some(SourceKind::Folder)
+                if self.merge_file_sides[side]
+                    && previous_roots
+                        .as_ref()
+                        .is_some_and(|roots| roots[side] == folder_sources[side]) =>
+            {
+                current[side].clone()
+            }
+            _ => None,
+        });
+        self.merge_file_sides = files.each_ref().map(Option::is_some);
+        self.merge_file_open = self.merge_file_sides.iter().any(|open| *open);
+        view.open_sources(files);
+        if folder_sources.iter().any(Option::is_some) {
+            if let Some(browser) = &mut self.merge_folders {
+                browser.set_sources(folder_sources.clone());
+            } else {
+                self.merge_folders = Some(FolderBrowser::new_with_sources(folder_sources.clone()));
+            }
+            // A file-search save owns a receiver and must be allowed to drain
+            // even if the workspace changes into a folder merge. Retire an idle
+            // owner, but retain pending saves and errors for status reporting.
+            if self.merge_file_search.as_ref().is_some_and(|browser| {
+                !browser.is_saving() && !browser.any_dirty() && browser.error_details().is_empty()
+            }) {
+                self.merge_file_search = None;
+            }
+        } else {
+            self.merge_folders = None;
+            let sources = view.current_sources();
+            if let Some(browser) = &mut self.merge_file_search {
+                browser.set_search_sources(sources);
+            }
+        }
+        self.roots = match folder_sources.clone() {
+            [Some(left), Some(right)] => Some([left, right]),
+            _ => None,
+        };
+        if previous_roots.as_ref() != Some(&folder_sources) {
+            self.folder_diff_settings = None;
+        }
+    }
+
+    fn interactive_area(&mut self, ui: &mut egui::Ui) {
+        if self.merge_mode {
+            self.independent_merge_area(ui);
+            return;
+        }
+        let saving = self
+            .merge_folders
+            .as_ref()
+            .is_some_and(FolderBrowser::is_saving)
+            || self
+                .merge_file_search
+                .as_ref()
+                .is_some_and(FolderBrowser::is_saving);
+        let prefs = [
+            self.show_only_differences,
+            self.ignore_whitespace,
+            self.ignore_line_endings,
+        ];
+        if let Some(view) = &mut self.interactive {
+            view.set_external_save_busy(saving);
+            view.set_editing(self.merge_mode, prefs);
+        }
+        if self.merge_file_open {
+            if let Some(mut view) = self.interactive.take() {
+                view.set_from_folders(self.merge_folders.is_some());
+                let folder_file_paths = self.merge_folders.as_ref().map(|_| view.current_sources());
+                let (panes, status) = view.render_with_sources(ui, |ui| {
+                    if self.merge_folders.is_none() {
+                        self.folder_inputs(ui);
+                    } else if let Some([Some(left), Some(right)]) = &folder_file_paths {
+                        file_path_headers(ui, &[left.clone(), right.clone()]);
+                    }
+                    paint_panel_divider(ui);
+                });
+                self.pane_rects = panes;
+                ui.scope_builder(egui::UiBuilder::new().max_rect(status), |ui| {
+                    self.render_bottom_status(ui, Some(&mut view));
+                });
+                if self.merge_folders.is_none() {
+                    if let Some(paths) = view
+                        .take_loaded_paths()
+                        .filter(|_| self.source_jobs.iter().all(Option::is_none))
+                    {
+                        self.paths = paths
+                            .clone()
+                            .map(|path| path.to_string_lossy().into_owned());
+                        self.source_paths = paths.clone().map(Some);
+                        self.source_kinds = [Some(SourceKind::File); 2];
+                    }
+                }
+                if !self.merge_mode {
+                    let options = view.diff_preferences();
+                    self.show_only_differences = options[0];
+                    self.ignore_whitespace = options[1];
+                    self.ignore_line_endings = options[2];
+                }
+                if view.take_back_requested() {
+                    self.merge_file_open = false;
+                    self.merge_file_sides = [false; 2];
+                    view.open_sources([None, None]);
+                    if !self.merge_mode && self.merge_folders.is_some() {
+                        self.start_comparison();
+                    }
+                }
+                self.interactive = Some(view);
+            }
+            if self
+                .interactive
+                .as_mut()
+                .is_some_and(InteractiveView::take_new_requested)
+            {
+                self.new_comparison();
+            }
+        } else {
+            if let Some(view) = &mut self.interactive {
+                view.set_from_folders(false);
+                let differences = match (&self.tree, &mut self.merge_folders) {
+                    (Some(tree), Some(browser)) => browser.difference_paths(tree, view),
+                    _ => Arc::new(Vec::new()),
+                };
+                view.set_folder_differences(differences);
+                view.render_toolbar(ui);
+                if let (Some(path), Some(browser)) =
+                    (view.take_folder_jump(), &mut self.merge_folders)
+                {
+                    browser.reveal_difference(path);
+                }
+            }
+            comparison_panel(ui).show(ui, |ui| {
+                ui.set_min_height((ui.available_height() - 2.0).max(0.0));
+                ui.spacing_mut().item_spacing = Vec2::ZERO;
+                self.folder_inputs(ui);
+                paint_panel_divider(ui);
+                self.pane_rects = split_rect(ui.available_rect_before_wrap());
+                if let (Some(browser), Some(view)) =
+                    (&mut self.merge_folders, &mut self.interactive)
+                {
+                    if let Some(paths) = browser.render(ui, view, self.tree.as_ref()) {
+                        view.open_pair(paths);
+                        self.merge_file_open = true;
+                    }
+                } else {
+                    empty_display(
+                        ui,
+                        ui.available_height().max(60.0),
+                        "Choose files or folders",
+                        "Use Browse or drop a source into each pane.",
+                    );
+                }
+            });
+            if self
+                .interactive
+                .as_mut()
+                .is_some_and(InteractiveView::take_new_requested)
+            {
+                self.new_comparison();
+            }
+        }
+    }
+
+    fn independent_merge_area(&mut self, ui: &mut egui::Ui) {
+        let Some(mut view) = self.interactive.take() else {
+            return;
+        };
+        view.set_external_save_busy(
+            self.merge_folders
+                .as_ref()
+                .is_some_and(FolderBrowser::is_saving)
+                || self
+                    .merge_file_search
+                    .as_ref()
+                    .is_some_and(FolderBrowser::is_saving),
+        );
+        view.set_editing(
+            true,
+            [
+                self.show_only_differences,
+                self.ignore_whitespace,
+                self.ignore_line_endings,
+            ],
+        );
+        view.set_from_folders(self.merge_folders.is_some());
+        let differences = match (&self.tree, &mut self.merge_folders) {
+            (Some(tree), Some(browser)) => browser.difference_paths(tree, &view),
+            _ => Arc::new(Vec::new()),
+        };
+        view.set_folder_differences(differences);
+        view.render_workspace_toolbar(ui, !self.merge_file_sides.iter().any(|open| *open));
+        if view.take_search_requested() {
+            if let Some(browser) = &mut self.merge_folders {
+                browser.open_search();
+            } else {
+                let sources = view.current_sources();
+                let browser = self
+                    .merge_file_search
+                    .get_or_insert_with(|| FolderBrowser::new_search(sources.clone()));
+                browser.set_search_sources(sources);
+                browser.open_search();
+            }
+        }
+        if self.merge_folders.is_none()
+            && let Some(browser) = &mut self.merge_file_search
+        {
+            browser.set_search_sources(view.current_sources());
+            browser.render_search_controls(ui, &mut view);
+        }
+        if let (Some(path), Some(browser)) = (view.take_folder_jump(), &mut self.merge_folders) {
+            browser.reveal_difference(path);
+        }
+        if view.take_back_requested() {
+            self.merge_file_sides = [false; 2];
+            self.merge_file_open = false;
+            view.open_sources([None, None]);
+        }
+        ui.add_space(5.0);
+        let area = ui.available_rect_before_wrap();
+        let footer_height = view.footer_height(ui) + 4.0;
+        let body = Rect::from_min_max(
+            area.min,
+            egui::pos2(
+                area.right(),
+                (area.bottom() - footer_height).max(area.top()),
+            ),
+        );
+        let footer = Rect::from_min_max(egui::pos2(area.left(), body.bottom() + 4.0), area.max);
+        let mut opened: [Option<PathBuf>; 2] = [None, None];
+        let mut back = [false; 2];
+        ui.scope_builder(egui::UiBuilder::new().max_rect(body), |ui| {
+            comparison_panel(ui).show(ui, |ui| {
+                ui.set_min_height((ui.available_height() - 2.0).max(0.0));
+                let source_spacing = ui.spacing().item_spacing.y;
+                ui.spacing_mut().item_spacing = egui::vec2(
+                    0.0,
+                    if self.merge_file_sides.iter().any(|open| *open) {
+                        source_spacing
+                    } else {
+                        0.0
+                    },
+                );
+                back = self.merge_inputs(ui, &mut view);
+                for side in 0..2 {
+                    if self.source_jobs[side].is_some() {
+                        view.open_side(side, None);
+                    }
+                }
+                paint_panel_divider(ui);
+                ui.spacing_mut().item_spacing = Vec2::ZERO;
+                if let Some(browser) = &mut self.merge_folders {
+                    browser.render_controls(ui, &mut view);
+                }
+                let pane_area = ui.available_rect_before_wrap();
+                self.pane_rects = split_rect(pane_area);
+                ui.painter().line_segment(
+                    [pane_area.center_top(), pane_area.center_bottom()],
+                    Stroke::new(1.0, Palette::for_context(ui.ctx()).border),
+                );
+                ui.columns(2, |columns| {
+                    for (side, pane) in columns.iter_mut().enumerate() {
+                        pane.set_clip_rect(pane.clip_rect().intersect(self.pane_rects[side]));
+                        if self.merge_file_sides[side] {
+                            let height = pane.available_height();
+                            view.render_side(pane, side, height);
+                        } else if let Some(browser) = self
+                            .merge_folders
+                            .as_mut()
+                            .filter(|browser| browser.source_roots()[side].is_some())
+                        {
+                            if let Some(path) =
+                                browser.render_side(pane, &mut view, self.tree.as_ref(), side)
+                            {
+                                opened[side] = Some(path);
+                            }
+                        } else {
+                            let (rect, _) = pane.allocate_exact_size(
+                                egui::vec2(
+                                    pane.available_width(),
+                                    pane.available_height().max(80.0),
+                                ),
+                                Sense::hover(),
+                            );
+                            paint_empty_drop_target(pane, rect, side, true);
+                        }
+                    }
+                });
+            });
+        });
+        for side in 0..2 {
+            if back[side] {
+                self.merge_file_sides[side] = false;
+                view.open_side(side, None);
+            } else if let Some(path) = opened[side].take() {
+                self.merge_file_sides[side] = true;
+                view.open_side(side, Some(path));
+            }
+        }
+        self.merge_file_open = self.merge_file_sides.iter().any(|open| *open);
+        ui.scope_builder(egui::UiBuilder::new().max_rect(footer), |ui| {
+            let status = view.render_footer(ui);
+            ui.scope_builder(egui::UiBuilder::new().max_rect(status), |ui| {
+                self.render_bottom_status(ui, Some(&mut view));
+            });
+        });
+        if view.take_save_all_requested() {
+            if let Some(browser) = self.merge_folders.as_mut() {
+                browser.begin_save(&view);
+            } else {
+                let browser = self
+                    .merge_file_search
+                    .get_or_insert_with(|| FolderBrowser::new_search(view.current_sources()));
+                browser.begin_save(&view);
+            }
+        }
+        view.render_previews(ui.ctx());
+        if self.merge_folders.is_none() {
+            if let Some(paths) = view.take_loaded_sources() {
+                for side in 0..2 {
+                    if self.source_jobs[side].is_none() {
+                        self.paths[side] = paths[side]
+                            .as_ref()
+                            .map(|path| path.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        self.source_paths[side] = paths[side].clone();
+                        self.source_kinds[side] = paths[side].as_ref().map(|_| SourceKind::File);
+                    }
+                }
+            }
+        }
+        let new = view.take_new_requested();
+        self.interactive = Some(view);
+        if new {
+            self.new_comparison();
+        }
+    }
+
+    fn sync_folder_merge_diff(&mut self) {
+        if !self.merge_mode || self.merge_folders.is_none() {
+            return;
+        }
+        let Some(view) = &self.interactive else {
+            return;
+        };
+        if !view.run_diff_enabled() || self.source_kinds != [Some(SourceKind::Folder); 2] {
+            if let Some(job) = self.job.take() {
+                job.cancellation.store(true, Ordering::Relaxed);
+            }
+            self.folder_diff_settings = None;
+            if self.tree.take().is_some() {
+                self.merge_folders
+                    .as_mut()
+                    .unwrap()
+                    .invalidate_comparison_cache();
+            }
+            return;
+        }
+        let settings = view.merge_options();
+        let compare_changed = self
+            .folder_diff_settings
+            .is_none_or(|previous| previous[1..] != settings[1..]);
+        self.folder_diff_settings = Some(settings);
+        if compare_changed {
+            let old = [
+                self.show_only_differences,
+                self.ignore_whitespace,
+                self.ignore_line_endings,
+            ];
+            self.ignore_whitespace = settings[1];
+            self.ignore_line_endings = settings[2];
+            self.start_comparison();
+            self.show_only_differences = old[0];
+            self.ignore_whitespace = old[1];
+            self.ignore_line_endings = old[2];
+        }
+    }
+    fn sync_working_folder_diff(&mut self, ctx: &egui::Context) {
+        if let (Some(browser), Some(view)) = (&mut self.merge_folders, &self.interactive) {
+            browser.poll_comparisons(view, ctx, self.merge_mode);
+        }
     }
 
     fn header(&mut self, ui: &mut egui::Ui) {
         let modes = [ComparisonMode::Folder, ComparisonMode::File];
         let labels = modes.map(|mode| {
-            egui::WidgetText::from(RichText::new(mode.label()).size(14.0).strong()).into_galley(
+            egui::WidgetText::from(
+                RichText::new(mode.workspace_label(self.merge_mode))
+                    .size(14.0)
+                    .strong(),
+            )
+            .into_galley(
                 ui,
                 Some(egui::TextWrapMode::Extend),
                 f32::INFINITY,
@@ -1315,10 +2033,16 @@ impl VersusApp {
                 ))
                 .layout(egui::Layout::left_to_right(egui::Align::Center)),
         );
-        if let Some((_, logo)) = &self.logo_texture {
-            brand_ui.image((logo.id(), egui::vec2(28.0, 28.0)));
+        if header.width() >= 700.0 {
+            if let Some((_, logo)) = &self.logo_texture {
+                brand_ui.image((logo.id(), egui::vec2(28.0, 28.0)));
+            }
+            brand_ui.label(RichText::new("Versus").size(18.0).strong());
+            brand_ui.add_space(16.0);
+        } else {
+            brand_ui.spacing_mut().item_spacing.x = 4.0;
         }
-        brand_ui.label(RichText::new("Versus").size(18.0).strong());
+        self.workspace_mode_toggle(&mut brand_ui);
 
         let mut x = group.left();
         for (index, mode) in modes.into_iter().enumerate() {
@@ -1376,10 +2100,53 @@ impl VersusApp {
             );
             ui.ctx().request_repaint();
         }
-        match self.mode() {
-            SelectionMode::Folder => self.controls(&mut controls_ui),
-            SelectionMode::File => self.file_controls(&mut controls_ui),
-            _ => {}
+        if self.interactive.is_some() && (self.merge_mode || self.merge_file_open) {
+            if self.merge_mode {
+                let mut enabled = self.interactive.as_ref().unwrap().run_diff_enabled();
+                if enabled
+                    && icon_button(
+                        &mut controls_ui,
+                        ToolbarIcon::Refresh,
+                        self.interactive.as_ref().unwrap().can_refresh_diff()
+                            || self.merge_folders.is_some(),
+                        "Refresh comparison",
+                    )
+                    .clicked()
+                {
+                    if let Some(browser) = &mut self.merge_folders {
+                        browser.refresh_listing();
+                    }
+                    self.interactive.as_mut().unwrap().refresh_diff();
+                    self.folder_diff_settings = None;
+                }
+                let view = self.interactive.as_mut().unwrap();
+                if controls_ui
+                    .checkbox(&mut enabled, "Run Diff")
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text("Compare loaded files to assist merging")
+                    .changed()
+                {
+                    view.set_run_diff(enabled);
+                }
+            } else {
+                let view = self.interactive.as_mut().unwrap();
+                if icon_button(
+                    &mut controls_ui,
+                    ToolbarIcon::Refresh,
+                    view.can_refresh_diff(),
+                    "Refresh comparison",
+                )
+                .clicked()
+                {
+                    view.refresh_diff();
+                }
+            }
+        } else {
+            match self.mode() {
+                SelectionMode::Folder => self.controls(&mut controls_ui),
+                SelectionMode::File => self.file_controls(&mut controls_ui),
+                _ => {}
+            }
         }
     }
 
@@ -1393,28 +2160,112 @@ impl VersusApp {
     fn folder_inputs_with_picker(
         &mut self,
         ui: &mut egui::Ui,
-        mut pick_source: impl FnMut(usize, &str, ComparisonMode) -> Option<PathBuf>,
+        pick_source: impl FnMut(usize, &str, ComparisonMode) -> Option<PathBuf>,
     ) {
+        self.source_inputs(ui, pick_source, None);
+    }
+
+    fn merge_inputs(&mut self, ui: &mut egui::Ui, view: &mut InteractiveView) -> [bool; 2] {
+        let files = view.current_sources();
+        let roots = self
+            .merge_folders
+            .as_ref()
+            .map(FolderBrowser::source_roots)
+            .unwrap_or([None, None]);
+        let header = MergePaneHeaders {
+            files: files.clone(),
+            back: std::array::from_fn(|side| self.merge_file_sides[side] && roots[side].is_some()),
+            save: std::array::from_fn(|side| view.can_save_side(side)),
+            dirty: std::array::from_fn(|side| view.is_side_dirty(side)),
+        };
+        let kinds = std::array::from_fn::<_, 2, _>(|side| {
+            if files[side].is_some() {
+                Some(SourceKind::File)
+            } else {
+                self.source_kinds[side]
+            }
+        });
+        let (back, save) = self.source_inputs(
+            ui,
+            |side, path, mode| selection::pick_path(side, path, kinds[side], mode),
+            Some(&header),
+        );
+        for side in 0..2 {
+            if save[side] {
+                view.request_side_save(side);
+            }
+        }
+        back
+    }
+
+    fn source_inputs(
+        &mut self,
+        ui: &mut egui::Ui,
+        mut pick_source: impl FnMut(usize, &str, ComparisonMode) -> Option<PathBuf>,
+        merge: Option<&MergePaneHeaders>,
+    ) -> ([bool; 2], [bool; 2]) {
         let palette = Palette::for_context(ui.ctx());
-        let full_paths = self.paths.clone().map(|path| {
+        let extent = control_extent(ui);
+        let gap = ui.spacing().item_spacing.x.max(4.0);
+        let width = ui.available_width();
+        let paths: [String; 2] = std::array::from_fn(|side| {
+            merge
+                .and_then(|header| header.files[side].as_ref())
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_else(|| self.paths[side].clone())
+        });
+        let full_paths = paths.each_ref().map(|path| {
             if path.is_empty() {
                 format!("Choose a {}", self.comparison_mode.source_label())
             } else {
-                absolute_path(&path).display().to_string()
+                absolute_path(path).display().to_string()
             }
         });
-        let width = ui.available_width();
-        let extent = control_extent(ui);
-        let path_width = (width / 2.0 - 60.0 - extent).max(40.0);
+        let label_widths = std::array::from_fn::<_, 2, _>(|side| {
+            if merge.is_some() {
+                ui.painter()
+                    .layout_no_wrap(
+                        if side == 0 {
+                            "LEFT (Incoming)"
+                        } else {
+                            "RIGHT (Current)"
+                        }
+                        .into(),
+                        FontId::monospace(10.0),
+                        palette.muted,
+                    )
+                    .size()
+                    .x
+                    + gap
+            } else {
+                40.0
+            }
+        });
+        let path_widths = std::array::from_fn::<_, 2, _>(|side| {
+            let back = merge.is_some_and(|header| header.back[side]);
+            (width / 2.0
+                - 14.0
+                - label_widths[side]
+                - extent
+                - gap
+                - if merge.is_some() { extent + gap } else { 0.0 }
+                - if back { extent + gap } else { 0.0 })
+            .max(1.0)
+        });
         let galleys = std::array::from_fn::<_, 2, _>(|side| {
-            if self.source_kinds[side] == Some(SourceKind::File) {
-                left_elided_path(ui.painter(), &full_paths[side], path_width, palette.text)
+            if merge.is_some() || self.source_kinds[side] == Some(SourceKind::File) {
+                left_elided_path(
+                    ui.painter(),
+                    &full_paths[side],
+                    path_widths[side],
+                    palette.text,
+                )
             } else {
                 ui.painter().layout(
                     full_paths[side].clone(),
                     comparison_font(ui.ctx()),
                     palette.text,
-                    path_width,
+                    path_widths[side],
                 )
             }
         });
@@ -1424,22 +2275,86 @@ impl VersusApp {
             .fold(extent, f32::max)
             + 14.0;
         let (header, _) = ui.allocate_exact_size(egui::vec2(width, height), Sense::hover());
+        self.source_header_rects = split_rect(header);
+        let mut back = [false; 2];
+        let mut save = [false; 2];
         for (side, half) in split_rect(header).into_iter().enumerate() {
-            let browse_label = format!(
-                "Browse {} {}",
-                if side == 0 { "left" } else { "right" },
-                self.comparison_mode.source_label()
-            );
             let rect = half.shrink(7.0);
             let painter = ui.painter().with_clip_rect(rect);
-            paint_side_label(&painter, rect, side, palette);
-            let galley = galleys[side].clone();
-            let position = egui::pos2(rect.left() + 40.0, rect.center().y - galley.size().y / 2.0);
+            let mut label_x = rect.left();
+            if merge.is_some_and(|header| header.back[side]) {
+                let button = Rect::from_min_size(
+                    egui::pos2(label_x, rect.center().y - extent / 2.0),
+                    egui::vec2(extent, extent),
+                );
+                let mut button_ui = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(button)
+                        .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                );
+                back[side] = icon_button(
+                    &mut button_ui,
+                    ToolbarIcon::Back,
+                    true,
+                    &format!(
+                        "Back to {} folder",
+                        if side == 0 { "left" } else { "right" }
+                    ),
+                )
+                .clicked();
+                label_x += extent + gap;
+            }
+            if merge.is_some() {
+                painter.text(
+                    egui::pos2(label_x, rect.center().y),
+                    Align2::LEFT_CENTER,
+                    if side == 0 {
+                        "LEFT (Incoming)"
+                    } else {
+                        "RIGHT (Current)"
+                    },
+                    FontId::monospace(10.0),
+                    if side == 0 {
+                        palette.left_only
+                    } else {
+                        palette.right_only
+                    },
+                );
+                ui.interact(
+                    Rect::from_min_size(
+                        egui::pos2(label_x, rect.top()),
+                        egui::vec2(label_widths[side], rect.height()),
+                    ),
+                    egui::Id::new(("merge-side-label", side)),
+                    Sense::hover(),
+                );
+            } else {
+                paint_side_label(&painter, rect, side, palette);
+            }
+            let position = egui::pos2(
+                label_x + label_widths[side],
+                rect.center().y - galleys[side].size().y / 2.0,
+            );
             let path_rect = Rect::from_min_size(
                 egui::pos2(position.x, rect.top()),
-                egui::vec2(path_width, rect.height()),
+                egui::vec2(path_widths[side], rect.height()),
             );
-            painter.galley(position, galley, palette.text);
+            painter.galley_with_override_text_color(
+                position,
+                galleys[side].clone(),
+                if merge.is_some_and(|header| header.dirty[side]) {
+                    palette.changed
+                } else {
+                    palette.text
+                },
+            );
+            let kind = if merge.is_some_and(|header| header.files[side].is_some()) {
+                "file"
+            } else {
+                self.comparison_mode.source_label()
+            };
+            let browse_label =
+                format!("Browse {} {kind}", if side == 0 { "left" } else { "right" });
             let path_response = ui
                 .interact(
                     path_rect,
@@ -1448,9 +2363,8 @@ impl VersusApp {
                 )
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                 .on_hover_text(format!(
-                    "{}\nClick to browse for a {}",
-                    full_paths[side],
-                    self.comparison_mode.source_label()
+                    "{}\nClick to browse for a {kind}",
+                    full_paths[side]
                 ));
             path_response.widget_info(|| {
                 egui::WidgetInfo::labeled(
@@ -1459,8 +2373,9 @@ impl VersusApp {
                     format!("{browse_label} path"),
                 )
             });
+            let save_space = if merge.is_some() { extent + gap } else { 0.0 };
             let browse_rect = Rect::from_center_size(
-                rect.right_center() - egui::vec2(extent / 2.0, 0.0),
+                rect.right_center() - egui::vec2(extent / 2.0 + save_space, 0.0),
                 egui::vec2(extent, extent),
             );
             let mut browse_ui = ui.new_child(
@@ -1469,8 +2384,26 @@ impl VersusApp {
                     .layout(egui::Layout::left_to_right(egui::Align::Center)),
             );
             let browse = icon_button(&mut browse_ui, ToolbarIcon::Browse, true, &browse_label);
+            if let Some(state) = merge {
+                let save_rect = Rect::from_center_size(
+                    rect.right_center() - egui::vec2(extent / 2.0, 0.0),
+                    egui::vec2(extent, extent),
+                );
+                let mut save_ui = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(save_rect)
+                        .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                );
+                save[side] = icon_button(
+                    &mut save_ui,
+                    ToolbarIcon::Save,
+                    state.save[side],
+                    if side == 0 { "Save Left" } else { "Save Right" },
+                )
+                .clicked();
+            }
             if browse.clicked() || path_response.clicked() {
-                if let Some(path) = pick_source(side, &self.paths[side], self.comparison_mode) {
+                if let Some(path) = pick_source(side, &paths[side], self.comparison_mode) {
                     self.select_path(side, path);
                     ui.ctx().request_repaint();
                 }
@@ -1480,6 +2413,7 @@ impl VersusApp {
             [header.center_top(), header.center_bottom()],
             Stroke::new(1.0, palette.border),
         );
+        (back, save)
     }
 
     fn controls(&mut self, ui: &mut egui::Ui) {
@@ -1632,104 +2566,43 @@ impl VersusApp {
     }
 
     fn legend(&mut self, ui: &mut egui::Ui) {
-        let palette = Palette::for_context(ui.ctx());
         let back = self
             .file_view
             .as_ref()
             .is_some_and(|view| view.from_folders);
-        let counts = if let Some(view) = &self.file_view {
-            view.comparison.as_ref().map(|_| view.counts)
-        } else {
-            self.tree.as_ref().map(|_| self.counts)
-        };
+        let palette = Palette::for_context(ui.ctx());
+        let available = ui.available_width();
+        let gap = ui.spacing().item_spacing.x;
+        let extent = control_extent(ui);
+        let zoom_width = ui
+            .painter()
+            .layout_no_wrap(
+                format!("Zoom {:.0}%", ui.ctx().zoom_factor() * 100.0),
+                egui::TextStyle::Button.resolve(ui.style()),
+                palette.muted,
+            )
+            .size()
+            .x
+            + 2.0 * ui.spacing().button_padding.x
+            + 2.0 * (extent + gap);
+        let right_width = zoom_width + 5.0 * (extent + gap);
         ui.horizontal(|ui| {
-            let extent = control_extent(ui);
-            let gap = ui.spacing().item_spacing.x;
-            let zoom = format!("Zoom {:.0}%", ui.ctx().zoom_factor() * 100.0);
-            let zoom_width = ui
-                .painter()
-                .layout_no_wrap(
-                    zoom,
-                    egui::TextStyle::Button.resolve(ui.style()),
-                    palette.muted,
-                )
-                .size()
-                .x
-                + 2.0 * ui.spacing().button_padding.x
-                + 2.0 * (extent + gap);
-            let options_width = 5.0 * extent + 4.0 * gap;
-            let legend_width = [
-                StatusIcon::Different,
-                StatusIcon::LeftOnly,
-                StatusIcon::RightOnly,
-                StatusIcon::TypeMismatch,
-                StatusIcon::Error,
-            ]
-            .into_iter()
-            .enumerate()
-            .map(|(index, icon)| {
-                let label = counts.map_or_else(
-                    || icon.label().into(),
-                    |counts| format!("{}  {}", icon.label(), counts[index + 1]),
-                );
-                14.0 + 2.0 * gap
-                    + 5.0
-                    + ui.painter()
-                        .layout_no_wrap(label, FontId::proportional(10.0), palette.text)
-                        .size()
-                        .x
-            })
-            .sum::<f32>()
-                + extent
-                + if back { extent + gap } else { 0.0 };
-            let status_width =
-                (ui.available_width() - legend_width - zoom_width - options_width - 3.0 * gap)
-                    .max(0.0);
+            let left_width = (available - right_width - gap).max(extent);
             ui.allocate_ui_with_layout(
-                egui::vec2(legend_width, extent),
+                egui::vec2(left_width, extent),
                 egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
-                    ui.set_min_width(legend_width);
-                    ui.horizontal_wrapped(|ui| {
-                        if back
-                            && icon_button(ui, ToolbarIcon::Back, true, "Back to folders").clicked()
-                        {
-                            self.file_view = None;
-                        }
-                        for (index, icon) in [
-                            StatusIcon::Different,
-                            StatusIcon::LeftOnly,
-                            StatusIcon::RightOnly,
-                            StatusIcon::TypeMismatch,
-                            StatusIcon::Error,
-                        ]
-                        .into_iter()
-                        .enumerate()
-                        {
-                            let (rect, _) =
-                                ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::hover());
-                            paint_status_icon(ui.painter(), rect.center(), icon);
-                            let label = counts.map_or_else(
-                                || icon.label().into(),
-                                |counts| format!("{}  {}", icon.label(), counts[index + 1]),
-                            );
-                            ui.label(RichText::new(label).size(10.0).color(icon.color(palette)));
-                            ui.add_space(5.0);
-                        }
-                        if icon_button(ui, ToolbarIcon::New, true, "New comparison").clicked() {
-                            self.new_comparison();
-                            ui.ctx().request_repaint();
-                        }
-                    });
-                },
-            );
-            ui.allocate_ui_with_layout(
-                egui::vec2(status_width, extent),
-                egui::Layout::left_to_right(egui::Align::Center),
-                |ui| {
-                    ui.set_min_width(status_width);
+                    ui.set_min_width(left_width);
                     ui.set_clip_rect(ui.clip_rect().intersect(ui.max_rect()));
-                    self.progress_indicator(ui);
+                    if back && icon_button(ui, ToolbarIcon::Back, true, "Back to folders").clicked()
+                    {
+                        self.file_view = None;
+                    }
+                    if icon_button(ui, ToolbarIcon::New, true, "New comparison").clicked() {
+                        self.new_comparison();
+                        ui.ctx().request_repaint();
+                    }
+                    status_label(ui, &self.navigation_status(), palette.muted);
                 },
             );
             zoom_controls(ui);
@@ -1795,11 +2668,7 @@ impl VersusApp {
         let row_height = self.row_height;
         let mut focused_file_side = self.file_keyboard_focus_side;
         let from_folders = self.file_view.as_ref().unwrap().from_folders;
-        egui::Frame::default()
-            .fill(palette.panel)
-            .stroke(Stroke::new(1.0, palette.border))
-            .corner_radius(6)
-            .show(ui, |ui| {
+        comparison_panel(ui).show(ui, |ui| {
                 ui.set_min_height((ui.available_height() - 2.0).max(0.0));
                 if !from_folders {
                     self.folder_inputs(ui);
@@ -1809,29 +2678,7 @@ impl VersusApp {
                     return;
                 };
                 if from_folders {
-                    let (header, _) = ui.allocate_exact_size(
-                        egui::vec2(ui.available_width(), 38.0_f32.max(row_height + 14.0)),
-                        Sense::hover(),
-                    );
-                    for (side, half) in split_rect(header).into_iter().enumerate() {
-                        let rect = half.shrink(7.0);
-                        let painter = ui.painter().with_clip_rect(rect);
-                        paint_side_label(&painter, rect, side, palette);
-                        let path = view.paths[side].display().to_string();
-                        let path_rect =
-                            Rect::from_min_max(rect.min + egui::vec2(40.0, 0.0), rect.max);
-                        let galley =
-                            left_elided_path(&painter, &path, path_rect.width(), palette.text);
-                        let position =
-                            egui::pos2(path_rect.left(), rect.center().y - galley.size().y / 2.0);
-                        painter.galley(position, galley, palette.text);
-                        ui.interact(path_rect, ui.id().with(("file-path", side)), Sense::hover())
-                            .on_hover_text(path);
-                    }
-                    ui.painter().line_segment(
-                        [header.center_top(), header.center_bottom()],
-                        Stroke::new(1.0, palette.border),
-                    );
+                    file_path_headers(ui, &view.paths);
                 }
                 let (divider, _) =
                     ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), Sense::hover());
@@ -1956,6 +2803,7 @@ impl VersusApp {
                             changed,
                             ending_diff.then_some(ending).flatten(),
                             view.navigation_row == Some(original_index),
+                            view.gutter_extra,
                         );
                         let line_response = ui.interact(
                             rect.intersect(viewport),
@@ -2049,291 +2897,283 @@ impl VersusApp {
         let palette = Palette::for_context(ui.ctx());
         let row_height = self.row_height;
         let mut open = None;
-        egui::Frame::default()
-            .fill(palette.panel)
-            .stroke(Stroke::new(1.0, palette.border))
-            .corner_radius(6)
-            .show(ui, |ui| {
-                ui.set_min_height(height);
-                ui.set_max_height(height);
-                ui.spacing_mut().item_spacing = Vec2::ZERO;
-                let header_top = ui.cursor().top();
-                self.folder_inputs(ui);
-                let header_height = ui.cursor().top() - header_top;
-                let (divider, _) =
-                    ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), Sense::hover());
-                ui.painter().line_segment(
-                    [divider.left_center(), divider.right_center()],
-                    Stroke::new(1.0, palette.border),
-                );
-                let body_height = (height - header_height - 2.0).max(60.0);
-                if let Some(tree) = &mut self.tree {
-                    let rows: Vec<_> = tree
-                        .visible_rows()
-                        .into_iter()
-                        .filter(|row| {
-                            !self.show_only_differences
-                                || row.node.state != DirectoryEntryState::Same
-                        })
-                        .collect();
-                    if rows.is_empty() {
-                        empty_display(
-                            ui,
-                            body_height,
-                            if self.show_only_differences {
-                                "No differences"
-                            } else {
-                                "Both folders are empty"
-                            },
-                            if self.show_only_differences {
-                                "No files or folders differ with the current options."
-                            } else {
-                                "There are no files or folders to compare."
-                            },
-                        );
-                        return;
-                    }
-                    let mut toggle = None;
-                    let mut selected = None;
-                    let mut tree_keyboard_focus = self.tree_keyboard_focus.clone();
-                    // A target is only retained between the Arrow-key frame and
-                    // the frame where virtual scrolling renders that row. Keep
-                    // its side beside the path so focus does not jump panes.
-                    let pending_side_id = ui.id().with("tree-keyboard-focus-side");
-                    let mut pending_side =
-                        ui.memory(|memory| memory.data.get_temp::<usize>(pending_side_id));
-                    let mut rendered_tree_focus = None;
-                    self.tree_focus_id = None;
-                    // show_rows paints before ScrollArea clamps its offset. Clamp
-                    // first so a jump near the end is correct on its first frame.
-                    self.tree_scroll_y = self
-                        .tree_scroll_y
-                        .clamp(0.0, (rows.len() as f32 * row_height - body_height).max(0.0));
-                    let output = egui::ScrollArea::vertical()
-                        .id_salt(("linked-trees", self.scroll_generation))
-                        .auto_shrink([false, false])
-                        .max_height(body_height)
-                        .vertical_scroll_offset(self.tree_scroll_y)
-                        .show_rows(ui, row_height, rows.len(), |ui, range| {
-                            for index in range {
-                                let row = &rows[index];
-                                let node = row.node;
-                                let (rect, _) = ui.allocate_exact_size(
-                                    egui::vec2(ui.available_width(), row_height),
-                                    Sense::hover(),
+        comparison_panel(ui).show(ui, |ui| {
+            ui.set_min_height(height);
+            ui.set_max_height(height);
+            ui.spacing_mut().item_spacing = Vec2::ZERO;
+            let header_top = ui.cursor().top();
+            self.folder_inputs(ui);
+            let header_height = ui.cursor().top() - header_top;
+            let (divider, _) =
+                ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), Sense::hover());
+            ui.painter().line_segment(
+                [divider.left_center(), divider.right_center()],
+                Stroke::new(1.0, palette.border),
+            );
+            let body_height = (height - header_height - 2.0).max(60.0);
+            if let Some(tree) = &mut self.tree {
+                let rows: Vec<_> = tree
+                    .visible_rows()
+                    .into_iter()
+                    .filter(|row| {
+                        !self.show_only_differences || row.node.state != DirectoryEntryState::Same
+                    })
+                    .collect();
+                if rows.is_empty() {
+                    empty_display(
+                        ui,
+                        body_height,
+                        if self.show_only_differences {
+                            "No differences"
+                        } else {
+                            "Both folders are empty"
+                        },
+                        if self.show_only_differences {
+                            "No files or folders differ with the current options."
+                        } else {
+                            "There are no files or folders to compare."
+                        },
+                    );
+                    return;
+                }
+                let mut toggle = None;
+                let mut selected = None;
+                let mut tree_keyboard_focus = self.tree_keyboard_focus.clone();
+                // A target is only retained between the Arrow-key frame and
+                // the frame where virtual scrolling renders that row. Keep
+                // its side beside the path so focus does not jump panes.
+                let pending_side_id = ui.id().with("tree-keyboard-focus-side");
+                let mut pending_side =
+                    ui.memory(|memory| memory.data.get_temp::<usize>(pending_side_id));
+                let mut rendered_tree_focus = None;
+                self.tree_focus_id = None;
+                // show_rows paints before ScrollArea clamps its offset. Clamp
+                // first so a jump near the end is correct on its first frame.
+                self.tree_scroll_y = self
+                    .tree_scroll_y
+                    .clamp(0.0, (rows.len() as f32 * row_height - body_height).max(0.0));
+                let output = egui::ScrollArea::vertical()
+                    .id_salt(("linked-trees", self.scroll_generation))
+                    .auto_shrink([false, false])
+                    .max_height(body_height)
+                    .vertical_scroll_offset(self.tree_scroll_y)
+                    .show_rows(ui, row_height, rows.len(), |ui, range| {
+                        for index in range {
+                            let row = &rows[index];
+                            let node = row.node;
+                            let (rect, _) = ui.allocate_exact_size(
+                                egui::vec2(ui.available_width(), row_height),
+                                Sense::hover(),
+                            );
+                            let is_selected = self.selected.as_ref() == Some(&node.relative_path);
+                            for (side, half) in split_rect(rect).into_iter().enumerate() {
+                                let entry = if side == 0 { &node.left } else { &node.right };
+                                let present = entry.exists;
+                                let response = ui.interact(
+                                    half,
+                                    ui.id().with((&node.relative_path, side)),
+                                    Sense::click(),
                                 );
-                                let is_selected =
-                                    self.selected.as_ref() == Some(&node.relative_path);
-                                for (side, half) in split_rect(rect).into_iter().enumerate() {
-                                    let entry = if side == 0 { &node.left } else { &node.right };
-                                    let present = entry.exists;
-                                    let response = ui.interact(
-                                        half,
-                                        ui.id().with((&node.relative_path, side)),
-                                        Sense::click(),
-                                    );
-                                    let response = if present {
-                                        response.on_hover_cursor(egui::CursorIcon::PointingHand)
-                                    } else {
-                                        response
-                                    };
-                                    if tree_keyboard_focus.as_ref() == Some(&node.relative_path)
-                                        && pending_side == Some(side)
-                                    {
-                                        response.request_focus();
-                                        tree_keyboard_focus = None;
-                                        pending_side = None;
-                                        ui.memory_mut(|memory| {
-                                            memory.data.remove::<usize>(pending_side_id);
-                                        });
-                                    }
-                                    response.widget_info(|| {
-                                        egui::WidgetInfo::selected(
-                                            egui::WidgetType::SelectableLabel,
-                                            true,
-                                            is_selected,
-                                            if node.is_expandable() {
-                                                format!(
-                                                    "{}, {}",
-                                                    tree_row_accessible_label(node, side),
-                                                    if tree.is_expanded(&node.relative_path) {
-                                                        "expanded"
-                                                    } else {
-                                                        "collapsed"
-                                                    }
-                                                )
-                                            } else {
-                                                tree_row_accessible_label(node, side)
+                                let response = if present {
+                                    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+                                } else {
+                                    response
+                                };
+                                if tree_keyboard_focus.as_ref() == Some(&node.relative_path)
+                                    && pending_side == Some(side)
+                                {
+                                    response.request_focus();
+                                    tree_keyboard_focus = None;
+                                    pending_side = None;
+                                    ui.memory_mut(|memory| {
+                                        memory.data.remove::<usize>(pending_side_id);
+                                    });
+                                }
+                                response.widget_info(|| {
+                                    egui::WidgetInfo::selected(
+                                        egui::WidgetType::SelectableLabel,
+                                        true,
+                                        is_selected,
+                                        if node.is_expandable() {
+                                            format!(
+                                                "{}, {}",
+                                                tree_row_accessible_label(node, side),
+                                                if tree.is_expanded(&node.relative_path) {
+                                                    "expanded"
+                                                } else {
+                                                    "collapsed"
+                                                }
+                                            )
+                                        } else {
+                                            tree_row_accessible_label(node, side)
+                                        },
+                                    )
+                                });
+                                paint_row(
+                                    ui,
+                                    half,
+                                    node,
+                                    side,
+                                    RowAppearance {
+                                        depth: row.depth,
+                                        expanded: tree.is_expanded(&node.relative_path),
+                                        alternate: index % 2 == 1,
+                                        selected: is_selected,
+                                        hovered: response.hovered() || response.has_focus(),
+                                    },
+                                );
+                                if response.has_focus() {
+                                    self.tree_focus_id = Some(response.id);
+                                    ui.memory_mut(|memory| {
+                                        memory.set_focus_lock_filter(
+                                            response.id,
+                                            egui::EventFilter {
+                                                horizontal_arrows: true,
+                                                vertical_arrows: true,
+                                                ..Default::default()
                                             },
                                         )
                                     });
-                                    paint_row(
-                                        ui,
-                                        half,
-                                        node,
-                                        side,
-                                        RowAppearance {
-                                            depth: row.depth,
-                                            expanded: tree.is_expanded(&node.relative_path),
-                                            alternate: index % 2 == 1,
-                                            selected: is_selected,
-                                            hovered: response.hovered() || response.has_focus(),
-                                        },
+                                    rendered_tree_focus = Some((node.relative_path.clone(), side));
+                                    ui.painter().rect_stroke(
+                                        half.shrink(1.0),
+                                        3.0,
+                                        Stroke::new(2.0, palette.accent),
+                                        egui::StrokeKind::Inside,
                                     );
-                                    if response.has_focus() {
-                                        self.tree_focus_id = Some(response.id);
-                                        ui.memory_mut(|memory| {
-                                            memory.set_focus_lock_filter(
-                                                response.id,
-                                                egui::EventFilter {
-                                                    horizontal_arrows: true,
-                                                    vertical_arrows: true,
-                                                    ..Default::default()
-                                                },
-                                            )
-                                        });
-                                        rendered_tree_focus =
-                                            Some((node.relative_path.clone(), side));
-                                        ui.painter().rect_stroke(
-                                            half.shrink(1.0),
-                                            3.0,
-                                            Stroke::new(2.0, palette.accent),
-                                            egui::StrokeKind::Inside,
+                                }
+                                let expandable = node.is_expandable()
+                                    && entry.kind == Some(DirectoryEntryKind::Directory);
+                                let keyboard_toggle = response.has_focus()
+                                    && ui.input(|input| {
+                                        input.key_pressed(egui::Key::Space)
+                                            || input.key_pressed(egui::Key::Enter)
+                                    });
+                                if (response.double_clicked() || keyboard_toggle)
+                                    && entry.kind == Some(DirectoryEntryKind::File)
+                                {
+                                    open = Some((
+                                        node.relative_path.clone(),
+                                        [node.left.exists, node.right.exists],
+                                        [&node.left, &node.right].into_iter().any(|entry| {
+                                            entry.exists
+                                                && entry.kind != Some(DirectoryEntryKind::File)
+                                        }),
+                                    ));
+                                }
+                                if response.clicked() || keyboard_toggle {
+                                    response.request_focus();
+                                    self.tree_focus_id = Some(response.id);
+                                    selected = Some(node.relative_path.clone());
+                                    if expandable {
+                                        toggle = Some(node.relative_path.clone());
+                                    }
+                                }
+                                if response.has_focus() && expandable {
+                                    let expanded = tree.is_expanded(&node.relative_path);
+                                    if ui.input(|input| {
+                                        (input.key_pressed(egui::Key::ArrowRight) && !expanded)
+                                            || (input.key_pressed(egui::Key::ArrowLeft) && expanded)
+                                    }) {
+                                        toggle = Some(node.relative_path.clone());
+                                    }
+                                }
+                                response.on_hover_ui(|ui| {
+                                    ui.monospace(node.relative_path.display().to_string());
+                                    ui.label(if present {
+                                        state_label(&node.state)
+                                    } else {
+                                        "Not present on this side"
+                                    });
+                                    if let Some(roots) = &self.roots {
+                                        ui.monospace(
+                                            roots[side]
+                                                .join(&node.relative_path)
+                                                .display()
+                                                .to_string(),
                                         );
                                     }
-                                    let expandable = node.is_expandable()
-                                        && entry.kind == Some(DirectoryEntryKind::Directory);
-                                    let keyboard_toggle = response.has_focus()
-                                        && ui.input(|input| {
-                                            input.key_pressed(egui::Key::Space)
-                                                || input.key_pressed(egui::Key::Enter)
-                                        });
-                                    if (response.double_clicked() || keyboard_toggle)
-                                        && entry.kind == Some(DirectoryEntryKind::File)
-                                    {
-                                        open = Some((
-                                            node.relative_path.clone(),
-                                            [node.left.exists, node.right.exists],
-                                            [&node.left, &node.right].into_iter().any(|entry| {
-                                                entry.exists
-                                                    && entry.kind != Some(DirectoryEntryKind::File)
-                                            }),
-                                        ));
+                                    if let DirectoryEntryState::Error(error) = &node.state {
+                                        ui.colored_label(palette.error, error.to_string());
                                     }
-                                    if response.clicked() || keyboard_toggle {
-                                        response.request_focus();
-                                        self.tree_focus_id = Some(response.id);
-                                        selected = Some(node.relative_path.clone());
-                                        if expandable {
-                                            toggle = Some(node.relative_path.clone());
-                                        }
-                                    }
-                                    if response.has_focus() && expandable {
-                                        let expanded = tree.is_expanded(&node.relative_path);
-                                        if ui.input(|input| {
-                                            (input.key_pressed(egui::Key::ArrowRight) && !expanded)
-                                                || (input.key_pressed(egui::Key::ArrowLeft)
-                                                    && expanded)
-                                        }) {
-                                            toggle = Some(node.relative_path.clone());
-                                        }
-                                    }
-                                    response.on_hover_ui(|ui| {
-                                        ui.monospace(node.relative_path.display().to_string());
-                                        ui.label(if present {
-                                            state_label(&node.state)
-                                        } else {
-                                            "Not present on this side"
-                                        });
-                                        if let Some(roots) = &self.roots {
-                                            ui.monospace(
-                                                roots[side]
-                                                    .join(&node.relative_path)
-                                                    .display()
-                                                    .to_string(),
-                                            );
-                                        }
-                                        if let DirectoryEntryState::Error(error) = &node.state {
-                                            ui.colored_label(palette.error, error.to_string());
-                                        }
-                                    });
-                                }
-                                ui.painter().line_segment(
-                                    [rect.center_top(), rect.center_bottom()],
-                                    Stroke::new(1.0, palette.border),
-                                );
+                                });
                             }
-                        });
-                    self.tree_scroll_y = output.state.offset.y;
-                    if let Some((current_path, side)) = rendered_tree_focus {
-                        let step = ui.input(|input| {
-                            if input.key_pressed(egui::Key::ArrowDown) {
-                                1_i32
-                            } else if input.key_pressed(egui::Key::ArrowUp) {
-                                -1
-                            } else {
-                                0
-                            }
-                        });
-                        if step != 0 {
-                            let current = rows
-                                .iter()
-                                .position(|row| row.node.relative_path == current_path)
-                                .unwrap_or(0);
-                            let next = (current as i32 + step)
-                                .clamp(0, rows.len().saturating_sub(1) as i32)
-                                as usize;
-                            let path = rows[next].node.relative_path.clone();
-                            tree_keyboard_focus = Some(path.clone());
-                            ui.memory_mut(|memory| {
-                                memory.data.insert_temp(pending_side_id, side);
-                            });
-                            selected = Some(path);
-                            let target_top = next as f32 * row_height;
-                            let target_bottom = target_top + row_height;
-                            let viewport_height = output.inner_rect.height();
-                            self.tree_scroll_y = if target_top < self.tree_scroll_y {
-                                target_top
-                            } else if target_bottom > self.tree_scroll_y + viewport_height {
-                                target_bottom - viewport_height
-                            } else {
-                                self.tree_scroll_y
-                            }
-                            .clamp(0.0, (rows.len() as f32 * row_height - body_height).max(0.0));
-                            ui.ctx().request_repaint();
+                            ui.painter().line_segment(
+                                [rect.center_top(), rect.center_bottom()],
+                                Stroke::new(1.0, palette.border),
+                            );
                         }
-                    }
-                    if let Some(path) = toggle {
-                        tree.toggle_expanded(path);
-                    }
-                    if let Some(path) = selected {
-                        self.selected = Some(path);
-                    }
-                    self.tree_keyboard_focus = tree_keyboard_focus;
-                } else if self.paths.iter().all(String::is_empty)
-                    && (!self.recent.entries().is_empty() || self.recent_message.is_some())
-                {
-                    self.recent_area(ui, body_height);
-                } else {
-                    let title = if self.job.is_some() {
-                        "Comparing folders…"
-                    } else if self.source_jobs.iter().any(Option::is_some) {
-                        "Opening selected source…"
-                    } else if self.mode() == SelectionMode::Incompatible {
-                        "Incompatible source types"
-                    } else if self.error.is_some() {
-                        "Cannot open selected source"
-                    } else if self.mode() == SelectionMode::Folder {
-                        "Choose another folder"
-                    } else {
-                        match self.comparison_mode {
-                            ComparisonMode::Folder => "Choose folders to compare",
-                            ComparisonMode::File => "Choose files to compare",
+                    });
+                self.tree_scroll_y = output.state.offset.y;
+                if let Some((current_path, side)) = rendered_tree_focus {
+                    let step = ui.input(|input| {
+                        if input.key_pressed(egui::Key::ArrowDown) {
+                            1_i32
+                        } else if input.key_pressed(egui::Key::ArrowUp) {
+                            -1
+                        } else {
+                            0
                         }
-                    };
-                    empty_display(ui, body_height, title, &self.message);
+                    });
+                    if step != 0 {
+                        let current = rows
+                            .iter()
+                            .position(|row| row.node.relative_path == current_path)
+                            .unwrap_or(0);
+                        let next = (current as i32 + step)
+                            .clamp(0, rows.len().saturating_sub(1) as i32)
+                            as usize;
+                        let path = rows[next].node.relative_path.clone();
+                        tree_keyboard_focus = Some(path.clone());
+                        ui.memory_mut(|memory| {
+                            memory.data.insert_temp(pending_side_id, side);
+                        });
+                        selected = Some(path);
+                        let target_top = next as f32 * row_height;
+                        let target_bottom = target_top + row_height;
+                        let viewport_height = output.inner_rect.height();
+                        self.tree_scroll_y = if target_top < self.tree_scroll_y {
+                            target_top
+                        } else if target_bottom > self.tree_scroll_y + viewport_height {
+                            target_bottom - viewport_height
+                        } else {
+                            self.tree_scroll_y
+                        }
+                        .clamp(0.0, (rows.len() as f32 * row_height - body_height).max(0.0));
+                        ui.ctx().request_repaint();
+                    }
                 }
-            });
+                if let Some(path) = toggle {
+                    tree.toggle_expanded(path);
+                }
+                if let Some(path) = selected {
+                    self.selected = Some(path);
+                }
+                self.tree_keyboard_focus = tree_keyboard_focus;
+            } else if self.paths.iter().all(String::is_empty)
+                && (!self.recent.entries().is_empty() || self.recent_message.is_some())
+            {
+                self.recent_area(ui, body_height);
+            } else {
+                let title = if self.job.is_some() {
+                    "Comparing folders…"
+                } else if self.source_jobs.iter().any(Option::is_some) {
+                    "Opening selected source…"
+                } else if self.mode() == SelectionMode::Incompatible {
+                    "Incompatible source types"
+                } else if self.error.is_some() {
+                    "Cannot open selected source"
+                } else if self.mode() == SelectionMode::Folder {
+                    "Choose another folder"
+                } else {
+                    match self.comparison_mode {
+                        ComparisonMode::Folder => "Choose folders to compare",
+                        ComparisonMode::File => "Choose files to compare",
+                    }
+                };
+                empty_display(ui, body_height, title, "");
+            }
+        });
         if let Some((path, present, type_mismatch)) = open {
             self.open_file(path, present, type_mismatch);
         }
@@ -2368,13 +3208,16 @@ impl VersusApp {
                     ui.add_space(6.0);
                 }
                 if entries.is_empty() {
-                    ui.label(
-                        RichText::new(format!(
-                            "No recent {} comparisons.",
-                            self.comparison_mode.source_label()
-                        ))
-                        .color(palette.muted),
-                    );
+                    ui.horizontal(|ui| {
+                        ui.add_space(16.0);
+                        ui.label(
+                            RichText::new(format!(
+                                "No recent {} comparisons.",
+                                self.comparison_mode.source_label()
+                            ))
+                            .color(palette.muted),
+                        );
+                    });
                 }
                 ui.spacing_mut().item_spacing.y = 0.0;
                 for (index, entry) in entries.into_iter().enumerate() {
@@ -2389,33 +3232,210 @@ impl VersusApp {
         }
     }
 
-    fn footer(&self, ui: &mut egui::Ui) {
-        let palette = Palette::for_context(ui.ctx());
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(&self.message).size(11.0).color(palette.muted));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if let Some(elapsed) = self.elapsed {
-                    ui.label(
-                        RichText::new(format!("{:.2}s", elapsed.as_secs_f64()))
-                            .monospace()
-                            .size(11.0)
-                            .color(palette.muted),
-                    );
-                }
+    fn comparison_counts(&self) -> Option<[usize; 6]> {
+        if let Some(view) = &self.file_view {
+            view.comparison.as_ref().map(|_| view.counts)
+        } else {
+            self.tree.as_ref().map(|_| self.counts)
+        }
+    }
+
+    fn error_details(&self, view: Option<&InteractiveView>) -> Vec<String> {
+        let mut errors = self
+            .source_errors
+            .iter()
+            .flatten()
+            .cloned()
+            .collect::<Vec<_>>();
+        errors.extend(self.error.iter().cloned());
+        errors.extend(self.drop_message.iter().cloned());
+        errors.extend(self.file_view.as_ref().and_then(|file| file.error.clone()));
+        if let Some(error) = view.and_then(InteractiveView::error_details) {
+            errors.extend(error.lines().map(str::to_owned));
+        }
+        if let Some(browser) = &self.merge_folders {
+            errors.extend(browser.error_details());
+        }
+        if let Some(browser) = &self.merge_file_search {
+            errors.extend(browser.error_details());
+        }
+        errors.sort();
+        errors.dedup();
+        errors
+    }
+
+    fn dismiss_errors_on_pane_input(&mut self, ui: &egui::Ui) {
+        let moved = ui.input(|input| {
+            input.events.iter().any(|event| {
+                let position = match event {
+                    egui::Event::PointerMoved(position) => Some(*position),
+                    egui::Event::PointerButton {
+                        pos, pressed: true, ..
+                    } => Some(*pos),
+                    _ => None,
+                };
+                position.is_some_and(|position| {
+                    self.pane_rects
+                        .iter()
+                        .chain(self.source_header_rects.iter())
+                        .any(|rect| rect.contains(position))
+                })
+            })
+        });
+        if moved {
+            if !self.error_details(self.interactive.as_ref()).is_empty() {
+                self.message.clear();
+            }
+            self.error = None;
+            self.drop_message = None;
+            self.source_errors = [None, None];
+            if let Some(file) = &mut self.file_view {
+                file.error = None;
+            }
+            if let Some(view) = &mut self.interactive {
+                view.clear_error();
+            }
+            if let Some(browser) = &mut self.merge_folders {
+                browser.clear_error();
+            }
+            if let Some(browser) = &mut self.merge_file_search {
+                browser.clear_error();
+            }
+        }
+    }
+
+    fn render_bottom_status(&mut self, ui: &mut egui::Ui, view: Option<&mut InteractiveView>) {
+        let errors = self.error_details(view.as_deref());
+        for error in &errors {
+            if !self.logged_errors.contains(error) {
+                crate::diagnostics::error(format!("Status error: {error}"));
+            }
+        }
+        self.logged_errors = errors.clone();
+        bottom_status_area(ui, |ui| {
+            if !errors.is_empty() {
+                error_summary(ui, &errors);
+            } else if self.drop_message.is_some()
+                || self.source_jobs.iter().any(Option::is_some)
+                || self.job.is_some()
+            {
+                self.progress_indicator(ui);
+            } else if self.merge_mode
+                && self
+                    .merge_folders
+                    .as_ref()
+                    .is_some_and(|browser| browser.render_activity_status(ui))
+            {
+            } else if self.merge_mode
+                && self
+                    .merge_file_search
+                    .as_ref()
+                    .is_some_and(|browser| browser.render_activity_status(ui))
+            {
+            } else if view.is_none_or(|view| !view.render_activity_status(ui)) {
+                self.progress_indicator(ui);
+            }
+        });
+    }
+
+    fn footer(&mut self, ui: &mut egui::Ui) {
+        let row = workspace_footer_layout(
+            ui,
+            false,
+            false,
+            &DIFF_LEGEND_ICONS,
+            self.comparison_counts(),
+        );
+        let guidance = self
+            .selected
+            .as_ref()
+            .filter(|_| self.tree.is_some() && self.file_view.is_none())
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| self.message.clone());
+        ui.scope_builder(egui::UiBuilder::new().max_rect(row.info), |ui| {
+            footer_guidance(ui, &guidance);
+        });
+        ui.scope_builder(egui::UiBuilder::new().max_rect(row.legend), |ui| {
+            bottom_legend(ui, &DIFF_LEGEND_ICONS, self.comparison_counts());
+        });
+        ui.scope_builder(egui::UiBuilder::new().max_rect(row.status), |ui| {
+            self.render_bottom_status(ui, None);
+        });
+    }
+
+    fn merge_exit_dialog(&mut self, ctx: &egui::Context) {
+        self.sync_file_search_when_clean();
+        if ctx.input(|input| input.viewport().close_requested())
+            && (self
+                .interactive
+                .as_ref()
+                .is_some_and(InteractiveView::any_dirty)
+                || self
+                    .merge_folders
+                    .as_ref()
+                    .is_some_and(FolderBrowser::any_dirty)
+                || self
+                    .interactive
+                    .as_ref()
+                    .is_some_and(InteractiveView::is_saving)
+                || self
+                    .merge_folders
+                    .as_ref()
+                    .is_some_and(FolderBrowser::is_saving)
+                || self
+                    .merge_file_search
+                    .as_ref()
+                    .is_some_and(FolderBrowser::is_saving))
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.pending_merge_exit = Some(MergeExit::Close);
+        }
+        let Some(destination) = self.pending_merge_exit.clone() else {
+            return;
+        };
+        let saving = self
+            .interactive
+            .as_ref()
+            .is_some_and(InteractiveView::is_saving)
+            || self
+                .merge_folders
+                .as_ref()
+                .is_some_and(FolderBrowser::is_saving)
+            || self
+                .merge_file_search
+                .as_ref()
+                .is_some_and(FolderBrowser::is_saving);
+        let mut discard = false;
+        let mut cancel = false;
+        egui::Modal::new(egui::Id::new("leave-merge")).show(ctx, |ui| {
+            ui.heading("Leave merge?");
+            ui.label(if saving {
+                "Wait for the save to finish before leaving."
+            } else {
+                "The result has unsaved changes. Save it before leaving, or discard those changes."
+            });
+            ui.horizontal(|ui| {
+                cancel = ui.button("Keep merging").clicked();
+                discard = ui
+                    .add_enabled(!saving, egui::Button::new("Discard and leave"))
+                    .clicked();
             });
         });
-        if let Some(path) = &self.selected {
-            ui.add(
-                egui::Label::new(
-                    RichText::new(path.display().to_string())
-                        .monospace()
-                        .size(11.0)
-                        .color(palette.text),
-                )
-                .truncate(),
-            );
-        } else {
-            ui.label(RichText::new("Click a folder to expand both trees.  •  Double-click a file to compare.  •  Symlinks are not traversed.").size(10.0).color(palette.muted));
+        if cancel {
+            self.pending_merge_exit = None;
+        } else if discard {
+            self.pending_merge_exit = None;
+            self.interactive = None;
+            self.merge_folders = None;
+            self.merge_file_search = None;
+            self.merge_file_open = false;
+            self.merge_file_sides = [false; 2];
+            match destination {
+                MergeExit::Close => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                MergeExit::New => self.new_comparison(),
+                MergeExit::Mode(mode) => self.switch_comparison_mode(mode),
+                MergeExit::Recent(entry) => self.open_recent(entry),
+            }
         }
     }
 }
@@ -2445,10 +3465,26 @@ impl eframe::App for VersusApp {
             .to_normalized_gamma_f32()
     }
     fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        if let Some(error) = crate::diagnostics::take_error() {
+            self.error = Some(error);
+        }
         self.poll_recent(ctx);
         self.poll_sources(ctx);
         self.poll_comparison(ctx);
         self.poll_file_comparison(ctx);
+        if let Some(view) = &mut self.interactive {
+            view.poll(ctx);
+        }
+        self.sync_file_search_when_clean();
+        if let Some(browser) = &mut self.merge_folders {
+            browser.poll(ctx);
+        }
+        if let Some(browser) = &mut self.merge_file_search {
+            browser.poll(ctx);
+        }
+        self.poll_merge_save_owners(ctx);
+        self.sync_folder_merge_diff();
+        self.sync_working_folder_diff(ctx);
     }
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         #[cfg(windows)]
@@ -2656,7 +3692,7 @@ fn comparison_mode_button(
             egui::WidgetType::Button,
             ui.is_enabled(),
             selected,
-            mode.label(),
+            label.text(),
         )
     });
     let visuals = ui.style().interact_selectable(&response, selected);
@@ -2712,6 +3748,62 @@ fn comparison_mode_button(
     response
 }
 
+fn workspace_mode_button(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {
+    let galley = ui.painter().layout_no_wrap(
+        label.into(),
+        FontId::proportional(11.0),
+        Palette::for_context(ui.ctx()).text,
+    );
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(galley.size().x + 12.0, 28.0), Sense::hover());
+    let response = ui
+        .interact(
+            rect,
+            egui::Id::new(("workspace-mode", label)),
+            Sense::click(),
+        )
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), selected, label)
+    });
+    let visuals = ui.style().interact_selectable(&response, selected);
+    if selected
+        || response.hovered()
+        || response.has_focus()
+        || response.is_pointer_button_down_on()
+    {
+        ui.painter().rect(
+            rect,
+            visuals.corner_radius,
+            visuals.weak_bg_fill,
+            visuals.bg_stroke,
+            egui::StrokeKind::Inside,
+        );
+    }
+    ui.painter().galley_with_override_text_color(
+        rect.center() - galley.size() * 0.5,
+        galley,
+        visuals.fg_stroke.color,
+    );
+    response
+}
+
+fn comparison_panel(ui: &egui::Ui) -> egui::Frame {
+    let palette = Palette::for_context(ui.ctx());
+    egui::Frame::default()
+        .fill(palette.panel)
+        .stroke(Stroke::new(1.0, palette.border))
+        .corner_radius(6)
+}
+fn paint_panel_divider(ui: &mut egui::Ui) {
+    let (divider, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), Sense::hover());
+    ui.painter().line_segment(
+        [divider.left_center(), divider.right_center()],
+        Stroke::new(1.0, Palette::for_context(ui.ctx()).border),
+    );
+}
+
 fn paint_side_label(painter: &egui::Painter, rect: Rect, side: usize, palette: Palette) {
     painter.text(
         rect.left_center(),
@@ -2723,6 +3815,33 @@ fn paint_side_label(painter: &egui::Painter, rect: Rect, side: usize, palette: P
         } else {
             palette.right_only
         },
+    );
+}
+
+fn file_path_headers(ui: &mut egui::Ui, paths: &[PathBuf; 2]) {
+    let palette = Palette::for_context(ui.ctx());
+    let (header, _) = ui.allocate_exact_size(
+        egui::vec2(
+            ui.available_width(),
+            38.0_f32.max(comparison_row_height(ui) + 14.0),
+        ),
+        Sense::hover(),
+    );
+    for (side, half) in split_rect(header).into_iter().enumerate() {
+        let rect = half.shrink(7.0);
+        let painter = ui.painter().with_clip_rect(rect);
+        paint_side_label(&painter, rect, side, palette);
+        let path = paths[side].display().to_string();
+        let path_rect = Rect::from_min_max(rect.min + egui::vec2(40.0, 0.0), rect.max);
+        let galley = left_elided_path(&painter, &path, path_rect.width(), palette.text);
+        let position = egui::pos2(path_rect.left(), rect.center().y - galley.size().y / 2.0);
+        painter.galley(position, galley, palette.text);
+        ui.interact(path_rect, ui.id().with(("file-path", side)), Sense::hover())
+            .on_hover_text(path);
+    }
+    ui.painter().line_segment(
+        [header.center_top(), header.center_bottom()],
+        Stroke::new(1.0, palette.border),
     );
 }
 
@@ -2778,32 +3897,15 @@ fn paint_file_line(
     changed: &[std::ops::Range<usize>],
     ending: Option<versus::DisplayLineEnding>,
     selected: bool,
+    gutter_extra: f32,
 ) {
     let palette = Palette::for_context(painter.ctx());
     let painter = painter.with_clip_rect(rect);
     let color = state_color(state, palette);
-    painter.rect_filled(
-        rect,
-        0,
-        if alternate {
-            palette.alternate
-        } else {
-            palette.panel
-        },
-    );
-    if selected {
-        painter.rect_filled(rect, 0, palette.accent.gamma_multiply(0.13));
-    }
-    if *state != DirectoryEntryState::Same {
-        painter.rect_filled(
-            Rect::from_min_size(rect.min, egui::vec2(3.0, rect.height())),
-            0,
-            color,
-        );
-    }
+    file_style::paint_background(&painter, rect, state, alternate, selected);
     let Some((number, text)) = line else {
         painter.text(
-            rect.left_center() + egui::vec2(66.0, 0.0),
+            rect.left_center() + egui::vec2(file_style::TEXT_OFFSET - 2.0 + gutter_extra, 0.0),
             Align2::LEFT_CENTER,
             "—",
             comparison_font(painter.ctx()),
@@ -2811,86 +3913,27 @@ fn paint_file_line(
         );
         return;
     };
-    painter.text(
-        rect.left_center() + egui::vec2(42.0, 0.0),
-        Align2::RIGHT_CENTER,
-        number.to_string(),
-        FontId::monospace(10.0),
-        palette.muted,
-    );
-    if let Some(icon) = status_icon(state) {
-        paint_status_icon(&painter, rect.left_center() + egui::vec2(54.0, 0.0), icon);
-    }
+    file_style::paint_gutter(&painter, rect, *number, state, gutter_extra);
     let mut job = egui::text::LayoutJob::default();
-    let mut start = 0;
-    for range in changed {
-        if range.start < start
-            || range.end > text.len()
-            || !text.is_char_boundary(range.start)
-            || !text.is_char_boundary(range.end)
-        {
-            continue;
-        }
-        append_file_text(
-            &mut job,
-            &text[start..range.start],
-            color,
-            Color32::TRANSPARENT,
-            comparison_font(painter.ctx()),
-        );
-        append_file_text(
-            &mut job,
-            &text[range.clone()],
-            palette.text,
-            color.gamma_multiply(0.3),
-            comparison_font(painter.ctx()),
-        );
-        start = range.end;
-    }
-    append_file_text(
+    file_style::append_text(
         &mut job,
-        &text[start..],
-        color,
-        Color32::TRANSPARENT,
+        text,
+        state,
+        changed,
+        palette,
         comparison_font(painter.ctx()),
+        None,
     );
     let galley = painter.layout_job(job);
-    let position = egui::pos2(rect.left() + 68.0, rect.center().y - galley.size().y / 2.0);
+    let position = egui::pos2(
+        rect.left() + file_style::TEXT_OFFSET + gutter_extra,
+        rect.center().y - galley.size().y / 2.0,
+    );
     let end_x = position.x + galley.size().x;
     painter.galley(position, galley, color);
     if let Some(ending) = ending {
-        let badge = Rect::from_min_size(
-            egui::pos2(end_x + 8.0, rect.top() + 3.0),
-            egui::vec2(58.0, 16.0),
-        );
-        painter.rect_filled(badge, 2, color.gamma_multiply(0.3));
-        painter.text(
-            badge.center(),
-            Align2::CENTER_CENTER,
-            ending.label(),
-            FontId::monospace(9.0),
-            palette.text,
-        );
+        file_style::paint_ending(&painter, rect, end_x, ending, state);
     }
-}
-
-fn append_file_text(
-    job: &mut egui::text::LayoutJob,
-    text: &str,
-    color: Color32,
-    background: Color32,
-    font: FontId,
-) {
-    job.append(
-        &text.replace('\t', "    "),
-        0.0,
-        egui::TextFormat {
-            font_id: font,
-            color,
-            background,
-            ..Default::default()
-        },
-    );
 }
 
 fn file_line_anchor(view: &FileView, index: Option<usize>) -> [Option<usize>; 2] {
@@ -2944,37 +3987,23 @@ fn update_visible_file_rows(view: &mut FileView, differences_only: bool) {
     };
 }
 
-fn progress_text(snapshot: versus::ProgressSnapshot, started: Instant, now: Instant) -> String {
+fn progress_text(snapshot: versus::ProgressSnapshot) -> String {
     let stage = match snapshot.stage {
         ProgressStage::Scanning => "Scanning folders",
         ProgressStage::Reading => "Reading files",
         ProgressStage::ComparingFiles => "Comparing files",
         ProgressStage::ComparingLines => "Comparing lines",
         ProgressStage::Highlighting => "Highlighting differences",
+        ProgressStage::BuildingTree => "Finalizing folder tree",
         ProgressStage::Finished => "Preparing comparison",
     };
-    let work = match (snapshot.stage, snapshot.total) {
-        (ProgressStage::Reading, Some(total)) => format!(
-            " · {} / {}",
-            format_size(Some(snapshot.completed)),
-            format_size(Some(total))
-        ),
-        (ProgressStage::Scanning, _) => format!(" · {} entries found", snapshot.completed),
-        (_, Some(total)) if total > 0 => format!(" · {} / {}", snapshot.completed, total),
-        _ => String::new(),
-    };
-    let eta = snapshot
-        .remaining_at(now)
-        .map_or_else(String::new, |remaining| {
-            format!(
-                " · ~{}s left in this stage",
-                remaining.as_secs_f64().ceil().max(1.0) as u64
-            )
-        });
-    format!(
-        "{stage}…{work} · {:.1}s elapsed{eta}",
-        now.saturating_duration_since(started).as_secs_f64()
-    )
+    if let Some(fraction) = snapshot.fraction() {
+        format!("{stage}… {:.0}% complete", fraction * 100.0)
+    } else if snapshot.stage == ProgressStage::Scanning {
+        format!("{stage}… {} entries found", snapshot.completed)
+    } else {
+        format!("{stage}…")
+    }
 }
 
 fn is_file_difference(node: &TreeNode) -> bool {
@@ -3001,13 +4030,14 @@ fn split_rect(rect: Rect) -> [Rect; 2] {
     ]
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum StatusIcon {
     Different,
     LeftOnly,
     RightOnly,
     TypeMismatch,
     Error,
+    Conflict,
 }
 
 impl StatusIcon {
@@ -3018,6 +4048,7 @@ impl StatusIcon {
             Self::RightOnly => "Right only",
             Self::TypeMismatch => "Type mismatch",
             Self::Error => "Read error",
+            Self::Conflict => "Conflict",
         }
     }
     fn color(self, palette: Palette) -> Color32 {
@@ -3025,7 +4056,7 @@ impl StatusIcon {
             Self::Different => palette.changed,
             Self::LeftOnly => palette.left_only,
             Self::RightOnly => palette.right_only,
-            Self::TypeMismatch | Self::Error => palette.error,
+            Self::TypeMismatch | Self::Error | Self::Conflict => palette.error,
         }
     }
 }
@@ -3116,6 +4147,23 @@ fn state_color(state: &DirectoryEntryState, palette: Palette) -> Color32 {
     status_icon(state).map_or(palette.muted, |icon| icon.color(palette))
 }
 
+fn state_bar_color(state: &DirectoryEntryState, palette: Palette, ctx: &egui::Context) -> Color32 {
+    let color = state_color(state, palette);
+    if ctx.theme() != egui::Theme::Light {
+        return color;
+    }
+    // Thin bars need saturated shades against the light background.
+    match state {
+        DirectoryEntryState::Different => Color32::from_rgb(236, 150, 0),
+        DirectoryEntryState::LeftOnly => Color32::from_rgb(0, 164, 187),
+        DirectoryEntryState::RightOnly => Color32::from_rgb(148, 76, 232),
+        DirectoryEntryState::TypeMismatch | DirectoryEntryState::Error(_) => {
+            Color32::from_rgb(235, 55, 82)
+        }
+        DirectoryEntryState::Same => color,
+    }
+}
+
 fn paint_status_icon(painter: &egui::Painter, center: Pos2, icon: StatusIcon) {
     let palette = Palette::for_context(painter.ctx());
     let stroke = Stroke::new(1.3, icon.color(palette));
@@ -3161,13 +4209,354 @@ fn paint_status_icon(painter: &egui::Painter, center: Pos2, icon: StatusIcon) {
             painter.line_segment([point(0.0, -2.0), point(0.0, 1.0)], stroke);
             painter.circle_filled(point(0.0, 3.0), 0.7, icon.color(palette));
         }
+        StatusIcon::Conflict => {
+            painter.rect_stroke(
+                Rect::from_center_size(center, egui::vec2(12.0, 12.0)),
+                2,
+                stroke,
+                egui::StrokeKind::Inside,
+            );
+            painter.line_segment([point(0.0, -3.0), point(0.0, 1.0)], stroke);
+            painter.circle_filled(point(0.0, 3.0), 0.7, icon.color(palette));
+        }
     }
+}
+
+const DIFF_LEGEND_ICONS: [StatusIcon; 5] = [
+    StatusIcon::Different,
+    StatusIcon::LeftOnly,
+    StatusIcon::RightOnly,
+    StatusIcon::TypeMismatch,
+    StatusIcon::Error,
+];
+
+fn legend_label(icon: StatusIcon, counts: Option<[usize; 6]>) -> String {
+    let index = DIFF_LEGEND_ICONS
+        .iter()
+        .position(|candidate| *candidate == icon);
+    match (counts, index) {
+        (Some(counts), Some(index)) => format!("{}  {}", icon.label(), counts[index + 1]),
+        _ => icon.label().into(),
+    }
+}
+
+fn legend_rows(
+    ui: &egui::Ui,
+    icons: &[StatusIcon],
+    counts: Option<[usize; 6]>,
+) -> Vec<Vec<(StatusIcon, String, f32)>> {
+    legend_rows_in_width(ui, icons, counts, ui.available_width())
+}
+
+fn legend_rows_in_width(
+    ui: &egui::Ui,
+    icons: &[StatusIcon],
+    counts: Option<[usize; 6]>,
+    available: f32,
+) -> Vec<Vec<(StatusIcon, String, f32)>> {
+    let mut rows = Vec::new();
+    let mut row = Vec::new();
+    let mut width = 0.0;
+    let gap = ui.spacing().item_spacing.x;
+    let available = available.max(1.0);
+    for icon in icons {
+        let label = legend_label(*icon, counts);
+        let text_width = ui
+            .painter()
+            .layout_no_wrap(
+                label.clone(),
+                FontId::proportional(10.0),
+                Palette::for_context(ui.ctx()).text,
+            )
+            .size()
+            .x;
+        let item_width = (14.0 + gap + text_width + 5.0).min(available);
+        if !row.is_empty() && width + gap + item_width > available {
+            rows.push(std::mem::take(&mut row));
+            width = 0.0;
+        }
+        if !row.is_empty() {
+            width += gap;
+        }
+        width += item_width;
+        row.push((*icon, label, item_width));
+    }
+    if !row.is_empty() {
+        rows.push(row);
+    }
+    rows
+}
+
+fn bottom_legend_height(ui: &egui::Ui, icons: &[StatusIcon], counts: Option<[usize; 6]>) -> f32 {
+    let rows = legend_rows(ui, icons, counts).len();
+    rows as f32 * control_extent(ui) + rows.saturating_sub(1) as f32 * ui.spacing().item_spacing.y
+}
+
+fn bottom_legend(ui: &mut egui::Ui, icons: &[StatusIcon], counts: Option<[usize; 6]>) -> f32 {
+    let rows = legend_rows(ui, icons, counts);
+    let height = bottom_legend_height(ui, icons, counts);
+    let (area, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), height), Sense::hover());
+    let palette = Palette::for_context(ui.ctx());
+    for (index, row) in rows.into_iter().enumerate() {
+        let gap = ui.spacing().item_spacing.x;
+        let width =
+            row.iter().map(|item| item.2).sum::<f32>() + row.len().saturating_sub(1) as f32 * gap;
+        let mut x = area.center().x - width / 2.0;
+        let y = area.top() + index as f32 * (control_extent(ui) + ui.spacing().item_spacing.y);
+        for (icon, label, width) in row {
+            let rect = Rect::from_min_size(egui::pos2(x, y), egui::vec2(width, control_extent(ui)));
+            let painter = ui.painter().with_clip_rect(ui.clip_rect().intersect(rect));
+            paint_status_icon(
+                &painter,
+                egui::pos2(rect.left() + 7.0, rect.center().y),
+                icon,
+            );
+            painter.text(
+                egui::pos2(rect.left() + 14.0 + gap, rect.center().y),
+                Align2::LEFT_CENTER,
+                &label,
+                FontId::proportional(10.0),
+                icon.color(palette),
+            );
+            ui.interact(
+                rect,
+                egui::Id::new(("legend", icon.label())),
+                Sense::hover(),
+            )
+            .on_hover_text(&label)
+            .widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Label, true, label.clone())
+            });
+            x += width + gap;
+        }
+    }
+    height
+}
+
+fn error_summary(ui: &mut egui::Ui, errors: &[String]) {
+    let label = format!(
+        "{} error{}",
+        errors.len(),
+        if errors.len() == 1 { "" } else { "s" }
+    );
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        let response = ui.add(
+            egui::Label::new(
+                RichText::new(&label)
+                    .size(11.0)
+                    .color(Palette::for_context(ui.ctx()).error),
+            )
+            .truncate(),
+        );
+        ui.interact(
+            response.rect,
+            egui::Id::new("workspace-errors"),
+            Sense::hover(),
+        )
+        .on_hover_text(errors.join("\n\n"));
+    });
+}
+
+struct WorkspaceFooterLayout {
+    info: Rect,
+    legend: Rect,
+    status: Rect,
+    dirty: Option<Rect>,
+    save: Option<Rect>,
+}
+
+fn footer_side_width(ui: &egui::Ui, width: f32, with_save: bool, with_dirty: bool) -> f32 {
+    let dirty_width = ui
+        .painter()
+        .layout_no_wrap(
+            "Unsaved Changes".into(),
+            FontId::proportional(11.0),
+            Palette::for_context(ui.ctx()).changed,
+        )
+        .size()
+        .x;
+    let save_and_dirty = with_dirty.then(|| {
+        dirty_width
+            + 40.0
+            + with_save
+                .then(|| captioned_icon_width(ui, "Save Both") + ui.spacing().item_spacing.x)
+                .unwrap_or_default()
+    });
+    (width * 0.20)
+        .max(save_and_dirty.unwrap_or(if with_save { 160.0 } else { 128.0 }))
+        .min(260.0)
+        .min(width / 2.0)
+}
+
+fn workspace_footer_height(
+    ui: &egui::Ui,
+    with_save: bool,
+    with_dirty: bool,
+    icons: &[StatusIcon],
+    counts: Option<[usize; 6]>,
+) -> f32 {
+    let width = ui.available_width();
+    let legend_width = width - 2.0 * footer_side_width(ui, width, with_save, with_dirty);
+    let rows = legend_rows_in_width(ui, icons, counts, legend_width)
+        .len()
+        .max(1);
+    rows as f32 * control_extent(ui) + rows.saturating_sub(1) as f32 * ui.spacing().item_spacing.y
+}
+
+fn workspace_footer_layout(
+    ui: &mut egui::Ui,
+    with_save: bool,
+    with_dirty: bool,
+    icons: &[StatusIcon],
+    counts: Option<[usize; 6]>,
+) -> WorkspaceFooterLayout {
+    let height = workspace_footer_height(ui, with_save, with_dirty, icons, counts);
+    let extent = control_extent(ui);
+    let (row, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), height), Sense::hover());
+    // Symmetric side areas keep the legend centered. At high zoom its entries
+    // wrap inside this same footer, with guidance, activity and Save alongside.
+    let side = footer_side_width(ui, row.width(), with_save, with_dirty);
+    let line_top = row.center().y - extent / 2.0;
+    let line_bottom = line_top + extent;
+    let info = Rect::from_min_max(
+        egui::pos2(row.left(), line_top),
+        egui::pos2(row.left() + side, line_bottom),
+    );
+    let legend = Rect::from_min_max(
+        egui::pos2(info.right(), row.top()),
+        egui::pos2(row.right() - side, row.bottom()),
+    );
+    ui.interact(legend, egui::Id::new("workspace-legend"), Sense::hover());
+    let save = with_save.then(|| {
+        let width = captioned_icon_width(ui, "Save Both");
+        Rect::from_min_max(
+            egui::pos2(row.right() - width.min(side), line_top),
+            egui::pos2(row.right(), line_bottom),
+        )
+    });
+    let dirty = with_dirty.then(|| {
+        let right = save.map_or(row.right(), |save| {
+            save.left() - ui.spacing().item_spacing.x
+        });
+        let width = ui
+            .painter()
+            .layout_no_wrap(
+                "Unsaved Changes".into(),
+                FontId::proportional(11.0),
+                Palette::for_context(ui.ctx()).changed,
+            )
+            .size()
+            .x
+            .min((right - legend.right() - ui.spacing().item_spacing.x).max(0.0));
+        Rect::from_min_max(
+            egui::pos2(right - width, line_top),
+            egui::pos2(right, line_bottom),
+        )
+    });
+    let status = Rect::from_min_max(
+        egui::pos2(legend.right(), line_top),
+        egui::pos2(
+            dirty.or(save).map_or(row.right(), |dirty| {
+                dirty.left() - ui.spacing().item_spacing.x
+            }),
+            line_bottom,
+        ),
+    );
+    WorkspaceFooterLayout {
+        info,
+        legend,
+        status,
+        dirty,
+        save,
+    }
+}
+
+fn footer_guidance(ui: &mut egui::Ui, text: &str) {
+    let palette = Palette::for_context(ui.ctx());
+    ui.set_clip_rect(ui.clip_rect().intersect(ui.max_rect()));
+    ui.horizontal(|ui| {
+        let available = ui.available_rect_before_wrap();
+        ui.interact(
+            available,
+            egui::Id::new("workspace-guidance"),
+            Sense::hover(),
+        );
+        ui.add(
+            egui::Label::new(RichText::new(text).size(11.0).color(palette.muted))
+                .truncate()
+                .halign(egui::Align::LEFT),
+        )
+        .on_hover_text(text);
+    });
+}
+
+fn bottom_status_area(ui: &mut egui::Ui, draw: impl FnOnce(&mut egui::Ui)) {
+    let (row, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), control_extent(ui)),
+        Sense::hover(),
+    );
+    let width = row.width().min(420.0);
+    let rect = Rect::from_min_max(egui::pos2(row.right() - width, row.top()), row.max);
+    ui.interact(rect, egui::Id::new("workspace-status"), Sense::hover());
+    let mut status_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    status_ui.set_clip_rect(status_ui.clip_rect().intersect(rect));
+    draw(&mut status_ui);
+}
+
+fn header_progress_label(ui: &mut egui::Ui, snapshot: versus::ProgressSnapshot, color: Color32) {
+    let full = progress_text(snapshot);
+    let width = ui
+        .painter()
+        .layout_no_wrap(full.clone(), FontId::proportional(11.0), color)
+        .size()
+        .x;
+    let text = if width > ui.available_width() {
+        snapshot
+            .fraction()
+            .map(|fraction| format!("{:.0}% complete", fraction * 100.0))
+            .unwrap_or_else(|| full.clone())
+    } else {
+        full.clone()
+    };
+    ui.add_sized(
+        ui.available_size(),
+        egui::Label::new(RichText::new(text).size(11.0).color(color))
+            .truncate()
+            .halign(egui::Align::Center),
+    )
+    .on_hover_text(full);
+}
+
+fn header_status_label(ui: &mut egui::Ui, text: &str, color: Color32) {
+    ui.add_sized(
+        ui.available_size(),
+        egui::Label::new(RichText::new(text).size(11.0).color(color))
+            .truncate()
+            .halign(egui::Align::Center),
+    )
+    .on_hover_text(text);
 }
 
 #[derive(Clone, Copy)]
 enum ToolbarIcon {
+    AcceptAllLeft,
+    AcceptAllRight,
+    Undo,
+    Redo,
     ZoomIn,
     ZoomOut,
+    Search,
+    MatchCase,
+    MatchWholeWord,
+    UseRegularExpression,
+    ReplaceNext,
+    ReplaceAll,
+    Save,
     New,
     Back,
     Refresh,
@@ -3195,10 +4584,38 @@ fn icon_button_state(
     selected: bool,
     label: &str,
 ) -> egui::Response {
+    icon_button_content(ui, icon, enabled, selected, label, None)
+}
+
+fn captioned_icon_width(ui: &egui::Ui, label: &str) -> f32 {
+    let text =
+        ui.painter()
+            .layout_no_wrap(label.into(), FontId::proportional(11.0), Color32::WHITE);
+    control_extent(ui) + ui.spacing().item_spacing.x + text.size().x + ui.spacing().button_padding.x
+}
+
+fn captioned_icon_button(
+    ui: &mut egui::Ui,
+    icon: ToolbarIcon,
+    enabled: bool,
+    label: &str,
+) -> egui::Response {
+    icon_button_content(ui, icon, enabled, false, label, Some(label))
+}
+
+fn icon_button_content(
+    ui: &mut egui::Ui,
+    icon: ToolbarIcon,
+    enabled: bool,
+    selected: bool,
+    label: &str,
+    caption: Option<&str>,
+) -> egui::Response {
     let palette = Palette::for_context(ui.ctx());
     ui.add_enabled_ui(enabled, |ui| {
         let extent = control_extent(ui);
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(extent, extent), Sense::hover());
+        let width = caption.map_or(extent, |text| captioned_icon_width(ui, text));
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(width, extent), Sense::hover());
         let response = ui.interact(rect, egui::Id::new(label), Sense::click());
         response.widget_info(|| {
             egui::WidgetInfo::selected(egui::WidgetType::Button, enabled, selected, label)
@@ -3234,17 +4651,110 @@ fn icon_button_state(
                 egui::StrokeKind::Inside,
             );
         }
-        let center = rect.center();
+        let center = egui::pos2(rect.left() + extent / 2.0, rect.center().y);
         let point = |x, y| center + egui::vec2(x, y);
         let stroke = Stroke::new(1.4, color);
         match icon {
-            ToolbarIcon::ZoomIn | ToolbarIcon::ZoomOut => {
+            ToolbarIcon::AcceptAllLeft | ToolbarIcon::AcceptAllRight => {
+                let direction = if matches!(icon, ToolbarIcon::AcceptAllLeft) {
+                    1.0
+                } else {
+                    -1.0
+                };
+                for y in [-3.0, 3.0] {
+                    ui.painter().line_segment(
+                        [point(-6.0 * direction, y), point(5.0 * direction, y)],
+                        stroke,
+                    );
+                    ui.painter().line(
+                        vec![
+                            point(direction, y - 3.0),
+                            point(5.0 * direction, y),
+                            point(direction, y + 3.0),
+                        ],
+                        stroke,
+                    );
+                }
+            }
+            ToolbarIcon::Redo => {
+                ui.painter().line(
+                    vec![
+                        point(6.0, -3.0),
+                        point(-1.0, -3.0),
+                        point(-5.0, 0.0),
+                        point(-5.0, 4.0),
+                        point(0.0, 6.0),
+                    ],
+                    stroke,
+                );
+                ui.painter().line(
+                    vec![point(2.0, -7.0), point(6.0, -3.0), point(2.0, 1.0)],
+                    stroke,
+                );
+            }
+            ToolbarIcon::Undo => {
+                ui.painter().line(
+                    vec![
+                        point(-6.0, -3.0),
+                        point(1.0, -3.0),
+                        point(5.0, 0.0),
+                        point(5.0, 4.0),
+                        point(0.0, 6.0),
+                    ],
+                    stroke,
+                );
+                ui.painter().line(
+                    vec![point(-2.0, -7.0), point(-6.0, -3.0), point(-2.0, 1.0)],
+                    stroke,
+                );
+            }
+            ToolbarIcon::MatchCase
+            | ToolbarIcon::MatchWholeWord
+            | ToolbarIcon::UseRegularExpression
+            | ToolbarIcon::ReplaceNext
+            | ToolbarIcon::ReplaceAll => {
+                let glyph = match icon {
+                    ToolbarIcon::MatchCase => find_icons::FindIcon::MatchCase,
+                    ToolbarIcon::MatchWholeWord => find_icons::FindIcon::MatchWholeWord,
+                    ToolbarIcon::UseRegularExpression => find_icons::FindIcon::UseRegularExpression,
+                    ToolbarIcon::ReplaceNext => find_icons::FindIcon::ReplaceNext,
+                    ToolbarIcon::ReplaceAll => find_icons::FindIcon::ReplaceAll,
+                    _ => unreachable!(),
+                };
+                find_icons::paint(ui, center, glyph, color);
+            }
+            ToolbarIcon::Save => {
+                let rect = Rect::from_center_size(center, egui::vec2(14.0, 14.0));
+                ui.painter()
+                    .rect_stroke(rect, 1.0, stroke, egui::StrokeKind::Inside);
+                ui.painter().rect_stroke(
+                    Rect::from_min_max(
+                        rect.min + egui::vec2(3.0, 0.0),
+                        rect.min + egui::vec2(10.0, 5.0),
+                    ),
+                    0.0,
+                    stroke,
+                    egui::StrokeKind::Inside,
+                );
+                ui.painter().rect_stroke(
+                    Rect::from_min_max(
+                        rect.min + egui::vec2(3.0, 8.0),
+                        rect.max - egui::vec2(3.0, 0.0),
+                    ),
+                    0.0,
+                    stroke,
+                    egui::StrokeKind::Inside,
+                );
+            }
+            ToolbarIcon::ZoomIn | ToolbarIcon::ZoomOut | ToolbarIcon::Search => {
                 let lens = point(-2.0, -2.0);
                 ui.painter().circle_stroke(lens, 5.5, stroke);
                 ui.painter()
                     .line_segment([point(2.0, 2.0), point(7.0, 7.0)], stroke);
-                ui.painter()
-                    .line_segment([point(-5.0, -2.0), point(1.0, -2.0)], stroke);
+                if !matches!(icon, ToolbarIcon::Search) {
+                    ui.painter()
+                        .line_segment([point(-5.0, -2.0), point(1.0, -2.0)], stroke);
+                }
                 if matches!(icon, ToolbarIcon::ZoomIn) {
                     ui.painter()
                         .line_segment([point(-2.0, -5.0), point(-2.0, 1.0)], stroke);
@@ -3396,6 +4906,16 @@ fn icon_button_state(
                     .line_segment([point(-4.0, 4.0), point(4.0, -4.0)], stroke);
             }
         }
+        if let Some(caption) = caption {
+            let text =
+                ui.painter()
+                    .layout_no_wrap(caption.into(), FontId::proportional(11.0), color);
+            let position = egui::pos2(
+                rect.left() + extent + ui.spacing().item_spacing.x,
+                rect.center().y - text.size().y / 2.0,
+            );
+            ui.painter().galley(position, text, color);
+        }
         response
             .on_hover_cursor(egui::CursorIcon::PointingHand)
             .on_hover_text(label)
@@ -3458,7 +4978,7 @@ fn paint_row(ui: &egui::Ui, rect: Rect, node: &TreeNode, side: usize, appearance
         painter.rect_filled(
             Rect::from_min_size(rect.min, egui::vec2(3.0, rect.height())),
             0,
-            color,
+            state_bar_color(state, palette, painter.ctx()),
         );
     }
     let x = rect.left() + 8.0 + depth as f32 * 14.0;
@@ -3540,6 +5060,108 @@ fn paint_icon(
     }
 }
 
+// Shared by compare and merge so native targeting and feedback stay consistent.
+fn native_drop_frame(
+    ui: &egui::Ui,
+    native_position: Option<Pos2>,
+) -> (bool, Option<Pos2>, Vec<egui::DroppedFileHandle>) {
+    let (hovering, frame_position, retained_position) = ui.input(|input| {
+        (
+            !input.raw.hovered_files.is_empty(),
+            input.raw.events.iter().rev().find_map(|event| match event {
+                egui::Event::PointerMoved(position) => Some(*position),
+                _ => None,
+            }),
+            input.pointer.interact_pos(),
+        )
+    });
+    let position = frame_position.or(native_position).or(retained_position);
+    let dropped = ui
+        .ctx()
+        .input_mut(|input| std::mem::take(&mut input.raw.dropped_files));
+    (hovering, position, dropped)
+}
+
+fn paint_drop_outline(painter: &egui::Painter, target: Rect, color: Color32) {
+    let corners = [
+        target.left_top(),
+        target.right_top(),
+        target.right_bottom(),
+        target.left_bottom(),
+        target.left_top(),
+    ];
+    painter.extend(egui::Shape::dashed_line(
+        &corners,
+        Stroke::new(1.0, color),
+        6.0,
+        4.0,
+    ));
+}
+
+fn paint_native_drop_highlight(ctx: &egui::Context, pane: Rect, message: &str) {
+    let rect = pane.shrink(3.0);
+    let palette = Palette::for_context(ctx);
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("native-drop-highlight"),
+    ));
+    painter.rect_filled(rect, 4, palette.accent.gamma_multiply(0.1));
+    painter.rect_stroke(
+        rect,
+        4,
+        Stroke::new(3.0, palette.accent),
+        egui::StrokeKind::Inside,
+    );
+    let label =
+        painter.layout_no_wrap(message.to_owned(), FontId::proportional(16.0), palette.text);
+    let label_rect = Rect::from_center_size(
+        egui::pos2(rect.center().x, rect.top() + 64.0),
+        label.size() + egui::vec2(24.0, 16.0),
+    );
+    painter.rect_filled(label_rect, 4, palette.panel);
+    painter.galley(
+        label_rect.center() - label.size() * 0.5,
+        label,
+        palette.text,
+    );
+}
+
+fn paint_empty_drop_target(ui: &mut egui::Ui, rect: Rect, side: usize, chooser: bool) {
+    let palette = Palette::for_context(ui.ctx());
+    let painter = ui.painter().with_clip_rect(rect);
+    let target = rect.shrink(8.0);
+    paint_drop_outline(&painter, target, palette.border);
+    ui.interact(
+        target,
+        ui.id().with(("empty-drop-target", side)),
+        Sense::hover(),
+    )
+    .widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::WidgetType::Label,
+            true,
+            format!(
+                "{}: Drop a file or folder here, or use Browse above.",
+                side_name(side)
+            ),
+        )
+    });
+    painter.text(
+        target.center() - egui::vec2(0.0, if chooser { 12.0 } else { -24.0 }),
+        Align2::CENTER_CENTER,
+        "Drop a file or folder here",
+        FontId::proportional(14.0),
+        palette.muted,
+    );
+    painter.text(
+        target.center() + egui::vec2(0.0, if chooser { 12.0 } else { 48.0 }),
+        Align2::CENTER_CENTER,
+        "or use Browse above",
+        FontId::proportional(11.0),
+        palette.muted,
+    );
+}
+
 fn empty_display(ui: &mut egui::Ui, height: f32, title: &str, subtitle: &str) {
     let palette = Palette::for_context(ui.ctx());
     let (rect, _) = ui.allocate_exact_size(
@@ -3554,49 +5176,7 @@ fn empty_display(ui: &mut egui::Ui, height: f32, title: &str, subtitle: &str) {
     {
         let chooser = title.starts_with("Choose ");
         for (side, half) in split_rect(rect).into_iter().enumerate() {
-            let target = half.shrink(8.0);
-            let corners = [
-                target.left_top(),
-                target.right_top(),
-                target.right_bottom(),
-                target.left_bottom(),
-                target.left_top(),
-            ];
-            painter.extend(egui::Shape::dashed_line(
-                &corners,
-                Stroke::new(1.0, palette.border),
-                6.0,
-                4.0,
-            ));
-            ui.interact(
-                target,
-                ui.id().with(("empty-drop-target", side)),
-                Sense::hover(),
-            )
-            .widget_info(|| {
-                egui::WidgetInfo::labeled(
-                    egui::WidgetType::Label,
-                    true,
-                    format!(
-                        "{}: Drop a file or folder here, or use Browse above.",
-                        side_name(side)
-                    ),
-                )
-            });
-            painter.text(
-                target.center() - egui::vec2(0.0, if chooser { 12.0 } else { -24.0 }),
-                Align2::CENTER_CENTER,
-                "Drop a file or folder here",
-                FontId::proportional(14.0),
-                palette.muted,
-            );
-            painter.text(
-                target.center() + egui::vec2(0.0, if chooser { 12.0 } else { 48.0 }),
-                Align2::CENTER_CENTER,
-                "or use Browse above",
-                FontId::proportional(11.0),
-                palette.muted,
-            );
+            paint_empty_drop_target(ui, half, side, chooser);
         }
         if chooser {
             return;
@@ -3628,6 +5208,13 @@ fn apply_theme(ctx: &egui::Context) {
 }
 
 fn set_theme(ctx: &egui::Context, theme: egui::Theme) {
+    let installed = egui::Id::new("versus-codicons-installed");
+    if !ctx.data(|data| data.get_temp::<bool>(installed).unwrap_or(false)) {
+        let mut fonts = egui::FontDefinitions::default();
+        find_icons::register(&mut fonts);
+        ctx.set_fonts(fonts);
+        ctx.data_mut(|data| data.insert_temp(installed, true));
+    }
     let palette = Palette::new(theme == egui::Theme::Dark);
     ctx.set_theme(theme);
     let mut visuals = if theme == egui::Theme::Dark {
@@ -3639,6 +5226,7 @@ fn set_theme(ctx: &egui::Context, theme: egui::Theme) {
     visuals.window_fill = palette.panel;
     visuals.extreme_bg_color = palette.background;
     visuals.override_text_color = Some(palette.text);
+    visuals.interact_cursor = Some(egui::CursorIcon::PointingHand);
     visuals.selection.bg_fill = palette.accent.gamma_multiply(0.3);
     visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, palette.border);
     ctx.set_visuals(visuals);
@@ -3741,7 +5329,9 @@ mod tests {
             .shapes
             .iter()
             .filter_map(|shape| match &shape.shape {
-                egui::Shape::Text(text) if text.galley.text() == value => Some(text.pos),
+                egui::Shape::Text(text) if text.galley.text() == value => {
+                    Some(text.pos + text.galley.rect.min.to_vec2())
+                }
                 _ => None,
             })
             .collect()
@@ -3753,7 +5343,7 @@ mod tests {
             .iter()
             .filter_map(|shape| match &shape.shape {
                 egui::Shape::Text(text) if text.galley.text() == value => {
-                    Some(text.pos + text.galley.size() / 2.0)
+                    Some(text.pos + text.galley.rect.center().to_vec2())
                 }
                 _ => None,
             })
@@ -3915,7 +5505,7 @@ mod tests {
     }
 
     #[test]
-    fn clicked_item_footer_is_fully_visible_at_supported_window_sizes() {
+    fn selected_item_guidance_is_visible_at_bottom_left() {
         for (width, height) in [(900.0, 650.0), (1200.0, 800.0)] {
             let ctx = egui::Context::default();
             apply_theme(&ctx);
@@ -3975,16 +5565,27 @@ mod tests {
                     }
                     _ => None,
                 })
-                .expect("Clicked item should appear in footer");
+                .expect("Clicked item should appear in bottom guidance");
             let bounds = Rect::from_min_size(text.pos, text.galley.size());
-            assert!(bounds.top() > height - 55.0);
+            assert!(bounds.top() >= app.pane_rects[0].bottom());
+            assert!(
+                ctx.read_response(egui::Id::new("workspace-guidance"))
+                    .unwrap()
+                    .rect
+                    .contains_rect(bounds)
+            );
+            let guidance = ctx
+                .read_response(egui::Id::new("workspace-guidance"))
+                .unwrap()
+                .rect;
+            assert!((bounds.left() - guidance.left()).abs() < 1.0);
             assert!(
                 screen.shrink(10.0).contains_rect(bounds),
-                "Footer outside window: {bounds:?}"
+                "Status outside window: {bounds:?}"
             );
             assert!(
                 shape.clip_rect.contains_rect(bounds),
-                "Footer clipped: {bounds:?}"
+                "Status clipped: {bounds:?}"
             );
             output.drop_without_applying_deltas();
         }
@@ -4128,7 +5729,7 @@ mod tests {
     }
 
     #[test]
-    fn full_paths_follow_the_legend_and_precede_tree_rows() {
+    fn paths_precede_tree_rows_and_legend_follows_the_panes() {
         let ctx = egui::Context::default();
         apply_theme(&ctx);
         let mut app = loaded_app();
@@ -4145,11 +5746,74 @@ mod tests {
             assert!(
                 positions
                     .iter()
-                    .all(|position| position.y > legend.y && position.y < rows[0].y)
+                    .all(|position| position.y < rows[0].y && rows[0].y < legend.y)
             );
         }
         assert!(rows[0].y < 160.0, "Compact tree should begin near the top");
         output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn merge_source_paths_stay_on_one_line_and_keep_their_names_visible() {
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            for kind in [SourceKind::Folder, SourceKind::File] {
+                let ctx = egui::Context::default();
+                set_theme(&ctx, theme);
+                let mut app = VersusApp::default();
+                app.comparison_mode = if kind == SourceKind::File {
+                    ComparisonMode::File
+                } else {
+                    ComparisonMode::Folder
+                };
+                app.set_workspace_merge(true);
+                app.source_kinds = [Some(kind); 2];
+                let name = if kind == SourceKind::File {
+                    "model.rs"
+                } else {
+                    "release"
+                };
+                app.paths = [
+                    engineering_path(&format!("{}project/{name}", "é𐐀目录/".repeat(60))),
+                    engineering_path(&format!("short/{name}")),
+                ];
+                let output = render(&mut app, &ctx, vec![]);
+                let (shape, path) = output
+                    .shapes
+                    .iter()
+                    .find_map(|shape| match &shape.shape {
+                        egui::Shape::Text(text) if text.galley.text().starts_with('…') => {
+                            Some((shape, text))
+                        }
+                        _ => None,
+                    })
+                    .expect("long Merge paths should have a leading ellipsis");
+                let suffix = PathBuf::from("project").join(name);
+                assert!(path.galley.text().ends_with(suffix.to_str().unwrap()));
+                assert_eq!(path.galley.rows.len(), 1);
+                let bounds = Rect::from_min_size(path.pos, path.galley.size());
+                assert!(app.source_header_rects[0].contains_rect(bounds));
+                assert!(shape.clip_rect.contains_rect(bounds));
+                let browse = ctx
+                    .read_response(egui::Id::new(format!(
+                        "Browse left {}",
+                        if kind == SourceKind::File {
+                            "file"
+                        } else {
+                            "folder"
+                        }
+                    )))
+                    .unwrap()
+                    .rect;
+                assert!(bounds.right() < browse.left());
+                let short = text_centers(&output, &app.paths[1])[0];
+                assert!((bounds.center().y - short.y).abs() < 0.1);
+                let height = app.source_header_rects[0].height();
+                output.drop_without_applying_deltas();
+                app.paths[0] = engineering_path(&format!("short/{name}"));
+                render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+                assert_eq!(app.source_header_rects[0].height(), height);
+            }
+        }
     }
 
     #[test]
@@ -4180,6 +5844,181 @@ mod tests {
             .expect("Full selected path should wrap in the pane header");
         assert!(wrapped.pos.x + wrapped.galley.size().x < 450.0);
         assert!(text_positions(&output, "assembly")[0].y > wrapped.pos.y + wrapped.galley.size().y);
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn themed_buttons_use_pointer_cursor_without_overriding_disabled_or_text_fields() {
+        for theme in [egui::Theme::Light, egui::Theme::Dark] {
+            let ctx = egui::Context::default();
+            set_theme(&ctx, theme);
+            let mut text = String::from("editable text");
+            let mut rects = [Rect::NOTHING; 3];
+            let mut frame = |position: Option<Pos2>| {
+                ctx.run_ui(
+                    egui::RawInput {
+                        events: position
+                            .map(egui::Event::PointerMoved)
+                            .into_iter()
+                            .collect(),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        rects[0] = ui.button("Save").rect;
+                        rects[1] = ui.add_enabled(false, egui::Button::new("Unavailable")).rect;
+                        rects[2] = ui.text_edit_singleline(&mut text).rect;
+                    },
+                )
+            };
+            frame(None).drop_without_applying_deltas();
+            // Widget responses describe the previous pass; capture settled rectangles.
+            frame(None).drop_without_applying_deltas();
+            drop(frame);
+            for (index, expected) in [
+                egui::CursorIcon::PointingHand,
+                egui::CursorIcon::Default,
+                egui::CursorIcon::Text,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let output = ctx.run_ui(
+                    egui::RawInput {
+                        events: vec![egui::Event::PointerMoved(rects[index].center())],
+                        ..Default::default()
+                    },
+                    |ui| {
+                        let _ = ui.button("Save");
+                        ui.add_enabled(false, egui::Button::new("Unavailable"));
+                        ui.text_edit_singleline(&mut text);
+                    },
+                );
+                assert_eq!(
+                    output.platform_output.cursor_icon, expected,
+                    "{theme:?}, {index}"
+                );
+                output.drop_without_applying_deltas();
+            }
+        }
+    }
+
+    #[test]
+    fn scrollbars_use_pointer_for_tracks_and_dragging_but_not_when_disabled() {
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            for enabled in [true, false] {
+                for interactive in [true, false] {
+                    let ctx = egui::Context::default();
+                    set_theme(&ctx, theme);
+                    let render = |events| {
+                        let mut scroll_id = egui::Id::NULL;
+                        let output = ctx.run_ui(
+                            egui::RawInput {
+                                screen_rect: Some(Rect::from_min_size(
+                                    Pos2::ZERO,
+                                    egui::vec2(400.0, 300.0),
+                                )),
+                                events,
+                                ..Default::default()
+                            },
+                            |ui| {
+                                ui.add_enabled_ui(enabled, |ui| {
+                                    scroll_id = egui::ScrollArea::both()
+                                        .id_salt("pointer-scrollbar-test")
+                                        .scroll_source(if interactive {
+                                            egui::scroll_area::ScrollSource::default()
+                                        } else {
+                                            egui::scroll_area::ScrollSource::NONE
+                                        })
+                                        .scroll_bar_visibility(
+                                            egui::scroll_area::ScrollBarVisibility::AlwaysVisible,
+                                        )
+                                        .max_width(200.0)
+                                        .max_height(120.0)
+                                        .show(ui, |ui| {
+                                            ui.allocate_space(egui::vec2(1000.0, 1000.0));
+                                        })
+                                        .id;
+                                });
+                            },
+                        );
+                        (output, scroll_id)
+                    };
+                    for _ in 0..3 {
+                        render(vec![]).0.drop_without_applying_deltas();
+                    }
+                    let (output, scroll_id) = render(vec![]);
+                    output.drop_without_applying_deltas();
+                    for axis in 0..2usize {
+                        let rect = ctx.read_response(scroll_id.with(axis)).unwrap().rect;
+                        let expected = if enabled && interactive {
+                            egui::CursorIcon::PointingHand
+                        } else {
+                            egui::CursorIcon::Default
+                        };
+                        for fraction in [0.05, 0.75] {
+                            let mut point = rect.center();
+                            point[axis] = egui::lerp(rect.min[axis]..=rect.max[axis], fraction);
+                            let (output, _) = render(vec![egui::Event::PointerMoved(point)]);
+                            let actual = output.platform_output.cursor_icon;
+                            output.drop_without_applying_deltas();
+                            assert_eq!(
+                                actual, expected,
+                                "theme={theme:?}, axis={axis}, enabled={enabled}, interactive={interactive}"
+                            );
+                        }
+                        if enabled && interactive {
+                            let start = rect.center();
+                            render(vec![
+                                egui::Event::PointerMoved(start),
+                                egui::Event::PointerButton {
+                                    pos: start,
+                                    button: egui::PointerButton::Primary,
+                                    pressed: true,
+                                    modifiers: Default::default(),
+                                },
+                            ])
+                            .0
+                            .drop_without_applying_deltas();
+                            let mut outside = start;
+                            outside[1 - axis] -= 30.0;
+                            outside[axis] += 20.0;
+                            let (output, _) = render(vec![egui::Event::PointerMoved(outside)]);
+                            let actual = output.platform_output.cursor_icon;
+                            output.drop_without_applying_deltas();
+                            assert_eq!(
+                                actual, expected,
+                                "dragging scrollbar must keep pointer cursor"
+                            );
+                            render(vec![egui::Event::PointerButton {
+                                pos: outside,
+                                button: egui::PointerButton::Primary,
+                                pressed: false,
+                                modifiers: Default::default(),
+                            }])
+                            .0
+                            .drop_without_applying_deltas();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn merge_run_diff_checkbox_uses_pointer_cursor() {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut app = VersusApp::default();
+        app.set_workspace_merge(true);
+        let output = render(&mut app, &ctx, vec![]);
+        let position = text_centers(&output, "Run Diff")[0];
+        output.drop_without_applying_deltas();
+        let output = render(&mut app, &ctx, vec![egui::Event::PointerMoved(position)]);
+        assert_eq!(
+            output.platform_output.cursor_icon,
+            egui::CursorIcon::PointingHand
+        );
+        assert!(!app.interactive.as_ref().unwrap().run_diff_enabled());
         output.drop_without_applying_deltas();
     }
 
@@ -4281,6 +6120,7 @@ mod tests {
             error_icon: StatusIcon::Error,
             scroll_y: 0.0,
             content_widths: [300.0; 2],
+            gutter_extra: 0.0,
             counts: [1, 1, 1, 0, 0, 0],
             visible_rows: vec![0, 1, 2],
             difference_rows: vec![1, 2],
@@ -4521,7 +6361,7 @@ mod tests {
     }
 
     #[test]
-    fn back_button_sits_to_the_left_of_the_legend() {
+    fn back_button_stays_left_of_new_above_the_panes() {
         let ctx = egui::Context::default();
         apply_theme(&ctx);
         let mut app = loaded_app();
@@ -4535,7 +6375,13 @@ mod tests {
         let legend = text_centers(&output, "Different  1")[0];
         let title = text_centers(&output, "Versus")[0];
         assert!(back.x < legend.x);
-        assert!((back.y - legend.y).abs() < 1.0);
+        let new = ctx
+            .read_response(egui::Id::new("New comparison"))
+            .unwrap()
+            .rect;
+        assert!(back.x < new.left());
+        assert!((back.y - new.center().y).abs() < 1.0);
+        assert!(legend.y > app.pane_rects[0].bottom());
         assert!(back.y > title.y);
         output.drop_without_applying_deltas();
     }
@@ -4664,7 +6510,6 @@ mod tests {
         view.job = Some(FileJob {
             receiver,
             cancellation: Arc::new(AtomicBool::new(false)),
-            started: Instant::now(),
             progress: Arc::new(ComparisonProgress::default()),
             ignore_line_endings: true,
         });
@@ -4702,6 +6547,8 @@ mod tests {
             cancellation: Arc::new(AtomicBool::new(false)),
             roots: ["new-left".into(), "new-right".into()],
             started: Instant::now(),
+            logged_progress: None,
+            last_progress_log: Instant::now(),
             progress: Arc::new(ComparisonProgress::default()),
         });
         sender
@@ -4716,6 +6563,81 @@ mod tests {
         assert!(flag.load(Ordering::Relaxed));
         assert!(app.job.is_none() && app.tree.is_none() && app.roots.is_none());
         assert!(sender.send(Ok(fixture())).is_err());
+    }
+
+    #[test]
+    fn same_folder_merge_diff_finishes_without_changes_and_keeps_browsing() {
+        let fixture = SourceFixture::new();
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut app = VersusApp::default();
+        app.set_workspace_merge(true);
+        for side in 0..2 {
+            app.select_path(side, fixture.path("left"));
+        }
+        settle_sources(&mut app, &ctx);
+        app.interactive.as_mut().unwrap().set_run_diff(true);
+        render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+        assert!(app.job.is_some());
+        settle_sources(&mut app, &ctx);
+        assert!(app.tree.is_some() && app.error.is_none());
+        assert_eq!(app.counts[1..], [0; 5]);
+        let output = render(&mut app, &ctx, vec![]);
+        assert_eq!(text_positions(&output, "model.txt").len(), 0);
+        output.drop_without_applying_deltas();
+        let filter = ctx
+            .read_response(egui::Id::new("Show only differences"))
+            .unwrap()
+            .rect
+            .center();
+        click(&mut app, &ctx, filter);
+        assert_eq!(
+            app.interactive.as_ref().unwrap().merge_options(),
+            [false, true, true]
+        );
+        for _ in 0..3 {
+            let output = render(&mut app, &ctx, vec![]);
+            assert_eq!(text_positions(&output, "0 changes").len(), 1);
+            assert_eq!(text_positions(&output, "model.txt").len(), 2);
+            assert_eq!(
+                app.interactive.as_ref().unwrap().change_label(),
+                "0 changes"
+            );
+            output.drop_without_applying_deltas();
+        }
+    }
+
+    #[test]
+    fn folder_worker_panic_becomes_a_status_error_and_releases_the_job() {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut app = loaded_app();
+        let sender = attach_job(&mut app);
+        std::thread::spawn(move || {
+            let result = crate::diagnostics::catch_worker(
+                "Folder comparison",
+                || -> Result<FolderTree, &'static str> {
+                    panic!("test comparison failure");
+                },
+            )
+            .map_err(|message| CompareError {
+                path: None,
+                kind: versus::CompareErrorKind::Io,
+                message,
+            });
+            sender.send(result).unwrap();
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.job.is_some() {
+            app.poll_comparison(&ctx);
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(app.error.as_ref().unwrap().contains("worker panicked"));
+        let output = render(&mut app, &ctx, vec![]);
+        assert_eq!(text_positions(&output, "1 error").len(), 1);
+        assert!(app.tree.is_some(), "failure keeps the previous tree usable");
+        output.drop_without_applying_deltas();
     }
 
     #[test]
@@ -5038,7 +6960,7 @@ mod tests {
         let view = app.file_view.as_ref().unwrap();
         assert!(!view.from_folders && view.comparison.is_none() && view.job.is_none());
         let output = render(&mut app, &ctx, vec![]);
-        assert_eq!(text_positions(&output, "File Compare").len(), 1);
+        assert_eq!(text_positions(&output, "File Diff").len(), 1);
         assert!(
             ctx.read_response(egui::Id::new("Back to folders"))
                 .is_none()
@@ -5098,12 +7020,402 @@ mod tests {
         assert_eq!(app.mode(), SelectionMode::Folder);
         assert!(app.tree.is_none() && app.job.is_none() && app.file_view.is_none());
         let output = render(&mut app, &ctx, vec![]);
-        assert_eq!(text_positions(&output, "Folder Compare").len(), 1);
+        assert_eq!(text_positions(&output, "Folder Diff").len(), 1);
         assert_eq!(
             text_positions(&output, "Drop a file or folder here").len(),
             2
         );
         output.drop_without_applying_deltas();
+    }
+
+    fn settle_merge_file(app: &mut VersusApp, ctx: &egui::Context, side: usize, expected: &str) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            app.poll_sources(ctx);
+            app.interactive.as_mut().unwrap().poll(ctx);
+            if app.interactive.as_ref().unwrap().working_text(side) == Some(expected) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "Merge side did not load");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn merge_file_content_top_padding_matches_native_file_diff() {
+        let fixture = SourceFixture::new();
+        std::fs::write(fixture.path("left/model.txt"), "left text\n").unwrap();
+        std::fs::write(fixture.path("right/model.txt"), "right text\n").unwrap();
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            for zoom in [1.0, 2.0] {
+                let ctx = egui::Context::default();
+                set_theme(&ctx, theme);
+                ctx.set_zoom_factor(zoom);
+                let mut merge = VersusApp::default();
+                merge.comparison_mode = ComparisonMode::File;
+                merge.set_workspace_merge(true);
+                merge.select_path(0, fixture.path("left/model.txt"));
+                merge.select_path(1, fixture.path("right/model.txt"));
+                settle_merge_file(&mut merge, &ctx, 0, "left text\n");
+                settle_merge_file(&mut merge, &ctx, 1, "right text\n");
+                for _ in 0..3 {
+                    render(&mut merge, &ctx, vec![]).drop_without_applying_deltas();
+                }
+                let output = render(&mut merge, &ctx, vec![]);
+                let merge_offset = text_positions(&output, "left text\n")[0].y
+                    - merge.source_header_rects[0].bottom();
+                output.drop_without_applying_deltas();
+                let mut diff = VersusApp::default();
+                diff.comparison_mode = ComparisonMode::File;
+                diff.select_path(0, fixture.path("left/model.txt"));
+                diff.select_path(1, fixture.path("right/model.txt"));
+                settle_sources(&mut diff, &ctx);
+                let output = render(&mut diff, &ctx, vec![]);
+                let diff_offset = text_positions(&output, "left text")[0].y
+                    - diff.source_header_rects[0].bottom();
+                assert!(
+                    (merge_offset - diff_offset).abs() < 0.6,
+                    "merge={merge_offset}, diff={diff_offset}, theme={theme:?}, zoom={zoom}"
+                );
+                output.drop_without_applying_deltas();
+            }
+        }
+    }
+
+    #[test]
+    fn filtered_merge_typing_after_hidden_lines_preserves_source_text_and_undo() {
+        let fixture = SourceFixture::new();
+        let left = "prefix\noldfirst\nmiddle\noldsecond\nsuffix\n";
+        let right = "prefix\nnewfirst\nmiddle\nnewsecond\nsuffix\n";
+        std::fs::write(fixture.path("left/model.txt"), left).unwrap();
+        std::fs::write(fixture.path("right/model.txt"), right).unwrap();
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut app = VersusApp::default();
+        app.comparison_mode = ComparisonMode::File;
+        app.set_workspace_merge(true);
+        app.select_path(0, fixture.path("left/model.txt"));
+        app.select_path(1, fixture.path("right/model.txt"));
+        settle_merge_file(&mut app, &ctx, 0, left);
+        settle_merge_file(&mut app, &ctx, 1, right);
+        app.interactive.as_mut().unwrap().set_run_diff(true);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app
+            .interactive
+            .as_ref()
+            .unwrap()
+            .loaded_pair_comparison()
+            .is_none()
+        {
+            app.interactive.as_mut().unwrap().poll(&ctx);
+            assert!(Instant::now() < deadline, "Merge comparison did not finish");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        for _ in 0..3 {
+            render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+        }
+        let output = render(&mut app, &ctx, vec![]);
+        let position = text_positions(&output, "oldfirst\noldsecond\n")[0];
+        let font = comparison_font(&ctx);
+        let row_height =
+            ROW_HEIGHT.max(ctx.fonts_mut(|fonts| fonts.row_height(&font)).ceil() + 8.0);
+        output.drop_without_applying_deltas();
+        click(&mut app, &ctx, position + egui::vec2(1.0, row_height + 6.0));
+        render(&mut app, &ctx, vec![egui::Event::Text("X".into())]).drop_without_applying_deltas();
+        assert_eq!(
+            app.interactive.as_ref().unwrap().working_text(0),
+            Some("prefix\noldfirst\nmiddle\nXoldsecond\nsuffix\n")
+        );
+        render(
+            &mut app,
+            &ctx,
+            vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        )
+        .drop_without_applying_deltas();
+        render(
+            &mut app,
+            &ctx,
+            vec![
+                egui::Event::Key {
+                    key: egui::Key::Enter,
+                    physical_key: None,
+                    pressed: false,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::Text("Y".into()),
+            ],
+        )
+        .drop_without_applying_deltas();
+        assert_eq!(
+            app.interactive.as_ref().unwrap().working_text(0),
+            Some("prefix\noldfirst\nmiddle\nX\nYoldsecond\nsuffix\n")
+        );
+        for _ in 0..3 {
+            click_action(&mut app, &ctx, "Undo");
+        }
+        assert_eq!(
+            app.interactive.as_ref().unwrap().working_text(0),
+            Some(left)
+        );
+        assert_eq!(
+            app.interactive.as_ref().unwrap().working_text(1),
+            Some(right)
+        );
+        assert_eq!(
+            std::fs::read_to_string(fixture.path("left/model.txt")).unwrap(),
+            left
+        );
+    }
+
+    #[test]
+    fn merge_file_opens_on_either_side_before_a_peer_is_selected() {
+        let fixture = SourceFixture::new();
+        for side in 0..2 {
+            let ctx = egui::Context::default();
+            apply_theme(&ctx);
+            let mut app = VersusApp::default();
+            app.comparison_mode = ComparisonMode::File;
+            app.set_workspace_merge(true);
+            let path = fixture.path(if side == 0 {
+                "left/model.txt"
+            } else {
+                "right/model.txt"
+            });
+            app.select_path(side, path.clone());
+            let text = if side == 0 {
+                "common\nold\n"
+            } else {
+                "common\nnew\n"
+            };
+            settle_merge_file(&mut app, &ctx, side, text);
+            let output = render(&mut app, &ctx, vec![]);
+            assert!(app.merge_file_sides[side] && !app.merge_file_sides[1 - side]);
+            assert_eq!(
+                app.interactive.as_ref().unwrap().current_sources()[side],
+                Some(path)
+            );
+            assert_eq!(
+                text_positions(&output, "Drop a file or folder here").len(),
+                1
+            );
+            assert!(!text_positions(&output, text).is_empty());
+            assert!(app.job.is_none() && app.tree.is_none());
+            assert!(
+                !ctx.read_response(egui::Id::new("Accept All Left — replace Right with Left"))
+                    .unwrap()
+                    .enabled()
+            );
+            assert!(text_positions(&output, "Comparison alignment").is_empty());
+            assert!(text_positions(&output, "Sync scroll").is_empty());
+            assert!(
+                text_positions(
+                    &output,
+                    "Working copies are ready. Changes stay in memory until saved."
+                )
+                .is_empty()
+            );
+            output.drop_without_applying_deltas();
+        }
+    }
+
+    #[test]
+    fn merge_side_classification_does_not_wait_for_a_pending_or_failed_peer() {
+        let fixture = SourceFixture::new();
+        let ctx = egui::Context::default();
+        let mut app = VersusApp::default();
+        app.set_workspace_merge(true);
+        let (sender, receiver) = mpsc::channel();
+        app.source_jobs[1] = Some(SourceJob {
+            receiver,
+            cancellation: Arc::new(AtomicBool::new(false)),
+        });
+        app.select_path(0, fixture.path("left/model.txt"));
+        settle_merge_file(&mut app, &ctx, 0, "common\nold\n");
+        assert!(app.source_jobs[1].is_some());
+        sender.send(Err("Unavailable source".into())).unwrap();
+        app.poll_sources(&ctx);
+        assert!(app.source_errors[1].is_some());
+        assert_eq!(
+            app.interactive.as_ref().unwrap().working_text(0),
+            Some("common\nold\n")
+        );
+        assert!(app.merge_file_sides[0]);
+    }
+
+    #[test]
+    fn merge_folder_and_file_viewers_can_be_loaded_independently() {
+        let fixture = SourceFixture::new();
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut app = VersusApp::default();
+        app.set_workspace_merge(true);
+        app.select_path(0, fixture.path("left"));
+        settle_sources(&mut app, &ctx);
+        assert_eq!(
+            app.merge_folders.as_ref().unwrap().source_roots(),
+            [Some(fixture.path("left")), None]
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let output = render(&mut app, &ctx, vec![]);
+            let loaded = text_positions(&output, "model.txt").len() == 1;
+            if loaded {
+                assert_eq!(
+                    text_positions(&output, "Drop a file or folder here").len(),
+                    1
+                );
+            }
+            output.drop_without_applying_deltas();
+            if loaded {
+                break;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        app.select_path(1, fixture.path("right/model.txt"));
+        settle_merge_file(&mut app, &ctx, 1, "common\nnew\n");
+        let output = render(&mut app, &ctx, vec![]);
+        assert_eq!(app.merge_file_sides, [false, true]);
+        assert_eq!(text_positions(&output, "model.txt").len(), 1);
+        assert!(!text_positions(&output, "common\nnew\n").is_empty());
+        assert!(app.job.is_none() && app.tree.is_none());
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn merge_folder_expansion_and_scrolling_are_independent() {
+        let fixture = SourceFixture::new();
+        for side in ["left", "right"] {
+            std::fs::create_dir(fixture.path(&format!("{side}/assembly"))).unwrap();
+            std::fs::write(fixture.path(&format!("{side}/assembly/child.txt")), "child").unwrap();
+            for index in 0..100 {
+                std::fs::write(
+                    fixture.path(&format!("{side}/row-{index:03}.txt")),
+                    "metadata",
+                )
+                .unwrap();
+            }
+        }
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut app = VersusApp::default();
+        app.set_workspace_merge(true);
+        app.select_path(0, fixture.path("left"));
+        app.select_path(1, fixture.path("right"));
+        settle_sources(&mut app, &ctx);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let folders = loop {
+            let output = render(&mut app, &ctx, vec![]);
+            let folders = text_positions(&output, "assembly");
+            output.drop_without_applying_deltas();
+            if folders.len() == 2 {
+                break folders;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        click(&mut app, &ctx, folders[0] + egui::vec2(45.0, 3.0));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let (left_row, peer_row) = loop {
+            let output = render(&mut app, &ctx, vec![]);
+            let children = text_positions(&output, "child.txt");
+            let peer_row = text_positions(&output, "row-000.txt")
+                .into_iter()
+                .find(|pos| pos.x > app.pane_rects[1].left());
+            if children.len() == 1 {
+                assert!(children[0].x < app.pane_rects[0].right());
+                let left = text_positions(&output, "row-000.txt")
+                    .into_iter()
+                    .find(|pos| pos.x < app.pane_rects[0].right())
+                    .unwrap();
+                output.drop_without_applying_deltas();
+                break (left, peer_row.unwrap());
+            }
+            output.drop_without_applying_deltas();
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        let pos = app.pane_rects[0].center();
+        render(
+            &mut app,
+            &ctx,
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    phase: egui::TouchPhase::Move,
+                    delta: egui::vec2(0.0, -160.0),
+                    modifiers: Default::default(),
+                },
+            ],
+        )
+        .drop_without_applying_deltas();
+        let output = render(&mut app, &ctx, vec![]);
+        let peer_after = text_positions(&output, "row-000.txt")
+            .into_iter()
+            .find(|pos| pos.x > app.pane_rects[1].left())
+            .unwrap();
+        assert_eq!(peer_after, peer_row);
+        let left_after = text_positions(&output, "row-000.txt")
+            .into_iter()
+            .find(|pos| pos.x < app.pane_rects[0].right());
+        assert!(
+            left_after.is_none_or(|pos| pos.y < left_row.y - 1.0),
+            "Left tree did not scroll: before={left_row:?}, after={left_after:?}"
+        );
+        assert!(app.job.is_none() && app.tree.is_none());
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn merge_run_diff_checkbox_is_before_theme_in_the_header() {
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            for zoom in [1.0, 2.0] {
+                let ctx = egui::Context::default();
+                apply_theme(&ctx);
+                set_theme(&ctx, theme);
+                ctx.set_zoom_factor(zoom);
+                let mut app = VersusApp::default();
+                app.set_workspace_merge(true);
+                let output = render(&mut app, &ctx, vec![]);
+                let run = text_positions(&output, "Run Diff");
+                assert_eq!(run.len(), 1);
+                let theme_button = ctx
+                    .read_response(egui::Id::new(if theme == egui::Theme::Dark {
+                        "Switch to light mode"
+                    } else {
+                        "Switch to dark mode"
+                    }))
+                    .unwrap()
+                    .rect;
+                let mode = ctx.read_response(egui::Id::new("File Diff")).unwrap().rect;
+                assert!(
+                    run[0].x > mode.right(),
+                    "Run Diff overlaps the centered file button"
+                );
+                assert!(run[0].x < theme_button.left());
+                assert!(run[0].y >= mode.top() && run[0].y < mode.bottom());
+                output.drop_without_applying_deltas();
+                click(&mut app, &ctx, run[0] + egui::vec2(3.0, 3.0));
+                assert!(app.interactive.as_ref().unwrap().run_diff_enabled());
+                assert_eq!(app.interactive.as_ref().unwrap().merge_options(), [true; 3]);
+                assert!(
+                    app.show_only_differences && app.ignore_whitespace && app.ignore_line_endings
+                );
+                render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+                assert!(
+                    ctx.read_response(egui::Id::new("Auto Merge Non-Conflicts"))
+                        .is_none()
+                );
+            }
+        }
     }
 
     #[test]
@@ -5145,14 +7457,14 @@ mod tests {
                         })
                         .unwrap();
                     let folder = ctx
-                        .read_response(egui::Id::new("Folder Compare"))
+                        .read_response(egui::Id::new("Folder Diff"))
                         .unwrap()
                         .rect;
-                    let file = ctx
-                        .read_response(egui::Id::new("File Compare"))
-                        .unwrap()
-                        .rect;
+                    let file = ctx.read_response(egui::Id::new("File Diff")).unwrap().rect;
+                    assert!(ctx.read_response(egui::Id::new("File Merge")).is_none());
                     assert!((folder.union(file).center().x - screen.center().x).abs() < 0.5);
+                    assert!(folder.right() < file.left());
+                    assert!(file.right() < screen.right());
                     assert!(logo.right() < folder.left());
                     let theme_button = ctx
                         .read_response(egui::Id::new(if theme == egui::Theme::Dark {
@@ -5163,7 +7475,7 @@ mod tests {
                         .unwrap()
                         .rect;
                     assert!(file.right() < theme_button.left());
-                    for (label, rect) in [("Folder Compare", folder), ("File Compare", file)] {
+                    for (label, rect) in [("Folder Diff", folder), ("File Diff", file)] {
                         assert!(screen.contains_rect(rect));
                         let text = output
                             .shapes
@@ -5186,11 +7498,11 @@ mod tests {
                         assert!(icon.right() < bounds.left());
                         assert!(
                             output.shapes.iter().any(|shape| match &shape.shape {
-                                egui::Shape::Rect(shape) if label == "Folder Compare" =>
+                                egui::Shape::Rect(shape) if label == "Folder Diff" =>
                                     icon.contains_rect(shape.rect)
                                         && shape.rect.width() == 13.0
                                         && shape.stroke.width > 0.0,
-                                egui::Shape::Path(shape) if label == "File Compare" =>
+                                egui::Shape::Path(shape) if label == "File Diff" =>
                                     shape.closed
                                         && shape.points.len() == 5
                                         && shape.points.iter().all(|point| icon.contains(*point)),
@@ -5206,14 +7518,583 @@ mod tests {
     }
 
     #[test]
+    fn header_toggle_shares_the_top_row_and_updates_centered_captions() {
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            for zoom in [1.0, 2.0] {
+                let ctx = egui::Context::default();
+                set_theme(&ctx, theme);
+                ctx.set_zoom_factor(zoom);
+                ctx.run_ui(egui::RawInput::default(), |_| {})
+                    .drop_without_applying_deltas();
+                let mut app = VersusApp::default();
+                let draw = |app: &mut VersusApp| {
+                    let mut output = ctx.run_ui(
+                        egui::RawInput {
+                            screen_rect: Some(Rect::from_min_size(
+                                Pos2::ZERO,
+                                egui::vec2(900.0 / zoom, 650.0 / zoom),
+                            )),
+                            ..Default::default()
+                        },
+                        |ui| app.render(ui),
+                    );
+                    output.textures_delta.clear();
+                    output
+                };
+                for merge in [false, true] {
+                    app.set_workspace_merge(merge);
+                    let output = draw(&mut app);
+                    let folder = ctx
+                        .read_response(egui::Id::new(ComparisonMode::Folder.label()))
+                        .unwrap()
+                        .rect;
+                    let file = ctx
+                        .read_response(egui::Id::new(ComparisonMode::File.label()))
+                        .unwrap()
+                        .rect;
+                    let toggle = ctx
+                        .read_response(egui::Id::new(("workspace-mode", "Merge")))
+                        .unwrap()
+                        .rect
+                        .union(
+                            ctx.read_response(egui::Id::new(("workspace-mode", "Diff")))
+                                .unwrap()
+                                .rect,
+                        );
+                    assert!((folder.union(file).center().x - 450.0 / zoom).abs() < 0.5);
+                    assert!((toggle.center().y - folder.center().y).abs() < 0.5);
+                    assert!(
+                        toggle.right() + 4.0 < folder.left(),
+                        "{toggle:?} overlaps {folder:?}"
+                    );
+                    assert_eq!(
+                        text_positions(&output, ComparisonMode::Folder.workspace_label(merge))
+                            .len(),
+                        1
+                    );
+                    assert_eq!(
+                        text_positions(&output, ComparisonMode::File.workspace_label(merge)).len(),
+                        1
+                    );
+                    output.drop_without_applying_deltas();
+                }
+                let toggle = ctx
+                    .read_response(egui::Id::new(("workspace-mode", "Diff")))
+                    .unwrap()
+                    .rect
+                    .center();
+                click(&mut app, &ctx, toggle);
+                assert!(!app.merge_mode);
+            }
+        }
+    }
+
+    #[test]
+    fn merge_and_diff_selectors_share_panel_and_empty_drop_styles() {
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            for mode in [ComparisonMode::Folder, ComparisonMode::File] {
+                let mut selectors = Vec::new();
+                for merge in [false, true] {
+                    let ctx = egui::Context::default();
+                    set_theme(&ctx, theme);
+                    let palette = Palette::for_context(&ctx);
+                    let mut app = VersusApp::default();
+                    app.comparison_mode = mode;
+                    app.set_workspace_merge(merge);
+                    let output = render(&mut app, &ctx, vec![]);
+                    let picker = ctx
+                        .read_response(egui::Id::new(format!(
+                            "Browse left {}",
+                            mode.source_label()
+                        )))
+                        .unwrap()
+                        .rect;
+                    let panel = output
+                        .shapes
+                        .iter()
+                        .find_map(|shape| match &shape.shape {
+                            egui::Shape::Rect(rect)
+                                if rect.fill == palette.panel
+                                    && rect.stroke == Stroke::new(1.0, palette.border)
+                                    && rect.rect.contains_rect(picker)
+                                    && rect.rect.width() > 500.0 =>
+                            {
+                                Some(rect)
+                            }
+                            _ => None,
+                        })
+                        .expect("source picker must be inside the comparison panel");
+                    assert_eq!(panel.corner_radius.nw, 6);
+                    assert_eq!(
+                        text_positions(&output, "Drop a file or folder here").len(),
+                        2
+                    );
+                    for side in 0..2 {
+                        let half = split_rect(panel.rect)[side];
+                        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::LineSegment { points, stroke } if *stroke == Stroke::new(1.0, palette.border) && half.contains(points[0]) && (points[0].distance(points[1])-6.0).abs() < 0.01)));
+                    }
+                    selectors.push(picker);
+                    output.drop_without_applying_deltas();
+                }
+                assert_eq!(selectors[0].size(), selectors[1].size());
+                let shift = selectors[0].left() - selectors[1].left();
+                assert!(shift >= selectors[0].width() && shift <= selectors[0].width() + 8.0);
+            }
+        }
+    }
+
+    #[test]
+    fn merge_pane_headers_place_back_before_labels_and_save_after_browse() {
+        let fixture = SourceFixture::new();
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut app = VersusApp::default();
+        app.set_workspace_merge(true);
+        app.select_path(0, fixture.path("left"));
+        app.select_path(1, fixture.path("right"));
+        settle_sources(&mut app, &ctx);
+        app.merge_file_sides = [true; 2];
+        app.merge_file_open = true;
+        app.interactive.as_mut().unwrap().open_pair([
+            fixture.path("left/model.txt"),
+            fixture.path("right/model.txt"),
+        ]);
+        settle_merge_file(&mut app, &ctx, 0, "common\nold\n");
+        let output = render(&mut app, &ctx, vec![]);
+        for side in 0..2 {
+            let back = ctx
+                .read_response(egui::Id::new(format!(
+                    "Back to {} folder",
+                    if side == 0 { "left" } else { "right" }
+                )))
+                .unwrap()
+                .rect;
+            let label = ctx
+                .read_response(egui::Id::new(("merge-side-label", side)))
+                .unwrap()
+                .rect;
+            let browse = ctx
+                .read_response(egui::Id::new(format!(
+                    "Browse {} file",
+                    if side == 0 { "left" } else { "right" }
+                )))
+                .unwrap()
+                .rect;
+            let save = ctx
+                .read_response(egui::Id::new(if side == 0 {
+                    "Save Left"
+                } else {
+                    "Save Right"
+                }))
+                .unwrap()
+                .rect;
+            assert!(back.right() < label.left());
+            assert!(browse.right() < save.left());
+            assert!((back.center().y - label.center().y).abs() < 0.5);
+            assert!((browse.center().y - save.center().y).abs() < 0.5);
+        }
+        assert!(
+            ctx.read_response(egui::Id::new("Back to folders"))
+                .is_none()
+        );
+        assert!(text_positions(&output, "Refresh listing").is_empty());
+        assert!(text_positions(&output, "Open selected pair").is_empty());
+        let before_peer = app
+            .interactive
+            .as_ref()
+            .unwrap()
+            .working_text(1)
+            .unwrap()
+            .to_owned();
+        output.drop_without_applying_deltas();
+        click_action(&mut app, &ctx, "Back to left folder");
+        assert_eq!(app.merge_file_sides, [false, true]);
+        assert_eq!(
+            app.interactive.as_ref().unwrap().working_text(1),
+            Some(before_peer.as_str())
+        );
+    }
+
+    #[test]
+    fn merge_save_icons_preview_only_the_chosen_file() {
+        let fixture = SourceFixture::new();
+        for side in 0..2 {
+            let ctx = egui::Context::default();
+            apply_theme(&ctx);
+            let mut app = VersusApp::default();
+            app.comparison_mode = ComparisonMode::File;
+            app.set_workspace_merge(true);
+            app.select_path(
+                side,
+                fixture.path(if side == 0 {
+                    "left/model.txt"
+                } else {
+                    "right/model.txt"
+                }),
+            );
+            let original = if side == 0 {
+                "common\nold\n"
+            } else {
+                "common\nnew\n"
+            };
+            settle_merge_file(&mut app, &ctx, side, original);
+            render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+            let pos = egui::pos2(
+                app.pane_rects[side].left() + 65.0,
+                app.pane_rects[side].top() + 8.0,
+            );
+            click(&mut app, &ctx, pos);
+            render(&mut app, &ctx, vec![egui::Event::Text("edited ".into())])
+                .drop_without_applying_deltas();
+            assert!(app.interactive.as_ref().unwrap().is_side_dirty(side));
+            let output = render(&mut app, &ctx, vec![]);
+            assert!(output.shapes.iter().any(|shape| matches!(&shape.shape,
+                egui::Shape::Text(text) if text.galley.text().ends_with("model.txt")
+                    && app.source_header_rects[side].contains(text.pos)
+                    && text.override_text_color == Some(Palette::for_context(&ctx).changed))));
+            output.drop_without_applying_deltas();
+            let save = if side == 0 { "Save Left" } else { "Save Right" };
+            let mut enabled = false;
+            // Read during the pass: egui swaps this/previous widget maps at
+            // end_pass, so an outside read can return the older disabled state.
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0))),
+                    ..Default::default()
+                },
+                |ui| {
+                    app.render(ui);
+                    enabled = ctx.read_response(egui::Id::new(save)).unwrap().enabled();
+                },
+            );
+            output.drop_without_applying_deltas();
+            assert!(enabled);
+            click_action(&mut app, &ctx, save);
+            let output = render(&mut app, &ctx, vec![]);
+            assert_eq!(text_positions(&output, "Save pending changes?").len(), 1);
+            assert_eq!(
+                text_positions(
+                    &output,
+                    if side == 0 {
+                        "Left working copy"
+                    } else {
+                        "Right working copy"
+                    }
+                )
+                .len(),
+                1
+            );
+            assert!(
+                text_positions(
+                    &output,
+                    if side == 0 {
+                        "Right working copy"
+                    } else {
+                        "Left working copy"
+                    }
+                )
+                .is_empty()
+            );
+            assert_eq!(
+                std::fs::read_to_string(fixture.path(if side == 0 {
+                    "left/model.txt"
+                } else {
+                    "right/model.txt"
+                }))
+                .unwrap(),
+                original
+            );
+            output.drop_without_applying_deltas();
+        }
+    }
+
+    #[test]
+    fn errors_use_bottom_right_summary_and_clear_only_on_pane_input() {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut app = VersusApp::default();
+        app.set_workspace_merge(true);
+        app.error = Some("First error detail".into());
+        app.source_errors = [
+            Some("First error detail".into()),
+            Some("Second error detail".into()),
+        ];
+        let output = render(&mut app, &ctx, vec![]);
+        let status = ctx
+            .read_response(egui::Id::new("workspace-status"))
+            .unwrap()
+            .rect;
+        let error = ctx
+            .read_response(egui::Id::new("workspace-errors"))
+            .unwrap()
+            .rect;
+        assert!(status.contains_rect(error));
+        assert!(status.top() >= app.pane_rects[0].bottom());
+        assert_eq!(text_positions(&output, "2 errors").len(), 1);
+        assert!(text_positions(&output, "First error detail").is_empty());
+        assert_eq!(app.error_details(app.interactive.as_ref()).len(), 2);
+        output.drop_without_applying_deltas();
+        ctx.all_styles_mut(|style| {
+            style.interaction.tooltip_delay = 0.0;
+            style.interaction.show_tooltips_only_when_still = false;
+        });
+        // Tooltip Areas size themselves invisibly on their first frame.
+        render(
+            &mut app,
+            &ctx,
+            vec![egui::Event::PointerMoved(error.center())],
+        )
+        .drop_without_applying_deltas();
+        let output = render(&mut app, &ctx, vec![]);
+        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text().contains("First error detail") && text.galley.text().contains("Second error detail"))));
+        output.drop_without_applying_deltas();
+        assert!(
+            app.error.is_some(),
+            "hovering errors must keep their details available"
+        );
+        let pos = app.pane_rects[0].center();
+        render(&mut app, &ctx, vec![egui::Event::PointerMoved(pos)]).drop_without_applying_deltas();
+        assert!(app.error_details(app.interactive.as_ref()).is_empty());
+        app.error = Some("New error while pointer is stationary".into());
+        render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+        assert!(app.error.is_some());
+        render(
+            &mut app,
+            &ctx,
+            vec![egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: Default::default(),
+            }],
+        )
+        .drop_without_applying_deltas();
+        assert!(app.error.is_none());
+    }
+
+    #[test]
+    fn diff_after_merge_keeps_source_errors_in_bottom_status() {
+        let fixture = SourceFixture::new();
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut app = VersusApp::default();
+        app.set_workspace_merge(true);
+        app.select_path(0, fixture.path("left/model.txt"));
+        settle_merge_file(&mut app, &ctx, 0, "common\nold\n");
+        app.set_workspace_merge(false);
+        assert!(app.merge_file_open);
+        app.source_errors[1] = Some("Cannot inspect peer source".into());
+        let output = render(&mut app, &ctx, vec![]);
+        assert_eq!(text_positions(&output, "1 error").len(), 1);
+        assert!(
+            ctx.read_response(egui::Id::new("workspace-status"))
+                .unwrap()
+                .rect
+                .top()
+                >= app.pane_rects[0].bottom()
+        );
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn merge_folder_search_and_refresh_are_icon_actions_in_the_expected_rows() {
+        let fixture = SourceFixture::new();
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut app = VersusApp::default();
+        app.set_workspace_merge(true);
+        app.select_path(0, fixture.path("left"));
+        settle_sources(&mut app, &ctx);
+        render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+        let new = ctx
+            .read_response(egui::Id::new("New comparison"))
+            .unwrap()
+            .rect;
+        let search = ctx
+            .read_response(egui::Id::new("Find and replace"))
+            .unwrap()
+            .rect;
+        assert!(search.left() > new.right());
+        assert!((search.center().y - new.center().y).abs() < 0.5);
+        assert!(
+            ctx.read_response(egui::Id::new("Refresh comparison"))
+                .is_none()
+        );
+        click_action(&mut app, &ctx, "Find and replace");
+        let output = render(&mut app, &ctx, vec![]);
+        assert_eq!(text_positions(&output, "Find and Replace").len(), 1);
+        output.drop_without_applying_deltas();
+        app.interactive.as_mut().unwrap().set_run_diff(true);
+        let output = render(&mut app, &ctx, vec![]);
+        let refresh = ctx
+            .read_response(egui::Id::new("Refresh comparison"))
+            .unwrap()
+            .rect;
+        let run = text_positions(&output, "Run Diff")[0];
+        assert!(refresh.left() > run.x);
+        assert!(refresh.top() < app.pane_rects[0].top());
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn file_merge_search_opens_without_creating_a_folder_browser() {
+        let fixture = SourceFixture::new();
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut app = VersusApp::default();
+        app.comparison_mode = ComparisonMode::File;
+        app.set_workspace_merge(true);
+
+        // Search remains available before files are chosen, then tracks an
+        // independently loaded side without replacing its editor with a tree.
+        render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+        assert!(
+            ctx.read_response(egui::Id::new("Find and replace"))
+                .is_some()
+        );
+        click_action(&mut app, &ctx, "Find and replace");
+        let output = render(&mut app, &ctx, vec![]);
+        assert_eq!(text_positions(&output, "Find and Replace").len(), 1);
+        assert!(app.merge_folders.is_none());
+        assert_eq!(
+            app.merge_file_search.as_ref().unwrap().source_roots(),
+            [None, None]
+        );
+        output.drop_without_applying_deltas();
+
+        app.select_path(0, fixture.path("left/model.txt"));
+        settle_merge_file(&mut app, &ctx, 0, "common\nold\n");
+        render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+        assert!(app.merge_folders.is_none());
+        assert!(app.merge_file_open);
+        assert_eq!(
+            app.merge_file_search.as_ref().unwrap().source_roots(),
+            [Some(fixture.path("left/model.txt")), None]
+        );
+    }
+
+    #[test]
+    fn editor_save_clears_the_file_search_snapshot_before_leave_guards() {
+        let fixture = SourceFixture::new();
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut app = VersusApp::default();
+        app.comparison_mode = ComparisonMode::File;
+        app.set_workspace_merge(true);
+        app.select_path(0, fixture.path("left/model.txt"));
+        settle_merge_file(&mut app, &ctx, 0, "common\nold\n");
+
+        render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+        let editor = ctx
+            .read_response(app.interactive.as_ref().unwrap().editor_id(0))
+            .expect("loaded merge editor")
+            .rect
+            .left_top()
+            + egui::vec2(8.0, 8.0);
+        click(&mut app, &ctx, editor);
+        render(&mut app, &ctx, vec![egui::Event::Text("edited ".into())])
+            .drop_without_applying_deltas();
+        assert!(app.interactive.as_ref().unwrap().any_dirty());
+
+        click_action(&mut app, &ctx, "Find and replace");
+        render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+        assert!(app.merge_file_search.as_ref().unwrap().any_dirty());
+        click_action(&mut app, &ctx, "Close Find and Replace");
+
+        click_action(&mut app, &ctx, "Save Left");
+        render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+        let output = render(&mut app, &ctx, vec![]);
+        let save = text_centers(&output, "Save")[0];
+        output.drop_without_applying_deltas();
+        click(&mut app, &ctx, save);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.interactive.as_ref().unwrap().is_saving() {
+            app.interactive.as_mut().unwrap().poll(&ctx);
+            assert!(Instant::now() < deadline, "editor save did not finish");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        app.sync_file_search_when_clean();
+        assert!(!app.interactive.as_ref().unwrap().any_dirty());
+        assert!(!app.merge_file_search.as_ref().unwrap().any_dirty());
+        app.new_comparison();
+        assert!(app.pending_merge_exit.is_none());
+    }
+
+    #[test]
+    fn file_search_owner_is_retained_while_folder_merge_opens() {
+        let fixture = SourceFixture::new();
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let mut app = VersusApp::default();
+        app.comparison_mode = ComparisonMode::File;
+        app.set_workspace_merge(true);
+        app.select_path(0, fixture.path("left/model.txt"));
+        settle_merge_file(&mut app, &ctx, 0, "common\nold\n");
+
+        render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+        let editor = ctx
+            .read_response(app.interactive.as_ref().unwrap().editor_id(0))
+            .expect("loaded merge editor")
+            .rect
+            .left_top()
+            + egui::vec2(8.0, 8.0);
+        click(&mut app, &ctx, editor);
+        render(&mut app, &ctx, vec![egui::Event::Text("edited ".into())])
+            .drop_without_applying_deltas();
+        click_action(&mut app, &ctx, "Find and replace");
+        render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+        assert!(app.merge_file_search.as_ref().unwrap().any_dirty());
+
+        app.select_path(0, fixture.path("left"));
+        settle_sources(&mut app, &ctx);
+        assert!(app.merge_folders.is_some());
+        assert!(
+            app.merge_file_search.is_some(),
+            "a pending file-search save or working snapshot must survive the source transition"
+        );
+    }
+
+    #[test]
+    fn merge_diff_buttons_align_with_the_diff_toolbar() {
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            let ctx = egui::Context::default();
+            set_theme(&ctx, theme);
+            let mut app = VersusApp::default();
+            render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+            let labels = [
+                "Zoom out",
+                "Zoom in",
+                "Show only differences",
+                "Ignore whitespace",
+                "Ignore line endings",
+                "Previous difference",
+                "Next difference",
+            ];
+            let before: Vec<_> = labels
+                .iter()
+                .map(|label| ctx.read_response(egui::Id::new(*label)).unwrap().rect)
+                .collect();
+            app.set_workspace_merge(true);
+            app.interactive.as_mut().unwrap().set_run_diff(true);
+            render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+            render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+            for (label, expected) in labels.into_iter().zip(before) {
+                let actual = ctx.read_response(egui::Id::new(label)).unwrap().rect;
+                assert!(
+                    (actual.left() - expected.left()).abs() < 0.5
+                        && (actual.top() - expected.top()).abs() < 0.5,
+                    "{label}: Diff={expected:?}, Merge={actual:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn compare_icons_are_clickable_and_mode_buttons_support_keyboard_activation() {
         let ctx = egui::Context::default();
         let mut app = VersusApp::default();
         render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
-        let file = ctx
-            .read_response(egui::Id::new("File Compare"))
-            .unwrap()
-            .rect;
+        let file = ctx.read_response(egui::Id::new("File Diff")).unwrap().rect;
         let icon = egui::pos2(file.left() + 12.0, file.center().y);
         let output = render(&mut app, &ctx, vec![egui::Event::PointerMoved(icon)]);
         assert_eq!(
@@ -5245,6 +8126,168 @@ mod tests {
     }
 
     #[test]
+    fn legends_are_centered_below_both_viewers_with_icons_and_full_labels() {
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            for zoom in [1.0, 2.0] {
+                for (merge, run_diff) in [(false, false), (true, false), (true, true)] {
+                    let ctx = egui::Context::default();
+                    set_theme(&ctx, theme);
+                    ctx.set_zoom_factor(zoom);
+                    // Apply the pending scale before rendering fixed physical bounds.
+                    ctx.run_ui(egui::RawInput::default(), |_| {})
+                        .drop_without_applying_deltas();
+                    let mut app = VersusApp::default();
+                    app.set_workspace_merge(merge);
+                    if merge {
+                        app.interactive.as_mut().unwrap().set_run_diff(run_diff);
+                    }
+                    render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+                    let output = render(&mut app, &ctx, vec![]);
+                    let mut icons = DIFF_LEGEND_ICONS.to_vec();
+                    if merge {
+                        icons.push(StatusIcon::Conflict);
+                    }
+                    let mut bounds = Rect::NOTHING;
+                    for icon in icons {
+                        let rect = ctx
+                            .read_response(egui::Id::new(("legend", icon.label())))
+                            .unwrap()
+                            .rect;
+                        assert!(
+                            rect.top() >= app.pane_rects[0].bottom(),
+                            "legend above viewer: {rect:?}"
+                        );
+                        assert!(
+                            !text_positions(&output, icon.label()).is_empty(),
+                            "missing legend text {}",
+                            icon.label()
+                        );
+                        assert!(
+                            output
+                                .shapes
+                                .iter()
+                                .any(|shape| rect.intersects(shape.shape.visual_bounding_rect())
+                                    && !matches!(shape.shape, egui::Shape::Text(_))),
+                            "icon={} merge={merge} zoom={zoom} rect={rect:?}",
+                            icon.label()
+                        );
+                        bounds = bounds.union(rect);
+                    }
+                    let legend = ctx
+                        .read_response(egui::Id::new("workspace-legend"))
+                        .unwrap()
+                        .rect;
+                    assert!((legend.center().x - ctx.viewport_rect().center().x).abs() < 1.0);
+                    assert!(legend.contains_rect(bounds));
+                    assert!((bounds.center().x - legend.center().x).abs() < 1.0);
+                    assert!(bounds.bottom() <= ctx.viewport_rect().bottom());
+                    if merge {
+                        let save = text_centers(&output, "Save Both")[0];
+                        assert!((bounds.center().y - save.y).abs() < 1.0);
+                    }
+                    if merge && !run_diff {
+                        assert!(
+                            ctx.read_response(egui::Id::new(("legend", "Different")))
+                                .is_some()
+                        );
+                        assert!(text_positions(&output, "0 changes").is_empty());
+                    }
+                    output.drop_without_applying_deltas();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn footer_guidance_and_activity_share_the_legend_row_in_both_modes() {
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            for zoom in [1.0, 2.0] {
+                for merge in [false, true] {
+                    let ctx = egui::Context::default();
+                    set_theme(&ctx, theme);
+                    ctx.set_zoom_factor(zoom);
+                    // Apply the pending scale before rendering fixed physical bounds.
+                    ctx.run_ui(egui::RawInput::default(), |_| {})
+                        .drop_without_applying_deltas();
+                    let mut app = VersusApp::default();
+                    app.switch_comparison_mode(ComparisonMode::File);
+                    app.set_workspace_merge(merge);
+                    render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+                    let output = render(&mut app, &ctx, vec![]);
+                    let info = ctx
+                        .read_response(egui::Id::new("workspace-guidance"))
+                        .unwrap()
+                        .rect;
+                    let legend = ctx
+                        .read_response(egui::Id::new("workspace-legend"))
+                        .unwrap()
+                        .rect;
+                    let status = ctx
+                        .read_response(egui::Id::new("workspace-status"))
+                        .unwrap()
+                        .rect;
+                    let guidance = text_centers(&output, "Choose a file on each side to begin.")[0];
+                    assert!(
+                        info.contains(guidance),
+                        "merge={merge} zoom={zoom} info={info:?} label={guidance:?}"
+                    );
+                    assert!(info.right() <= legend.left());
+                    assert!(legend.right() <= status.left());
+                    assert!((info.center().y - legend.center().y).abs() < 1.0);
+                    assert!((status.center().y - legend.center().y).abs() < 1.0);
+                    if merge {
+                        let save = text_centers(&output, "Save Both")[0];
+                        assert!(status.right() < save.x);
+                        assert!((save.y - status.center().y).abs() < 1.0);
+                        assert!(!app.interactive.as_ref().unwrap().run_diff_enabled());
+                    }
+                    assert!(
+                        output.shapes.iter().all(|shape| match &shape.shape {
+                            egui::Shape::Text(text) => !status.contains(text.pos),
+                            _ => true,
+                        }),
+                        "idle status area should be empty"
+                    );
+                    output.drop_without_applying_deltas();
+                    let panes = app.pane_rects;
+                    let (_sender, receiver) = mpsc::channel();
+                    let progress = Arc::new(ComparisonProgress::default());
+                    progress.begin(ProgressStage::ComparingFiles, Some(100));
+                    progress.advance(25);
+                    let cancellation = Arc::new(AtomicBool::new(false));
+                    app.job = Some(ComparisonJob {
+                        receiver,
+                        cancellation,
+                        progress,
+                        started: Instant::now(),
+                        logged_progress: None,
+                        last_progress_log: Instant::now(),
+                        roots: ["left".into(), "right".into()],
+                    });
+                    let output = render(&mut app, &ctx, vec![]);
+                    assert_eq!(app.pane_rects, panes);
+                    let cancel = ctx
+                        .read_response(egui::Id::new("Cancel folder comparison"))
+                        .unwrap()
+                        .rect;
+                    assert!(
+                        status.contains_rect(cancel),
+                        "cancel={cancel:?}, status={status:?}"
+                    );
+                    assert!(output.shapes.iter().any(|shape| matches!(&shape.shape,
+                        egui::Shape::Text(text) if status.contains(text.pos)
+                            && text.galley.text().contains("25% complete"))));
+                    assert_eq!(
+                        text_positions(&output, "Choose a file on each side to begin.").len(),
+                        1
+                    );
+                    output.drop_without_applying_deltas();
+                }
+            }
+        }
+    }
+
+    #[test]
     fn new_comparison_button_clears_both_sides_and_preserves_theme() {
         let ctx = egui::Context::default();
         set_theme(&ctx, egui::Theme::Light);
@@ -5260,8 +8303,8 @@ mod tests {
             .unwrap()
             .rect;
         let legend = text_centers(&output, "Different  1")[0];
-        assert!(new.center().x > legend.x);
-        assert!((new.center().y - legend.y).abs() < 6.0);
+        assert!(new.center().y < app.pane_rects[0].top());
+        assert!(legend.y > app.pane_rects[0].bottom());
         output.drop_without_applying_deltas();
         click(&mut app, &ctx, new.center());
         assert_eq!(app.paths, [String::new(), String::new()]);
@@ -5269,7 +8312,7 @@ mod tests {
         assert!(app.file_view.is_none() && app.tree.is_none() && app.roots.is_none());
         assert_eq!(ctx.theme(), egui::Theme::Light);
         let output = render(&mut app, &ctx, vec![]);
-        assert_eq!(text_positions(&output, "File Compare").len(), 1);
+        assert_eq!(text_positions(&output, "File Diff").len(), 1);
         assert_eq!(text_positions(&output, "Choose a folder").len(), 2);
         output.drop_without_applying_deltas();
     }
@@ -5285,7 +8328,6 @@ mod tests {
         view.job = Some(FileJob {
             receiver: file_receiver,
             cancellation: file_flag.clone(),
-            started: Instant::now(),
             progress: Arc::new(ComparisonProgress::default()),
             ignore_line_endings: true,
         });
@@ -5365,7 +8407,7 @@ mod tests {
         let sender = attach_job(&mut app);
         let cancellation = app.job.as_ref().unwrap().cancellation.clone();
         let output = render(&mut app, &ctx, vec![]);
-        let file_button = text_centers(&output, "File Compare")[0];
+        let file_button = text_centers(&output, "File Diff")[0];
         output.drop_without_applying_deltas();
         click(&mut app, &ctx, file_button);
         assert_eq!(app.comparison_mode, ComparisonMode::File);
@@ -5448,7 +8490,7 @@ mod tests {
         settle_sources(&mut app, &ctx);
         let paths = app.paths.clone();
         let output = render(&mut app, &ctx, vec![]);
-        let file_button = text_centers(&output, "File Compare")[0];
+        let file_button = text_centers(&output, "File Diff")[0];
         output.drop_without_applying_deltas();
         click(&mut app, &ctx, file_button);
         assert_eq!(app.paths, paths);
@@ -5478,7 +8520,7 @@ mod tests {
         app.file_view = Some(loaded_file_view());
         let generation = app.scroll_generation;
         let output = render(&mut app, &ctx, vec![]);
-        let folder_button = text_centers(&output, "Folder Compare")[0];
+        let folder_button = text_centers(&output, "Folder Diff")[0];
         output.drop_without_applying_deltas();
         click(&mut app, &ctx, folder_button);
         assert!(app.file_view.is_none());
@@ -5644,7 +8686,6 @@ mod tests {
         view.job = Some(FileJob {
             receiver,
             cancellation: Arc::new(AtomicBool::new(false)),
-            started: Instant::now(),
             progress: Arc::new(ComparisonProgress::default()),
             ignore_line_endings: false,
         });
@@ -5676,7 +8717,6 @@ mod tests {
             view.job = Some(FileJob {
                 receiver,
                 cancellation: Arc::new(AtomicBool::new(cancelled)),
-                started: Instant::now(),
                 progress: Arc::new(ComparisonProgress::default()),
                 ignore_line_endings: false,
             });
@@ -5742,7 +8782,7 @@ mod tests {
         let mut view = loaded_file_view();
         view.comparison.as_mut().unwrap().rows = (1..=200)
             .map(|number| {
-                let changed = [20, 80, 150, 200].contains(&number);
+                let changed = [1, 20, 80, 150, 200].contains(&number);
                 test_file_row(
                     Some((number, format!("left line {number}"))),
                     Some((number, format!("right line {number}"))),
@@ -5757,6 +8797,7 @@ mod tests {
         update_visible_file_rows(&mut view, false);
         app.file_view = Some(view);
         for (action, number) in [
+            ("Next difference", 1),
             ("Next difference", 20),
             ("Next difference", 80),
             ("Next difference", 150),
@@ -5773,6 +8814,15 @@ mod tests {
             let left = text_positions(&output, &format!("left line {number}"))[0];
             let right = text_positions(&output, &format!("right line {number}"))[0];
             assert!((left.y - right.y).abs() < 0.1);
+            // Keep the preceding line visible, or clamp to the file start.
+            if number > 1 {
+                assert_eq!(
+                    text_positions(&output, &format!("left line {}", number - 1)).len(),
+                    1
+                );
+            } else {
+                assert_eq!(app.file_view.as_ref().unwrap().scroll_y, 0.0);
+            }
             assert_eq!(
                 first_positions,
                 vec![left],
@@ -5916,71 +8966,43 @@ mod tests {
     }
 
     #[test]
-    fn new_button_stays_with_the_legend_and_options_align_right() {
-        for theme in [egui::Theme::Light, egui::Theme::Dark] {
-            for size in [egui::vec2(900.0, 650.0), egui::vec2(1200.0, 800.0)] {
-                for file in [false, true] {
-                    let ctx = egui::Context::default();
-                    set_theme(&ctx, theme);
-                    let mut app = loaded_app();
-                    if file {
-                        app.file_view = Some(loaded_file_view());
-                    }
-                    let mut output = ctx.run_ui(
-                        egui::RawInput {
-                            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)),
-                            ..Default::default()
-                        },
-                        |ui| app.render(ui),
-                    );
-                    output.textures_delta.clear();
-                    let last_label = output
-                        .shapes
-                        .iter()
-                        .find_map(|shape| match &shape.shape {
-                            egui::Shape::Text(text)
-                                if text.galley.text().starts_with("Read error") =>
-                            {
-                                Some(Rect::from_min_size(text.pos, text.galley.size()))
-                            }
-                            _ => None,
-                        })
-                        .unwrap();
-                    let plus = ctx
-                        .read_response(egui::Id::new("New comparison"))
-                        .unwrap()
-                        .rect;
-                    let filter = ctx
-                        .read_response(egui::Id::new("Show only differences"))
-                        .unwrap()
-                        .rect;
-                    let next = ctx
-                        .read_response(egui::Id::new("Next difference"))
-                        .unwrap()
-                        .rect;
-                    assert!(plus.left() >= last_label.right());
-                    assert!(plus.left() < last_label.right() + 25.0);
-                    assert!(
-                        plus.right() + 30.0 < filter.left(),
-                        "plus {plus:?}, filter {filter:?}, size {size:?}, file {file}"
-                    );
-                    assert!((plus.center().y - filter.center().y).abs() < 1.0);
-                    assert!(next.right() <= size.x && next.right() > size.x - 30.0);
-                    assert!(app.ignore_line_endings);
-                    assert!(
-                        ctx.read_response(egui::Id::new("Ignore line endings"))
-                            .unwrap()
-                            .enabled()
-                    );
-                    output.drop_without_applying_deltas();
-                }
-            }
+    fn new_button_and_change_count_stay_left_and_options_align_right() {
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
+            let ctx = egui::Context::default();
+            set_theme(&ctx, theme);
+            let mut app = loaded_app();
+            let output = render(&mut app, &ctx, vec![]);
+            let new = ctx
+                .read_response(egui::Id::new("New comparison"))
+                .unwrap()
+                .rect;
+            let count = text_centers(&output, &app.navigation_status())[0];
+            let filter = ctx
+                .read_response(egui::Id::new("Show only differences"))
+                .unwrap()
+                .rect;
+            assert!(new.right() < count.x && count.x < filter.left());
+            assert!((new.center().y - count.y).abs() < 1.0);
+            assert!((new.center().y - filter.center().y).abs() < 1.0);
+            let legend = ctx
+                .read_response(egui::Id::new(("legend", "Different")))
+                .unwrap()
+                .rect;
+            assert!(legend.top() >= app.pane_rects[0].bottom());
+            assert!(
+                ctx.read_response(egui::Id::new("Next difference"))
+                    .unwrap()
+                    .rect
+                    .right()
+                    > 1170.0
+            );
+            output.drop_without_applying_deltas();
         }
     }
 
     #[test]
-    fn status_and_zoom_share_the_legend_row_without_moving_the_panes() {
-        for theme in [egui::Theme::Light, egui::Theme::Dark] {
+    fn bottom_right_status_and_progress_do_not_move_the_panes() {
+        for theme in [egui::Theme::Dark, egui::Theme::Light] {
             for size in [egui::vec2(900.0, 650.0), egui::vec2(1200.0, 800.0)] {
                 for file in [false, true] {
                     let ctx = egui::Context::default();
@@ -5990,125 +9012,80 @@ mod tests {
                         app.file_view = Some(loaded_file_view());
                     }
                     let draw = |app: &mut VersusApp| {
-                        ctx.run_ui(
+                        let mut output = ctx.run_ui(
                             egui::RawInput {
                                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, size)),
                                 ..Default::default()
                             },
                             |ui| app.render(ui),
-                        )
+                        );
+                        output.textures_delta.clear();
+                        output
                     };
                     let output = draw(&mut app);
                     let panes = app.pane_rects;
-                    let new = ctx
-                        .read_response(egui::Id::new("New comparison"))
+                    let status = ctx
+                        .read_response(egui::Id::new("workspace-status"))
                         .unwrap()
                         .rect;
-                    let zoom = text_centers(&output, "Zoom 100%")[0];
-                    let minus = ctx.read_response(egui::Id::new("Zoom out")).unwrap().rect;
-                    let plus = ctx.read_response(egui::Id::new("Zoom in")).unwrap().rect;
-                    let filter = ctx
-                        .read_response(egui::Id::new("Show only differences"))
+                    let info = ctx
+                        .read_response(egui::Id::new("workspace-guidance"))
                         .unwrap()
                         .rect;
-                    let status = text_centers(&output, &app.navigation_status())[0];
-                    assert!(new.right() < status.x && status.x < zoom.x);
-                    assert!(
-                        zoom.x < minus.left()
-                            && minus.right() < plus.left()
-                            && plus.right() < filter.left()
-                    );
-                    assert!((minus.center().y - plus.center().y).abs() < 0.1);
-                    assert!((zoom.y - filter.center().y).abs() < 1.0);
-                    assert!((status.y - filter.center().y).abs() < 1.0);
-                    assert!(filter.bottom() < panes[0].top());
+                    let status_text = text_centers(&output, &app.message)[0];
+                    assert!(status.top() >= panes[0].bottom());
+                    assert!((status.right() - (size.x - 10.0)).abs() < 1.0);
+                    assert!(info.contains(status_text));
+                    assert!(info.right() < status.left());
+                    assert!((status_text.y - status.center().y).abs() < 1.0);
                     output.drop_without_applying_deltas();
+                    let progress = Arc::new(ComparisonProgress::default());
+                    progress.begin(ProgressStage::ComparingFiles, Some(100));
+                    progress.advance(25);
+                    let cancellation = Arc::new(AtomicBool::new(false));
                     let (_folder_sender, _file_sender) = if file {
                         let (sender, receiver) = mpsc::channel();
-                        let progress = Arc::new(ComparisonProgress::default());
-                        progress.begin(ProgressStage::ComparingFiles, Some(100));
                         app.file_view.as_mut().unwrap().job = Some(FileJob {
                             receiver,
-                            cancellation: Arc::new(AtomicBool::new(false)),
-                            started: Instant::now(),
+                            cancellation: cancellation.clone(),
                             progress,
                             ignore_line_endings: true,
                         });
                         (None, Some(sender))
                     } else {
-                        let sender = attach_job(&mut app);
-                        app.job
-                            .as_ref()
-                            .unwrap()
-                            .progress
-                            .begin(ProgressStage::ComparingFiles, Some(100));
+                        let (sender, receiver) = mpsc::channel();
+                        app.job = Some(ComparisonJob {
+                            receiver,
+                            cancellation: cancellation.clone(),
+                            progress,
+                            started: Instant::now(),
+                            logged_progress: None,
+                            last_progress_log: Instant::now(),
+                            roots: app.roots.clone().unwrap(),
+                        });
                         (Some(sender), None)
                     };
                     let output = draw(&mut app);
                     assert_eq!(app.pane_rects, panes);
-                    let progress = output
-                        .shapes
-                        .iter()
-                        .find_map(|shape| match &shape.shape {
-                            egui::Shape::Text(text)
-                                if text.galley.text().starts_with("Comparing files…") =>
-                            {
-                                Some(Rect::from_min_size(text.pos, text.galley.size()))
-                            }
-                            _ => None,
-                        })
-                        .unwrap();
-                    assert!(progress.left() > new.right() && progress.right() < minus.left());
-                    assert!((progress.center().y - filter.center().y).abs() < 1.0);
-                    assert_eq!(
-                        ctx.read_response(egui::Id::new("Show only differences"))
-                            .unwrap()
-                            .rect,
-                        filter
-                    );
-                    if file {
-                        let cancel = ctx
-                            .read_response(egui::Id::new("Cancel file comparison"))
-                            .unwrap()
-                            .rect;
-                        assert!(cancel.left() >= new.right() && cancel.right() < minus.left());
-                        assert!((cancel.center().y - filter.center().y).abs() < 1.0);
-                    }
+                    assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text().contains("25% complete"))));
+                    let cancel = ctx
+                        .read_response(egui::Id::new(if file {
+                            "Cancel file comparison"
+                        } else {
+                            "Cancel folder comparison"
+                        }))
+                        .unwrap()
+                        .rect;
+                    assert!(status.contains_rect(cancel));
                     output.drop_without_applying_deltas();
                     app.job = None;
                     if let Some(view) = &mut app.file_view {
                         view.job = None;
                     }
-                    app.drop_message =
-                        Some(format!("Drop status: {}", "Long explanation ".repeat(20)));
+                    app.drop_message = Some("Drop status: invalid source".into());
                     let output = draw(&mut app);
                     assert_eq!(app.pane_rects, panes);
-                    let message = output
-                        .shapes
-                        .iter()
-                        .find_map(|shape| match &shape.shape {
-                            egui::Shape::Text(text)
-                                if text.galley.text().starts_with("Drop status:") =>
-                            {
-                                Some(Rect::from_min_size(text.pos, text.galley.size()))
-                            }
-                            _ => None,
-                        })
-                        .unwrap();
-                    assert!(message.left() > new.right() && message.right() < minus.left());
-                    assert!((message.center().y - filter.center().y).abs() < 1.0);
-                    output.drop_without_applying_deltas();
-                    app.drop_message = None;
-                    if let Some(view) = &mut app.file_view {
-                        view.error = Some("Comparison could not be refreshed".into());
-                    } else {
-                        app.error = Some("Comparison could not be refreshed".into());
-                    }
-                    let output = draw(&mut app);
-                    assert_eq!(app.pane_rects, panes);
-                    let error = text_centers(&output, "Comparison could not be refreshed")[0];
-                    assert!(error.x > new.right() && error.x < zoom.x);
-                    assert!((error.y - filter.center().y).abs() < 1.0);
+                    assert!(status.contains(text_centers(&output, "1 error")[0]));
                     output.drop_without_applying_deltas();
                 }
             }
@@ -6126,7 +9103,6 @@ mod tests {
         view.job = Some(FileJob {
             receiver,
             cancellation: cancellation.clone(),
-            started: Instant::now(),
             progress: Arc::new(ComparisonProgress::default()),
             ignore_line_endings: true,
         });
@@ -6829,7 +9805,7 @@ mod tests {
                     Some(egui::Id::new(if backwards {
                         "Browse right folder"
                     } else {
-                        "Folder Compare"
+                        "Folder Diff"
                     }))
                 );
                 assert!(app.tree_keyboard_focus.is_none());
@@ -7477,32 +10453,25 @@ mod tests {
     }
 
     #[test]
-    fn progress_displays_measured_stage_estimates_and_hides_unknown_estimates() {
+    fn progress_displays_completion_without_time_estimates() {
         let ctx = egui::Context::default();
         let mut app = loaded_app();
         let _sender = attach_job(&mut app);
-        let job = app.job.as_mut().unwrap();
-        job.started = Instant::now() - Duration::from_secs(3);
+        let job = app.job.as_ref().unwrap();
         job.progress.begin(ProgressStage::ComparingFiles, Some(100));
         job.progress.advance(25);
-        let snapshot = job.progress.snapshot();
-        let now = snapshot.started + Duration::from_secs(2);
-        let text = progress_text(snapshot, job.started, now);
-        assert!(text.contains("25 / 100"));
-        assert!(text.contains("~6s left in this stage"));
+        let text = progress_text(job.progress.snapshot());
+        assert_eq!(text, "Comparing files… 25% complete");
         let output = render(&mut app, &ctx, vec![]);
-        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text().starts_with("Comparing files…"))));
+        assert!(output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text().contains("25% complete"))));
         output.drop_without_applying_deltas();
-        let job = app.job.as_mut().unwrap();
+        let job = app.job.as_ref().unwrap();
         job.progress.begin(ProgressStage::Scanning, None);
-        let snapshot = job.progress.snapshot();
-        let text = progress_text(
-            snapshot,
-            job.started,
-            snapshot.started + Duration::from_secs(2),
+        job.progress.advance(50);
+        assert_eq!(
+            progress_text(job.progress.snapshot()),
+            "Scanning folders… 50 entries found"
         );
-        assert!(text.contains("entries found"));
-        assert!(!text.contains("left in this stage"));
     }
 
     #[test]
@@ -7722,6 +10691,10 @@ mod tests {
         assert_eq!(
             text_positions(&output, "No recent file comparisons.").len(),
             1
+        );
+        assert!(
+            text_positions(&output, "No recent file comparisons.")[0].x
+                > text_positions(&output, "Recently compared")[0].x + 6.0
         );
         assert!(text_positions(&output, "/left/folder").is_empty());
         assert!(text_positions(&output, "/right/folder").is_empty());

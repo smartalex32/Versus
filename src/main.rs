@@ -2,6 +2,7 @@
 
 mod app;
 mod cli;
+mod diagnostics;
 mod logo;
 #[cfg(windows)]
 mod native_drop;
@@ -11,6 +12,7 @@ mod selection;
 fn main() -> std::process::ExitCode {
     let launch = match cli::parse(std::env::args_os().skip(1)) {
         Ok(cli::Command::Open(launch)) => launch,
+        Ok(cli::Command::Merge(request)) => return run_merge(request),
         Ok(cli::Command::Help) => {
             attach_parent_console();
             print!("{}", cli::HELP);
@@ -27,7 +29,17 @@ fn main() -> std::process::ExitCode {
             return std::process::ExitCode::from(2);
         }
     };
-    match run(launch) {
+    let (log_guard, logging_error) = match diagnostics::initialize() {
+        Ok(guard) => (Some(guard), None),
+        Err(error) => (None, Some(error)),
+    };
+    let result = run(launch, logging_error);
+    if let Err(error) = &result {
+        diagnostics::error(format!("Application failed: {error}"));
+    }
+    diagnostics::info("Application closed");
+    drop(log_guard);
+    match result {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
             attach_parent_console();
@@ -37,7 +49,46 @@ fn main() -> std::process::ExitCode {
     }
 }
 
-fn run(launch: Option<cli::LaunchRequest>) -> eframe::Result {
+fn run_merge(request: cli::MergeRequest) -> std::process::ExitCode {
+    use versus::core::{MergeHunkKind, SaveOptions, merge_three_way, save_text_safely};
+
+    let merge = match merge_three_way(&request.base, &request.ours, &request.theirs) {
+        Ok(merge) => merge,
+        Err(error) => {
+            attach_parent_console();
+            eprintln!("Versus: {error}");
+            return std::process::ExitCode::from(2);
+        }
+    };
+    if let Err(error) = save_text_safely(
+        &request.output,
+        &merge.merged,
+        &SaveOptions {
+            overwrite: request.overwrite,
+            line_ending: versus::core::LineEnding::Preserve,
+        },
+    ) {
+        attach_parent_console();
+        eprintln!("Versus: {error}");
+        return std::process::ExitCode::from(2);
+    }
+    if merge
+        .hunks
+        .iter()
+        .any(|hunk| hunk.kind == MergeHunkKind::Conflict)
+    {
+        attach_parent_console();
+        eprintln!(
+            "Versus: merge completed with conflicts; resolve markers in {}",
+            request.output.display()
+        );
+        std::process::ExitCode::from(1)
+    } else {
+        std::process::ExitCode::SUCCESS
+    }
+}
+
+fn run(launch: Option<cli::LaunchRequest>, logging_error: Option<String>) -> eframe::Result {
     let viewport = eframe::egui::ViewportBuilder::default()
         .with_title("Versus — Compare")
         .with_icon(logo::themed_icon(true))
@@ -67,7 +118,13 @@ fn run(launch: Option<cli::LaunchRequest>) -> eframe::Result {
         options,
         // Keep this process alive for the window's lifetime. Git may remove
         // temporary inputs as soon as its diff-tool child exits.
-        Box::new(move |cc| Ok(Box::new(app::VersusApp::new(cc, launch)))),
+        Box::new(move |cc| {
+            let mut app = app::VersusApp::new(cc, launch);
+            if let Some(error) = logging_error {
+                app.report_startup_error(error);
+            }
+            Ok(Box::new(app))
+        }),
     )
 }
 

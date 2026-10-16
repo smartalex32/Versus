@@ -47,10 +47,49 @@ pub fn compare_three_way(
         &read_text(right.as_ref(), DEFAULT_TEXT_SIZE_LIMIT)?,
     )
 }
+
+/// Reads bounded UTF-8 inputs and performs a conventional CLI-style three-way
+/// merge. Conflict markers use `OURS` and `THEIRS`.
+pub fn merge_three_way(
+    base: impl AsRef<Path>,
+    ours: impl AsRef<Path>,
+    theirs: impl AsRef<Path>,
+) -> Result<ThreeWayDiff, CompareError> {
+    merge_three_way_text(
+        &read_text(base.as_ref(), DEFAULT_TEXT_SIZE_LIMIT)?,
+        &read_text(ours.as_ref(), DEFAULT_TEXT_SIZE_LIMIT)?,
+        &read_text(theirs.as_ref(), DEFAULT_TEXT_SIZE_LIMIT)?,
+    )
+}
 pub fn compare_three_way_text(
     base: &str,
     left: &str,
     right: &str,
+) -> Result<ThreeWayDiff, CompareError> {
+    compare_three_way_text_with_labels(base, left, right, "LEFT", "RIGHT")
+}
+
+/// Performs a conventional three-way merge with caller-supplied conflict labels.
+///
+/// This is intentionally independent of the desktop editing workflow.  In
+/// particular, it combines edits relative to the base instead of making either
+/// side the preferred result.  The CLI uses the conventional `OURS` and
+/// `THEIRS` labels while the legacy comparison API keeps its `LEFT` and `RIGHT`
+/// labels.
+pub fn merge_three_way_text(
+    base: &str,
+    ours: &str,
+    theirs: &str,
+) -> Result<ThreeWayDiff, CompareError> {
+    compare_three_way_text_with_labels(base, ours, theirs, "OURS", "THEIRS")
+}
+
+fn compare_three_way_text_with_labels(
+    base: &str,
+    left: &str,
+    right: &str,
+    left_label: &str,
+    right_label: &str,
 ) -> Result<ThreeWayDiff, CompareError> {
     let base_lines = lines(base);
     let left_lines = lines(left);
@@ -72,51 +111,67 @@ pub fn compare_three_way_text(
             .min()
             .unwrap();
         output.extend_from_slice(&base_lines[index..start]);
-        let left_active = next_l.is_some_and(|e| e.range.start == start);
-        let concurrent = match (next_l, next_r) {
-            (Some(a), Some(b)) => {
-                // An insertion at the same anchor as a replacement has no stable
-                // independent ordering. Keep both edits in one conflict region.
-                (a.range.start == b.range.start && (a.range.is_empty() || b.range.is_empty()))
-                    || (a.range.start < b.range.end && b.range.start < a.range.end)
-            }
-            _ => false,
+        let left_active = next_l.is_some_and(|edit| edit.range.start == start);
+        let (seed, other) = if left_active {
+            (next_l.unwrap(), next_r)
+        } else {
+            (next_r.unwrap(), next_l)
         };
+        let concurrent = other.is_some_and(|edit| edits_intersect_for_merge(seed, edit));
+
         if concurrent {
-            let le = next_l.unwrap();
-            let re = next_r.unwrap();
-            let end = le.range.end.max(re.range.end);
-            let kind = if le.range == re.range && le.replacement == re.replacement {
+            // An overlap can span more than one edit on either side.  Close over
+            // all cross-side overlaps before rendering the region; consuming only
+            // the first pair loses changes after an overlapping deletion.
+            let (left_count, right_count) =
+                overlapping_edit_counts(&left_edits[l..], &right_edits[r..], left_active);
+            let left_group = &left_edits[l..l + left_count];
+            let right_group = &right_edits[r..r + right_count];
+            let start = left_group
+                .iter()
+                .chain(right_group)
+                .map(|edit| edit.range.start)
+                .min()
+                .expect("overlapping merge group has an edit");
+            let end = left_group
+                .iter()
+                .chain(right_group)
+                .map(|edit| edit.range.end)
+                .max()
+                .expect("overlapping merge group has an edit");
+            let left_replacement = render_edits(&base_lines, start, end, left_group);
+            let right_replacement = render_edits(&base_lines, start, end, right_group);
+            let kind = if left_replacement == right_replacement {
                 MergeHunkKind::Identical
             } else {
                 MergeHunkKind::Conflict
             };
             if kind == MergeHunkKind::Conflict {
-                output.push("<<<<<<< LEFT".into());
-                output.extend(le.replacement.clone());
+                output.push(format!("<<<<<<< {left_label}"));
+                output.extend(left_replacement.clone());
                 output.push("=======".into());
-                output.extend(re.replacement.clone());
-                output.push(">>>>>>> RIGHT".into());
+                output.extend(right_replacement.clone());
+                output.push(format!(">>>>>>> {right_label}"));
             } else {
-                output.extend(le.replacement.clone());
+                output.extend(left_replacement.clone());
             }
             let merged_start = output
                 .len()
                 .saturating_sub(if kind == MergeHunkKind::Conflict {
-                    le.replacement.len() + re.replacement.len() + 3
+                    left_replacement.len() + right_replacement.len() + 3
                 } else {
-                    le.replacement.len()
+                    left_replacement.len()
                 });
             hunks.push(MergeHunk {
                 base_range: start..end,
                 merged_range: merged_start..output.len(),
-                left: le.replacement.clone(),
-                right: re.replacement.clone(),
+                left: left_replacement,
+                right: right_replacement,
                 kind,
             });
             index = end;
-            l += 1;
-            r += 1;
+            l += left_count;
+            r += right_count;
         } else if left_active {
             let e = next_l.unwrap();
             let merged_start = output.len();
@@ -153,6 +208,64 @@ pub fn compare_three_way_text(
         hunks,
         merged: output.join("\n"),
     })
+}
+
+fn edits_intersect_for_merge(left: &Edit, right: &Edit) -> bool {
+    match (left.range.is_empty(), right.range.is_empty()) {
+        (true, true) => left.range.start == right.range.start,
+        // An insertion at either boundary of a replacement is ambiguous: both
+        // valid orders change the result.  Treat it as a conventional conflict.
+        (true, false) => {
+            right.range.start <= left.range.start && left.range.start <= right.range.end
+        }
+        (false, true) => {
+            left.range.start <= right.range.start && right.range.start <= left.range.end
+        }
+        (false, false) => left.range.start < right.range.end && right.range.start < left.range.end,
+    }
+}
+
+/// Counts the leading edits on each side that form one connected overlap group.
+/// Edits on an individual side never overlap, so every selected edit forms a
+/// prefix of that side's remaining list.
+fn overlapping_edit_counts(left: &[Edit], right: &[Edit], seed_is_left: bool) -> (usize, usize) {
+    let mut left_count = usize::from(seed_is_left);
+    let mut right_count = usize::from(!seed_is_left);
+    loop {
+        let mut grew = false;
+        while left_count < left.len()
+            && right[..right_count]
+                .iter()
+                .any(|other| edits_intersect_for_merge(&left[left_count], other))
+        {
+            left_count += 1;
+            grew = true;
+        }
+        while right_count < right.len()
+            && left[..left_count]
+                .iter()
+                .any(|other| edits_intersect_for_merge(other, &right[right_count]))
+        {
+            right_count += 1;
+            grew = true;
+        }
+        if !grew {
+            return (left_count, right_count);
+        }
+    }
+}
+
+fn render_edits(base: &[String], start: usize, end: usize, edits: &[Edit]) -> Vec<String> {
+    let mut rendered = Vec::new();
+    let mut cursor = start;
+    for edit in edits {
+        debug_assert!(cursor <= edit.range.start);
+        rendered.extend_from_slice(&base[cursor..edit.range.start]);
+        rendered.extend(edit.replacement.clone());
+        cursor = edit.range.end;
+    }
+    rendered.extend_from_slice(&base[cursor..end]);
+    rendered
 }
 /// Compares editable buffers. Merge semantics normalize CRLF/LF; whitespace options only
 /// affect 2-way display, because discarding whitespace during a merge would lose source data.
@@ -240,4 +353,32 @@ fn edits(base: &[String], side: &[String]) -> Vec<Edit> {
         result.push(edit);
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn closes_over_multiple_overlapping_edits() {
+        let merged = merge_three_way_text("a\nb\nc\nd\n", "a\n", "a\nB\nc\nD\n").unwrap();
+        assert_eq!(merged.hunks.len(), 1);
+        assert_eq!(merged.hunks[0].kind, MergeHunkKind::Conflict);
+        assert_eq!(
+            merged.merged,
+            "a\n<<<<<<< OURS\n=======\nB\nc\nD\n>>>>>>> THEIRS\n"
+        );
+    }
+
+    #[test]
+    fn preserves_disjoint_edits_from_both_sides() {
+        let merged = merge_three_way_text("a\nb\nc\n", "a\nours\nc\n", "a\nb\ntheirs\n").unwrap();
+        assert_eq!(merged.merged, "a\nours\ntheirs\n");
+        assert!(
+            merged
+                .hunks
+                .iter()
+                .all(|hunk| hunk.kind != MergeHunkKind::Conflict)
+        );
+    }
 }

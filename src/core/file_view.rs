@@ -147,10 +147,51 @@ fn load_file_comparison_with_timeout(
         (OptionalText::Text(left), OptionalText::Text(right)) => (left, right),
     };
 
-    let left_lines = lines_for_view(&left);
-    let right_lines = lines_for_view(&right);
-    drop(left);
-    drop(right);
+    compare_loaded_text_with_timeout([&left, &right], cancellation, options, [&[], &[]], timeout)
+}
+
+/// Compare already loaded working copies without any filesystem reads.
+/// Ignored ranges are omitted independently and returned line numbers retain
+/// their positions in the original working copies.
+pub fn compare_loaded_text(
+    text: [&str; 2],
+    cancellation: &AtomicBool,
+    options: &FileViewOptions,
+    ignored: [&[Range<usize>]; 2],
+) -> Result<Option<FileComparison>, CompareError> {
+    compare_loaded_text_with_timeout(text, cancellation, options, ignored, DIFF_TIMEOUT)
+}
+
+fn compare_loaded_text_with_timeout(
+    text: [&str; 2],
+    cancellation: &AtomicBool,
+    options: &FileViewOptions,
+    ignored: [&[Range<usize>]; 2],
+    timeout: Duration,
+) -> Result<Option<FileComparison>, CompareError> {
+    if cancelled(cancellation) {
+        return Ok(None);
+    }
+    let left_lines = lines_for_view(text[0]);
+    let right_lines = lines_for_view(text[1]);
+    let maps: [Vec<usize>; 2] = std::array::from_fn(|side| {
+        let count = if side == 0 {
+            left_lines.len()
+        } else {
+            right_lines.len()
+        };
+        (0..count)
+            .filter(|line| !ignored[side].iter().any(|range| range.contains(line)))
+            .collect()
+    });
+    let left_lines: Vec<_> = maps[0]
+        .iter()
+        .map(|index| left_lines[*index].clone())
+        .collect();
+    let right_lines: Vec<_> = maps[1]
+        .iter()
+        .map(|index| right_lines[*index].clone())
+        .collect();
     let left_compare = comparable_lines(&left_lines, options);
     let right_compare = comparable_lines(&right_lines, options);
     let left_refs: Vec<_> = left_compare.iter().map(String::as_str).collect();
@@ -238,6 +279,14 @@ fn load_file_comparison_with_timeout(
         return Ok(None);
     }
     finish_progress(options);
+    for row in &mut rows {
+        if let Some((number, _)) = &mut row.left {
+            *number = maps[0][*number - 1] + 1;
+        }
+        if let Some((number, _)) = &mut row.right {
+            *number = maps[1][*number - 1] + 1;
+        }
+    }
     Ok(Some(FileComparison {
         rows,
         message: None,

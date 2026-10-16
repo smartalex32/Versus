@@ -7,6 +7,8 @@ use std::{
 };
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LineEnding {
+    /// Retain the buffer exactly as it was edited, including mixed line endings.
+    Preserve,
     Lf,
     Crlf,
 }
@@ -49,6 +51,7 @@ pub fn save_text_safely(
     let temporary = parent.join(format!(".{name}.versus-{stamp}.tmp"));
     let backup = parent.join(format!(".{name}.versus-{stamp}.backup"));
     let rendered = match options.line_ending {
+        LineEnding::Preserve => contents.to_owned(),
         LineEnding::Lf => contents.replace("\r\n", "\n"),
         LineEnding::Crlf => contents.replace("\r\n", "\n").replace('\n', "\r\n"),
     };

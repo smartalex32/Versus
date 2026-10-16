@@ -952,6 +952,10 @@ pub struct TextCursorStyle {
     /// The color and width of the text cursor
     pub stroke: Stroke,
 
+    /// Optional visual height limit, measured from the top of the cursor.
+    /// Does not change text layout, selections, or scrolling geometry.
+    pub max_height: Option<f32>,
+
     /// Show where the text cursor would be if you clicked?
     pub preview: bool,
 
@@ -969,6 +973,7 @@ impl Default for TextCursorStyle {
     fn default() -> Self {
         Self {
             stroke: Stroke::new(2.0, Color32::from_rgb(192, 222, 255)), // Dark mode
+            max_height: None,
             preview: false,
             blink: true,
             on_duration: 0.5,
@@ -2593,6 +2598,7 @@ impl TextCursorStyle {
     fn ui(&mut self, ui: &mut Ui) {
         let Self {
             stroke,
+            max_height: _,
             preview,
             blink,
             on_duration,

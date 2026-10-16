@@ -1,19 +1,135 @@
 # Versus
 
-Versus is an offline engineering workspace for comparing two files or two folders
-in side-by-side panes. It uses operating-system filesystem paths, so
+Versus is an offline engineering workspace for comparing files or folders and
+merging text files. It uses operating-system filesystem paths, so
 mapped drives and UNC paths on Windows and mounted network filesystems on Linux
 work through the same local APIs as other paths. Versus does not implement network
 authentication or make outbound network requests at runtime.
 
 ## Use
 
-Choose **Folder Compare** or **File Compare** in the center of the header. Each
-button includes a folder or file icon. The active mode is highlighted, with Folder
-Compare selected initially. Clicking a path
-area or browse icon in either pane opens that mode's native folder or file picker
-directly. Selecting the second source starts comparison automatically. File
-Compare opens the line comparison without a Back button.
+Choose **Folder Diff** or **File Diff** in the centered header to start a
+fresh workspace. The adjacent **Diff / Merge** header toggle switches the current
+workspace without reopening sources; the centered buttons become **Folder Merge**
+and **File Merge** when Merge is selected. Diff is the default. Merge turns
+the existing two panes into independent editable working copies; there is no third
+Base file. Changes remain in memory until you explicitly save. Switching between
+Diff and Merge preserves the open files and edits.
+
+Merge does not need the diff engine. **Run Diff** is available in Merge mode and
+starts off. While it is off, Versus does not compare the open files; edits,
+automatic chunks and inline line/chunk transfers remain available. Turn it on for
+difference highlighting and navigation within the editors. Diff work is debounced
+for the open pair and can be cancelled. Turning
+Run Diff off cancels pending work and clears highlighting.
+Typing and Undo/Redo keep the filtered view and existing diff decorations visible
+while updated comparison results are calculated in the background.
+The three comparison options (Show only differences, Ignore whitespace, Ignore
+line endings) have separate settings in Diff and Merge. Enabling Run Diff for the
+first time defaults all three to on; later toggles preserve your Merge choices
+without changing Diff preferences. Show only differences hides unchanged lines
+without removing them from the working copies. Turn the filter off to edit a
+selection that spans hidden lines.
+
+Run Diff sits in the header beside the theme button; when enabled, the refresh
+icon appears immediately to its right. Merge keeps New comparison (+) on the left
+of the button line, followed by a magnifying-glass **Find and Replace** icon in
+folder workspaces. Zoom remains on the right. With Run Diff enabled, the comparison options appear immediately to
+the right of zoom, followed by difference navigation. A change count appears
+beside the left-side actions, using the same style as Diff. The legends are
+centered below the panes with full icons and text, including Conflict in Merge.
+The full legend stays visible regardless of Run Diff. It shares the footer with
+**Save Both** and **Unsaved Changes** in Merge; entries wrap within that footer
+when zoom or window width requires it. Turning Run Diff off hides the diff
+controls and change count while retaining the Merge settings. Each file and folder
+pane loads, expands, and scrolls independently; a single selected source opens immediately. Transfer
+controls and file comparison assistance become available once both files are open.
+
+With Run Diff enabled, Merge uses File Diff's row colors, status icons, changed-text
+highlights, and line-ending badges. Transfer arrows are drawn toward the destination and use the source side's color
+and sit in two bordered tracks between the file panes: left-to-right copies in
+the left track, right-to-left copies in the right track. The line-expansion
+buttons stay inside the file panes, separated from highlighted text.
+Difference navigation subtly highlights the current changed line. One-sided
+changes move only their own pane; paired changes scroll and highlight both
+corresponding lines.
+Switching to File Diff keeps one path header per side and provides Refresh, with
+the same aligned comparison rows as a new File Diff. Edits and undo history remain
+available when returning to Merge; Refresh compares the retained working copies.
+
+Both panes show editable text, line numbers, and separate unsaved status. Use the
+center-track arrows to copy a chunk to the other pane's cursor without changing
+the source. Expand a chunk with **+** to copy individual lines. Transfers and free
+text edits are undoable. Versus groups recognized code blocks and blank-line
+paragraphs automatically; chunk detection uses heuristics rather than a full
+language parser. The editors fill their panes without a lower management panel.
+The centered toolbar has **Accept All Left**, **Accept All Right**, **Undo**, and
+**Redo** icons with tooltips. Accept All copies that side into the other as one
+undoable operation. Automatic conflict merging belongs to the separate three-way
+CLI workflow. Ctrl/Command+Z and Ctrl+Y or Command+Shift+Z work while editing.
+
+Use the **Save Left** or **Save Right** disk icon immediately to the right of
+each pane’s Browse button to preview and save that file. **Save Both** in the
+bottom row saves pending changes on both sides, including replacements in unopened
+folder files. When only the open files have changes, it uses the usual save preview.
+Versus checks that the files have not changed on disk since they were opened before
+replacing them. Interactive text files are limited
+to 32 MiB. UTF-8 with or without a BOM and UTF-16 little- and big-endian text retain
+their encoding; original line endings are preserved where possible. Cancelled or
+failed saves leave the working copies intact. Unsaved changes are marked
+independently for each pane. The footer's **Unsaved Changes** indicator sits to the
+left of **Save Both**; normal guidance remains on the bottom left.
+
+For folder pairs, Merge opens a lazy browser that enumerates directory entries and
+basic metadata as folders are expanded. It does not compare file contents unless
+Run Diff is enabled; files load when opened. Double-clicking a file opens only
+that pane; the other pane can keep browsing a folder or editing a file. Each
+file pane has a back arrow before its LEFT/RIGHT label to return to its own tree.
+Open files independently on each side, including files with different names or
+relative paths. Each file pair keeps its own undo history as you navigate or pair files again. Folder-wide **Find and
+Replace** searches both trees, with plain text or regular
+expressions, case and whole-word options. Results include file and line, and
+replacements apply immediately as undoable batches to the working copies.
+Batch undo is atomic across participating files; undo newer edits in those files
+first. Binary, non-text, and files over 32 MiB are skipped.
+Saving those changes remains explicit and uses the external-change check.
+Find and Replace opens a compact dialog centered on the app; click outside,
+press Escape, or use its close icon to dismiss it. Reopening immediately reruns
+the current search, including changes made while it was closed. Unsaved edits take
+precedence over disk content. The larger fields use muted,
+italic placeholders. Choose **LEFT**, **RIGHT**, or **BOTH**; the side colors match
+the pane labels. **Match Case**, **Match Whole Word**, and **Use Regular Expression**
+are tooltip-equipped VS Code icons inside the Find field. Search starts after
+250 ms without typing; button actions start immediately. Every search collects
+both sides, and matches appear progressively in the right results
+panel, which fills the right half by default with a centered empty-state hint.
+A neutral **LEFT (X) / RIGHT (X)** toggle spans that panel’s width and shows each
+side's included match count. File names remain above their matches without a
+separate matches/files summary. Choosing **LEFT** or
+**RIGHT** switches the results to that side, disables the opposite toggle, and
+limits replacement to the chosen side. **BOTH** enables both toggles. Scope changes
+reuse cached results immediately without another search. Rows show the line
+number and matching text; hover over a row and use its **X** to exclude it from
+replacement.
+Undo, Redo, and Refresh sit beside the scope controls, with search status below.
+**Refresh** repopulates excluded results and rereads files to include external
+changes, while preserving unsaved working copies. The **Replace Next** and
+**Replace All** icons beside the Replace field immediately replace the next
+included match or all included matches in working copies, with no preview or Apply
+step. The modal has no save controls or unsaved-change text; close it and save
+from the main workspace. Each action is one undoable batch. Remaining original
+matches advance after each action, so repeated Replace Next actions stay accurate
+when replacement lengths change.
+Undo, Redo, Refresh, and search-option buttons start any needed search immediately;
+the typing delay applies only to edits in Find.
+With Run Diff enabled, folder statuses include staged working copies. The up/down
+controls jump to changed files and reveal their parent folders.
+
+Each comparison mode has a folder or file icon and the active mode is highlighted,
+with Folder Diff selected initially. Clicking a path area or browse icon in
+either pane opens that mode's native folder or file picker directly. Selecting the
+second source starts comparison automatically in Diff mode. File Diff opens
+the line comparison without a Back button.
 
 The **Recently compared** list appears when Versus opens and after **New
 comparison**. Click a file or folder pair to recompare it without browsing again.
@@ -23,15 +139,18 @@ The 20 most recent pairs are saved locally per user, newest first; reopening a
 pair moves it to the top. Paths and comparison type are saved, never file contents.
 Unavailable or changed sources show an error and can be selected again.
 
-Changing modes starts a fresh comparison and cancels pending work. Clicking the
-active mode preserves the current comparison; clicking Folder Compare while
-viewing a file from its tree returns to that tree. The **+** button at the right
-of the legend has the tooltip **New comparison** and clears both selections,
-results, and pending work while keeping the selected mode and theme.
+Choosing another Folder/File header option starts a fresh comparison and cancels
+pending work. Clicking the active mode preserves the current comparison; clicking
+the Folder button while viewing a file from its tree returns to that tree. The **+**
+button on the left of the toolbar has the tooltip **New comparison** and clears both selections,
+results, and pending work while keeping the selected Folder/File comparison mode
+and theme. Switching between Diff and Merge preserves the current session.
 
 Both pane headers remain available for browsing in directly selected file views.
-Folder paths wrap to show the full path; file paths use a leading ellipsis with
-the full path on hover. LEFT/RIGHT and browse stay centered beside the path.
+Merge paths stay on one line and trim the beginning with a leading ellipsis when
+needed, keeping the folder or file name visible. The full path appears on hover.
+Diff folder paths wrap; Diff file paths use the same leading ellipsis. LEFT/RIGHT
+and browse stay centered beside the path.
 The refresh icon at the upper right reloads the file comparison you are viewing,
 including files opened from a folder tree. In the folder view it compares the same
 folders again while preserving selection, expansion, and scroll position; a
@@ -58,7 +177,7 @@ and Home/End.
 - Red warning triangle: a filesystem read error. Hover for details.
 
 Identical files, folders, and lines use ordinary gray text without a status icon
-or a legend entry. The legend sits above the two panes; the same icons replace
+or a legend entry. The legend is centered at the bottom with icons and text; the same icons replace
 status words in each compact tree row. File sizes and recursive folder totals appear beside the status
 icon, independently for each side, using binary units (KiB, MiB, and so on). Sizes
 reflect filesystem metadata collected during the scan. Folder
@@ -66,22 +185,34 @@ totals count regular-file bytes and exclude symlink targets. Empty folders show
 zero bytes; unknown sizes or incomplete totals show a dash. Hover for status and
 error details. The cursor becomes a pointer over files and folders.
 
-Comparison runs in the background with refresh and cancel icons in the header.
+Comparison runs in the background with a refresh icon in the header and
+cancellation beside progress.
 Files are compared by content, not timestamps. Symlinks are compared by their
 target paths rather than target contents and are never recursively followed.
 This keeps traversal within the selected roots and avoids loops or repeated
 comparisons when links point to ancestors or outside folders. Empty folders are
 included. Changing a path clears the prior result so it cannot be mistaken for
 the new selection.
-The status area immediately to the right of the legend shows change position,
-loading progress, or errors without adding another row above the panes.
-Long status messages are shortened on screen; hover for the complete text.
-While loading, it shows the current stage and elapsed time.
-Measured stages also show progress and an approximate time remaining for that
-stage. Folder discovery and line alignment have no reliable total, so they show
-activity without a time estimate. File loading can also be cancelled.
+The footer keeps updating guidance and completed-action messages on the left,
+with the legend in the middle. Action progress appears only while work is running,
+to the right of the legend in Diff and immediately left of **Save Both** in Merge.
+Errors appear in that area as **1 error** or **N errors**; hover the summary to
+read the details. Moving or clicking inside either pane dismisses the errors.
 
-The **+** button stays beside the legend. The other icon controls at the far right
+Desktop diagnostics are written to **versus.log** beside the executable (beside
+the outer AppImage on Linux). The log records comparison progress, folder-cache
+timing, paths, and failures without recording compared file contents. It rotates
+at 5 MiB and keeps **versus.log.1** as the previous log. If that folder is not
+writable, the status error area reports the logging failure. Comparing a folder
+with itself is supported and finishes with zero changes; worker failures stop
+the operation and appear in the same error area.
+Long messages are shortened on screen; hover for the complete text. Measured
+stages show percentage complete. Folder discovery and line alignment have no
+reliable total and show activity instead. Comparisons can be cancelled beside the
+progress status.
+The change count and current difference position stay beside + in the toolbar.
+
+The **+** button stays on the left of the toolbar. The other icon controls at the far right
 apply to both comparison views:
 
 - **Show only differences** hides identical lines and tree entries. File line
@@ -111,9 +242,10 @@ dashed outlines and drop hints. A blue border and drop label
 identify LEFT or RIGHT above the pane contents, including the empty chooser view.
 Windows follows the live cursor during native drags even when ordinary pointer
 events are unavailable. The source type
-selects the corresponding view automatically; mixed file/folder pairs show why
-they cannot compare. A drop in a file opened from the folder tree keeps the other
-displayed file and starts a direct comparison. Multiple-item drops are rejected
+selects the corresponding view automatically. Diff explains why mixed file/folder
+pairs cannot compare; Merge opens each source independently. A drop in a file
+opened from the folder tree keeps the other displayed side. In Diff, it starts
+a direct comparison. Multiple-item drops are rejected
 without replacing the current selection.
 On Linux, Versus uses X11 or XWayland when `DISPLAY` is available so native
 file drops work. Pure Wayland sessions retain browse selection; the windowing
@@ -133,24 +265,24 @@ opposite an empty placeholder, and following code aligns with its commented-out
 version on the right while the comment text remains highlighted as a change.
 Similarity alignment uses bounded extra work; very large changed blocks or an
 exhausted processing budget retain positional pairing.
-Vertical scrolling stays linked, and each pane can scroll horizontally for long
-lines. The **back arrow**, at the left of the legend, returns to the folder view
+In Diff, vertical scrolling stays linked, and each pane can scroll horizontally
+for long lines. Merge panes scroll independently. The **back arrow**, on the left of the toolbar, returns to the folder view
 with its selection, expansion, and scroll position preserved. Enter or Space on a
 focused file also opens it.
 
-File contents load in the background. Missing files show an empty side; binary or
-non-UTF-8 files, files above the 32 MiB text limit, and comparisons exceeding the
-two-second diff processing limit show an explanation. Type mismatches do not open
-folders or symlink targets. Read errors are shown in the file view; Back remains
-available for files opened from a folder comparison. Line endings are normalized
-when **Ignore line endings** is selected. Merge, editing, saving, and other workflows remain
-deferred. Compared files and folders are never modified.
+Diff file contents load in the background. Missing files show an empty side;
+binary or non-UTF-8 files, files above the 32 MiB text limit, and comparisons
+exceeding the two-second diff processing limit show an explanation. Type mismatches
+do not open folders or symlink targets. Read errors are shown in the file view;
+Back remains available for files opened from a folder comparison. Line endings are
+normalized when **Ignore line endings** is selected. Diff mode remains read-only;
+only explicit Merge saves write working copies.
 
 The sun/moon icon at the upper right switches between light and dark themes in
 either view. The logo and window icon preserve the blue half and use a white half
 in dark mode or the original dark half in light mode.
 
-The legend row places **Zoom** and its percentage immediately before adjacent
+The toolbar places **Zoom** and its percentage immediately before adjacent
 magnifying-glass **−** and **+** buttons, just left of **Show only differences**.
 Click them to reduce or enlarge the interface. Hold
 **Ctrl** and scroll the mouse wheel up/down to zoom in/out; the wheel alone
@@ -230,7 +362,18 @@ git -c difftool.versus.cmd='versus --folder -- "$LOCAL" "$REMOTE"' difftool --to
 
 The command receives Git's pre-image on the left and post-image on the right.
 See the [Git difftool reference](https://git-scm.com/docs/git-difftool) for revision
-and path options. Versus currently provides read-only two-way comparison.
+and path options. These commands open the read-only Diff view.
+
+For a conventional three-way merge, run `--merge` with the common base, ours,
+theirs, and an output path. The command writes a merged text file with conflict
+markers where both sides changed the same base section. Exit status is 0 when no
+conflicts were found, 1 when conflict markers were written, and 2 when parsing,
+reading, or writing failed. Existing output is rejected unless `--overwrite` is
+passed:
+
+```sh
+versus --merge base.txt ours.txt theirs.txt --output merged.txt
+```
 
 ### VS Code and other IDEs
 
@@ -356,7 +499,10 @@ Tagged releases additionally publish:
 
 Versus is licensed under [MIT](LICENSE). Each release includes
 `DEPENDENCY-LICENSES.md`, generated from Cargo metadata; review third-party
-licenses before redistributing.
+licenses before redistributing. Find and Replace also embeds Microsoft's
+[VS Code Codicons](https://github.com/microsoft/vscode-codicons), licensed under
+CC BY 4.0. Their [attribution](assets/codicons/NOTICE.md) and license are included
+in the source and binary packages (`licenses/codicons` in portable bundles).
 
 ## Build from source
 
@@ -369,6 +515,8 @@ cargo build --release --locked --offline
 The checked-in `.cargo/config.toml` directs Cargo to `vendor/` and forces offline
 resolution. The command must work without DNS, package repositories, or Internet
 access when `Cargo.lock` and `vendor/` are present.
+`Cargo.toml` selects the modified `vendor/egui` as a local package, so Cargo
+automatically rebuilds its caret and scrollbar changes in existing build caches.
 
 To refresh locked dependencies on a connected machine after intentionally changing
 `Cargo.toml` or `Cargo.lock`, run:
@@ -385,6 +533,7 @@ environment. A separate Rust toolchain bundle is required where Rust is not alre
 installed; it is intentionally outside this repository.
 The vendor tree includes a [native drop-position patch](docs/vendor-winit-drop-position.md).
 Reapply it and update its checksums after refreshing dependencies.
+Retain the local egui path patch and its checked-in caret/scrollbar changes too.
 
 On Linux, install the host development libraries required by the native windowing
 backend, then use the same Cargo command. `scripts/build-linux.sh` lists the

@@ -18,6 +18,8 @@ mkdir -p "$appdir/usr/bin" "$appdir/usr/share/applications" "$appdir/usr/share/p
   "$appdir/usr/share/licenses/versus" dist
 install -m 755 "$binary" "$appdir/usr/bin/versus"
 install -m 644 LICENSE "$appdir/usr/share/licenses/versus/LICENSE"
+mkdir -p "$appdir/usr/share/licenses/versus/codicons"
+install -m 644 assets/codicons/LICENSE assets/codicons/NOTICE.md "$appdir/usr/share/licenses/versus/codicons/"
 printf '[Desktop Entry]\nType=Application\nName=Versus\nExec=versus\nIcon=versus\nCategories=Development;Utility;\nTerminal=false\n' > "$appdir/usr/share/applications/versus.desktop"
 install -m 644 assets/logo-icon.png "$appdir/usr/share/pixmaps/versus.png"
 
@@ -56,4 +58,6 @@ mkdir "$build_directory/$portable_name"
 # Keep the plain executable's native loader paths; do not copy the AppDir-patched binary.
 install -m 755 "$binary" "$build_directory/$portable_name/versus"
 cp README.md LICENSE "$build_directory/$portable_name/"
+mkdir -p "$build_directory/$portable_name/licenses/codicons"
+cp assets/codicons/LICENSE assets/codicons/NOTICE.md "$build_directory/$portable_name/licenses/codicons/"
 tar -C "$build_directory" -czf "dist/$portable_name.tar.gz" "$portable_name"

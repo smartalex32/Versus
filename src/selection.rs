@@ -20,8 +20,18 @@ pub enum ComparisonMode {
 impl ComparisonMode {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Folder => "Folder Compare",
-            Self::File => "File Compare",
+            Self::Folder => "Folder Diff",
+            Self::File => "File Diff",
+        }
+    }
+    pub fn workspace_label(self, merge: bool) -> &'static str {
+        if merge {
+            match self {
+                Self::Folder => "Folder Merge",
+                Self::File => "File Merge",
+            }
+        } else {
+            self.label()
         }
     }
 
