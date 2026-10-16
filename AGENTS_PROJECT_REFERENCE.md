@@ -1,356 +1,140 @@
-# Versus Project Reference
+# Versus project reference
 
-## Purpose
+## Start with the capability
 
-Versus is an offline native engineering workspace for file or folder comparison
-on Windows and Linux. Centered header buttons choose Folder Diff or File Diff,
-changing to Folder Merge or File Merge with the adjacent Diff/Merge toggle.
-Browse opens the corresponding native picker directly. The toggle switches modes
-for the same open sources. Diff is read-only and
-compares automatically. Merge uses two independent editable working copies; there
-is no desktop Base pane or three-way workflow. Its optional Run Diff setting starts
-off, leaving editing, automatic chunk detection, and inline transfers independent
-from comparison. Folder Merge browses directory metadata lazily and loads contents
-when a file is opened. Traditional three-way merging is a separate `--merge` CLI
-operation. Runtime behavior must
-not rely on Internet services, telemetry, automatic updates, a managed runtime, or
-background services. Network-mounted paths are handled through normal filesystem
-APIs and must fail cleanly when unavailable.
+Versus is an offline native file/folder comparison and two-working-copy editing
+application. Desktop Diff is read-only; Merge is editable, with optional Run Diff.
+The base/ours/theirs `--merge` command is a separate noninteractive workflow.
 
-## Stack and layout
+- [Architecture guide](docs/ARCHITECTURE.md): human introduction, ownership, flows.
+- [Glossary](GLOSSARY.md): domain names; distinguish comparison/workspace modes.
+- [SRS](docs/SRS.md): current behavior and acceptance requirements.
+- [Platform constraints](docs/architecture/platform.md): vendor patches, native
+  drops, release baselines, private-display isolation and runtime integrity files.
+- [Audit](docs/APP_AUDIT.md): cleanup history and refactor validation.
+  `docs/PRD.md` is a historical roadmap, not current acceptance criteria.
 
-- Rust 1.95 with `eframe`/`egui` (the `glow` backend) for the native UI.
-- `similar` for text differences and `rfd` for native path pickers.
-- `src/app.rs` renders the existing comparison workspace, the Diff/Merge toggle,
-  and shared comparison-panel styling for source pickers and empty drop targets,
-  file/folder navigation, and mode-specific comparison options. Diff preferences
-  are kept separately from Merge preferences; enabling Run Diff for the first time
-  defaults all three Merge options on, and later toggles retain user choices.
-  Enabling Run Diff schedules a debounced comparison for the open pair on a
-  cancellable worker; disabling it drops pending diff work and removes diff
-  highlights without resetting working copies or history. Diff assistance appears
-  within the editors; there is no separate comparison-alignment panel.
-- `src/app/interactive_view.rs` renders the two-way editing workspace. Each side
-  has its own text buffer, line numbers, dirty state, scroll position, and explicit
-  Save Left/Save Right disk icon beside Browse, plus Save Both in the footer,
-  with a pending-content preview for active files. Save Both also saves retained
-  dirty files from folder-wide replacement after the modal is closed. File content
-  retains File Diff’s header/divider spacing above the first row. Inline chunk and
-  line transfers insert at the other pane's cursor. Accept All Left/Right replaces
-  the other file as one transaction. Chunks are heuristic structural blocks or
-  blank-line paragraphs and can expand into line arrows. The lower management
-  section, manual selected-range transfers/replacement targets, manual chunk
-  editing, and manually ignored line ranges are removed, including their context
-  menus and state. Editors use the reclaimed pane height, including short/empty
-  files, with horizontal scrollbars at each pane's bottom. Text editing and
-  transactional undo/redo remain; diff results only assist display and navigation.
-  Automatic merging belongs only to the separate three-way CLI workflow.
-  File-pair history uses canonical tagged snapshots and survives navigation and
-  alternate pairing.
-  Run Diff is in the header beside the theme button, with Refresh immediately
-  to its right while enabled. The toolbar keeps New comparison and the folder
-  Find and Replace magnifying glass on the left, followed by the change count
-  while Run Diff is on. Full icon/text legends are always visible and centered
-  in the footer, including Conflict in Merge, alongside Save Both and Unsaved
-  Changes. Unsaved Changes sits immediately left of Save Both; ordinary guidance
-  remains left-aligned in the footer. Narrow layouts wrap legend entries within
-  this footer. Each file side has a Back button before its LEFT/RIGHT label to return to its own tree.
-  Zoom stays on the right; comparison options and difference navigation follow it
-  only while Run Diff is enabled. Hidden Merge option states are retained. Each
-  side loads and scrolls independently; transfers require two loaded files.
-- `src/app/file_style.rs` shares File Diff's row backgrounds, state stripes,
-  number/status gutters, inline highlights, and line-ending badges with editable
-  Merge. File and folder diff bars use vivid, saturated shades in light mode.
-  Text, inline highlighting, and dark-mode colors keep the existing palette. Transfer arrows
-  use vector geometry and the source side's LEFT/RIGHT
-  color, avoiding platform font fallback boxes. The compact line-number gutter
-  is shared by both views and reserves extra width for large line numbers.
-  Each source has a separate center transfer track outside the clipped file
-  content. Arrows follow that source’s independent scroll; expansion toggles
-  remain inside a reserved content gutter with clearance from row highlights.
-  Merge difference navigation uses File Diff’s subtle row overlay on the source
-  lines present in the selected comparison row. Only those panes scroll; paired
-  rows use each side’s original line number and filtered display position.
-  Next/previous difference navigation leaves one visible context row above the
-  target in Diff and Merge, clamped at the start of the file or folder listing.
-  Editable Merge bounds navigation against current visible rows and pane height
-  before painting, avoiding a one-frame snap when jumping near the file end.
-  Typing and Undo/Redo retain display-only diff decorations and filtering during
-  the debounced refresh, including replacement-batch history on both open panes.
-  Source byte splices remap line numbers, inline spans, and restored cursors; stale results
-  are cancelled and cannot supply navigation or completed folder comparison state.
-  Fresh results replace that presentation, and disabling Run Diff clears it.
-  Switching an open merge pair to Diff paints aligned read-only rows through the
-  File Diff painter, with one source header and Refresh in the header toolbar.
-  Read-only row visibility and widths are cached per comparison/preferences/font;
-  the hovered pane processes scrolling first to keep both sides aligned that frame.
-  Diff scrolling stays linked; Merge scrolling remains independent. The retained
-  documents, edits, and history survive switching; Refresh compares working copies
-  without reloading disk bytes. Browse continues opening files in this retained
-  workspace. Direct File Diff sessions retain their existing disk refresh path.
-- `src/app/folder_browser.rs` enumerates one directory level at a time through
-  `directory_entries_for_root`, which reads entry metadata and relative paths
-  without comparing file contents. Each Merge side enumerates, expands, and scrolls
-  its own tree, including when only one root is selected. Expanding a directory
-  requests that side’s listing; opening a file loads its working copy independently
-  of the other pane. Find and Replace is available from the magnifying glass in
-  both File Merge and Folder Merge. File searches use only the selected file
-  roots without directory enumeration; folder searches retain recursive scope.
-  The modal is centered, approximately half the initial app width, and dismisses
-  on outside click or Escape. Controls occupy the left half; a scrollable result
-  list fills the right half by default with a centered muted empty-state hint
-  matching drop targets.
-  Typing starts search after 250 ms without edits. Search-option buttons, Refresh,
-  Undo, and Redo start any needed search immediately; scope/view changes reuse
-  available results without restarting workers. Reopening the modal immediately
-  reruns the current query, rereads clean files and repopulates exclusions while
-  retaining dirty working copies. Every search collects both sides.
-  Empty queries and dismissal cancel pending searches. There is no separate Find
-  action. Full-width fields have
-  muted italic hints, colored LEFT/RIGHT/BOTH scope controls, inline search-option
-  icons, and external Replace Next/All icons. Undo, Redo, and Refresh follow the
-  scope buttons, with search status below. A neutral LEFT/RIGHT view toggle
-  spans the results column. Its LEFT (X)/RIGHT (X) labels show each side's included
-  match count, including streamed updates and exclusions. File names remain in
-  the results list; there is no separate matches/files summary line.
-  LEFT/RIGHT scope selects that results side and disables
-  the opposite view toggle; BOTH enables both. Replacement actions include only
-  matches in the selected scope, while hidden-side results and exclusions remain
-  cached. Results stream in batches while searching; each virtualized row shows
-  a line number, bounded highlighted text preview, and a hover X for exclusion.
-  The empty-state hint is confined to the
-  results panel. Refresh repopulates exclusions and rereads clean files from disk,
-  while dirty working copies take precedence. Replace Next/All immediately apply
-  included targets as an undoable working-copy batch, without a replacement
-  preview or Apply step. The modal has no working-copy, unsaved-change, or save
-  controls; changes are saved from the main workspace. Partial, cancelled,
-  failed, and stale searches cannot authorize replacements. Applied
-  replacements advance the original result set using exact byte edits, without
-  re-searching replacement text. Option changes and undo invalidate stale targets;
-  scope changes retain search results and limit the next replacement action.
-  It supports plain text/regex, case, and whole-word matching. Batch undo is atomic across
-  participating files; newer edits in those files must be undone first. Binary,
-  non-text, and files above the 32 MiB text limit are skipped. Saving remains an
-  explicit operation. With Run Diff on, cancellable per-file comparisons overlay
-  staged content on the folder results; unchanged working-copy results are reused. Difference jumps
-  reveal the target using only shallow ancestor listings.
-  Merge folder status uses a cached bottom-up tree traversal. Both panes and
-  navigation share the same state and difference-path snapshots; unchanged frames
-  do not rebuild them. Tree replacement and working-copy overlays invalidate the
-  cache. Identical folder roots are valid and produce no differences.
-- `src/app/search_session.rs` prepares Next/All replacement transactions and remaps
-  remaining original search hits after apply, preserving aliases, selections and
-  byte anchors.
-  It neither starts searches or diffs nor modifies files.
-- Applying a replacement from refreshed search results reconciles stale clean
-  editor documents only on staged clones, through an undoable text splice, then
-  applies the replacement batch. All participants validate before publication. Batch
-  Undo returns to refreshed disk text; earlier editor history remains available.
-  Dirty documents, identity changes, and invalid byte edits fail safely.
-  Saves retain the refreshed byte fingerprint.
-- `src/app/search_result_rows.rs` paints bounded text previews and hover removal
-  controls without loading files or modifying search data.
-- `src/app/find_icons.rs` embeds the official Codicons font for the five find/replace
-  controls in a dedicated font family. Body fonts are unchanged. Attribution and
-  the CC BY 4.0 license are included under `assets/codicons/` and copied into Windows
-  and both Linux binary packages; no network access or new crates are needed.
-- `src/core/interactive.rs` owns canonical editable documents, automatic chunk
-  detection, byte-preserving transfers, and transactional undo/redo. Chunk
-  detection prioritizes recognized syntax blocks and falls back to blank-line
-  paragraphs. Generic insertion/replacement primitives support inline transfers,
-  Accept All, and search replacement. Manual chunk and ignored-range state and
-  management APIs are removed.
-- `src/core/work_files.rs` owns lazy directory entries and text working copies.
-  It records the exact original bytes for external-change checks and supports
-  UTF-8 (with or without BOM) and BOM-marked UTF-16 little/big endian, up to the
-  32 MiB text limit. Saves retain the source encoding and use safe replacement; a
-  changed original causes save to fail rather than overwrite external edits.
-  Physical file identity is resolved on a background worker for canonical pair
-  history and save deduplication. Original native paths are retained as write
-  destinations.
-- `src/core/search_replace.rs` owns recursive text search and replacement previews.
-  It interleaves directory enumeration with cancellable, batched matching and
-  avoids following symlinks. Clean cached files are refreshed from disk; dirty
-  files retain their unsaved content and original save fingerprint. It skips
-  binary/oversized files; included results are applied to working copies and are
-  never written until an explicit save.
-- `src/core/merge.rs` owns traditional three-way merge calculation and conflict
-  markers. `src/main.rs` executes the CLI request, writes its output, returns 0
-  when clean, 1 when conflicts were written, and 2 on argument, IO, or merge error.
-  Syntax is `versus --merge BASE OURS THEIRS --output OUT [--overwrite]`; this
-  workflow does not start the desktop GUI.
-- `src/selection.rs` classifies sources without following symlinks and configures
-  native pickers for the selected Folder/File comparison mode. Switching between
-  Folder and File starts a fresh session and clears both sources and pending work;
-  the Diff/Merge toggle retains the current workspace. New comparison keeps the
-  selected Folder/File mode and theme.
-- `src/cli.rs` parses native command-line paths for Git/IDE launches and the
-  separate conventional three-way merge. Two paths infer comparison mode;
-  `--diff`/`--folder` require matching types. Startup uses
-  the same background workers as browsing, and the native process stays alive
-  until its window closes. Git null-device inputs represent absent file sides
-  without opening devices. `--help`/`--version` exit before GUI initialization.
-- `src/core/tree.rs` builds aligned folder trees with per-side types, ancestor
-  status aggregation, shared expansion state, and full-tree traversal for diff
-  navigation that skips folders and reveals changed files' collapsed ancestors.
-- Refresh reloads the active file view, including folder drilldown, and keeps its
-  viewport. Folder refresh retains selection, expansion and scroll state for the
-  same roots; removed selected entries are cleared. Workers recheck missing sides
-  of folder files without following symlinks.
-- `src/recent.rs` stores up to 20 recent file/folder source pairs in a bounded,
-  versioned per-user local file, preserving native path bytes. The startup/New
-  comparison screen offers one-click reopening through background classification.
-  Recent rows show only the active file/folder mode as left-aligned path pairs
-  with a bold vs separator and alternating neutral backgrounds.
-  History IO runs on a serialized worker and queued writes finish on close; paths
-  are recorded once both sources are classified, even if the comparison is still
-  loading. File contents are never persisted. No new dependencies are required.
-- `src/core/file_view.rs` loads bounded text inputs and aligns numbered line rows.
-  Rows retain original line numbers, terminators, and UTF-8 highlight ranges.
-  Changed blocks use bounded similarity alignment to pair edited lines across
-  insertions/deletions without discarding exact line anchors or original numbers.
-  Identical entries are neutral gray; both views share difference status icons.
-- Native accessibility is enabled through eframe AccessKit. Tree rows expose side,
-  path, type, status, and size; visible file lines expose side, original number,
-  status, and text. Up/Down tree navigation preserves focus side and Tab escapes.
-  Focusable file panes support keyboard scrolling. Empty panes show persistent
-  drop outlines; toolbar press feedback precedes release activation.
-  Shared vendored egui scrollbars honor the theme's interaction cursor while
-  hovered or dragged, covering horizontal/vertical bars in comparisons, editors,
-  trees, and dialogs. Disabled bars and disabled scrollbar input keep the default
-  cursor. Its optional `TextCursorStyle::max_height` only caps the painted caret,
-  preserving native blinking, selection and scroll geometry. Merge scopes it to
-  the editor font height plus native caret margins, excluding padded diff-row
-  spacing; other text fields retain the default. `Cargo.toml` explicitly patches
-  egui to the local `vendor/egui` package, so Cargo tracks these modified sources
-  and rebuilds them after updates without manual cache cleaning. Keep this path
-  patch when refreshing dependencies; treating modified egui as an immutable
-  registry package can reuse obsolete API definitions from an existing build.
-  Footer guidance updates independently on the left. Activity status only
-  renders while a loader, comparison, or save is running; it sits right of the
-  legend in Diff and left of the Unsaved Changes/Save Both group in Merge.
-  Completed-action messages remain in the left guidance area. Deduplicated errors use this activity
-  area for an N errors summary with hover details; pointer movement or clicks
-  in either pane dismiss errors without changing working copies or history.
-  The zoom percentage precedes adjacent magnifier −/+ buttons immediately left
-  of the differences filter; Ctrl/Command + wheel changes
-  UI scale using egui’s smooth zoom delta, without scrolling the comparison.
-  Zoom is applied once per frame and bounded to egui’s 20–500% range.
-  UI zoom is saved through eframe storage; recent source paths are saved separately
-  and compared content remains session-local. Row/control geometry follows font metrics.
-- Diff UI options filter identical entries and independently ignore inline
-  whitespace or line endings. Differences-only filtering and both ignore rules are
-  enabled by default in Diff. Merge has a separate set of these three options,
-  defaulted on when Run Diff is first enabled, retaining later user settings.
-  Filtering hides unchanged Merge lines without deleting working-copy content and
-  keeps a top-visible or nearest-surviving anchor;
-  diff navigation reports the current change position beside New comparison.
-  Changes to ignore rules restart background workers
-  while retaining the displayed result until its replacement is ready. Refreshes
-  preserve expansion, selection and source-line scroll anchors; progress uses a
-  reserved activity area on the legend footer, and folder jumps clamp before
-  painting to avoid transient shifts.
-  Folder ignores use bounded UTF-8 normalization and fall back to byte comparison
-  for binary, invalid UTF-8, or larger files. Native single-path drops select a
-  pane and infer file/folder mode through the existing source classifier.
-  Native drag pointer coordinates come from a narrow vendored winit patch, including
-  corrected Windows OLE by-value coordinates and storage-medium cleanup,
-  documented in `docs/vendor-winit-drop-position.md`; preserve it on vendor
-  refresh. Pane targeting retains the drag position when a pointer-leave event
-  follows it in the same frame, including drops without an earlier hover frame.
-  Windows also reads the live native cursor relative to the app window while
-  hovering or dropping, converting physical pixels to UI points and repainting
-  during hover. A foreground border identifies the receiving side above pane
-  contents. A position forwarded in the current frame takes priority over the
-  native sample; older retained pointer state is used only if both are unavailable.
-  Linux chooses X11/XWayland when `DISPLAY` exists for native file drops,
-  retaining native Wayland browsing when no X11 display is available.
-- `src/core/progress.rs` publishes synchronized stage snapshots. Measured stages
-  show percentage complete for the current measured stage; scanning and line
-  alignment show activity without an invented total. Time estimates are removed.
-  Folder comparisons explicitly show tree finalization before reporting complete.
-- `src/diagnostics.rs` writes desktop diagnostics to `versus.log` beside the
-  executable (beside the outer AppImage on Linux). A bounded queue keeps writes
-  off the UI thread; logs rotate at 5 MiB with one `versus.log.1` backup. Events
-  include version, timestamps, process/session IDs, folder paths, progress,
-  cache rebuild timing, and errors, without logging compared file contents.
-  Logging setup/write failures appear in the existing status error area. Folder
-  comparison and working-copy comparison workers convert panics to errors rather
-  than leaving active jobs stuck. Shutdown flush waits for at most 500 ms.
-- `tests/` covers externally observable comparison and filesystem behavior.
-- `.cargo/config.toml` replaces crates.io with the checked-in `vendor/` tree and
-  forces Cargo offline.
-- `scripts/vendor-dependencies.ps1` refreshes `vendor/` only on a connected machine;
-  `scripts/export-dependency-licenses.ps1` produces release inventory; and
-  `scripts/package-source-offline.sh` packages the offline source release.
-- `.github/workflows/ci.yml` checks Windows and Linux builds; `release.yml` builds
-  tagged portable artifacts and the offline source archive.
-- Both workflows build separate native Linux artifacts for glibc 2.35 (Ubuntu
-  22.04) and glibc 2.28 (Rocky 8.10) through `scripts/build-linux.sh`. Artifact and
-  release filenames include the baseline so outputs cannot collide.
-  `scripts/package-linux.sh` takes the baseline explicitly, bundles dynamically
-  loaded window libraries, and checks the finished AppImage/runtime and bundled
-  ELF files with `scripts/check-linux-compatibility.py`. Each baseline runs Rust
-  tests, release compilation, packaged CLI checks and an Xvfb GUI startup test.
-  The 2.28 AppImage adds automatic compatibility mode for X11 servers without
-  XInput2, using a small capability probe and a private authenticated Xephyr
-  display with software rendering. Modern displays retain the native path;
-  private graphics libraries must stay isolated from ordinary launches.
-  `--compat-x11` explicitly selects the fallback. The plain executable and 2.35
-  AppImage use host graphics. Rocky CI tests automatic selection through nxagent,
-  resizing, input, browsing, authentication and cleanup with host runtime files
-  hidden. Preserve these tests, runtime license/source inventory, and both glibc
-  checks when changing Linux packaging. Original Rocky crypto libraries and their
-  vendor HMAC sidecars (including GMP’s `fipscheck/` file) must remain byte-identical.
-  Final package verification and forced vendor FIPS self-tests (including negative controls and the nxagent GUI)
-  run in CI. FIPS activation hooks are test-only; runtime host policy is preserved.
-  Clipboard and file drops across the private-display boundary are not bridged.
+## Capability routing and delegation
 
-## Architectural constraints
+Assign implementation files plus their matching tests. State structs remain in
+parent modules; capability children implement operations on those same owners.
+Use the parent for state-shape or polling-order changes, the child for a capability
+change. Existing app-facing interfaces stay scoped to `crate::app`; internal
+operations stay inside their owner. Avoid forwarding modules and global helpers.
 
-- Treat compared content as data. Never execute it or invoke shell commands from it.
-- Diff reads must not modify either input. Merge edits stay in working copies until
-  explicit save; check original bytes before writing, preserve supported source
-  encoding, and use a temporary file and replacement where practical.
-- Do not recursively follow directory symlinks by default.
-- Timestamp equality is not file equality. Diff directory comparison uses path,
-  type, size, then buffered content comparison. Merge directory navigation reads
-  only metadata until a file is opened or an explicit recursive search is run.
-- Keep slow filesystem work off the UI thread and support cancellation where the UI
-  exposes it.
-- Support direct entry and paste of Windows drive and UNC paths alongside native
-  dialogs. Diff tree rows align by relative path, with placeholders for missing
-  entries; expanding or collapsing either Diff pane updates shared expansion. Merge trees
-  browse independently and load only their own expanded directories.
-- Keep dependencies small, locked, vendorable, and compatible with offline builds.
+| Task | Start / owned capability | Focused tests |
+| --- | --- | --- |
+| Process/CLI | `src/main.rs`, `src/cli.rs`, `src/core/merge.rs` | `tests/cli.rs`, `tests/unit/cli/`, `tests/unit/core/merge/` |
+| Window/frame composition | `src/app.rs`, `src/app/workspace.rs` | `tests/unit/app/`, `tests/unit/app/operating_modes.rs` |
+| Source paths/header/Browse | `src/selection.rs`, `src/app/source_controls.rs`, `src/app/session/source.rs` | `tests/unit/selection/`, `tests/unit/app/`, `tests/unit/app/session_sources_interactions.rs` |
+| Comparison workers/publication | `src/app/session/comparison.rs`; state/order in `src/app/session.rs` | `tests/unit/app/session_sources_lifecycle.rs`, `tests/unit/app/session_sources_interactions.rs`, `tests/unit/app/refresh.rs` |
+| Diff/Merge transitions | `src/app/session/merge_workspace.rs`, `src/app/session/source.rs` | `tests/unit/app/operating_modes.rs`, `tests/unit/app/merge_workspace.rs` |
+| File Diff rendering | `src/app/file_diff.rs`; refresh/navigation in `src/app/session/navigation.rs` | `tests/unit/app/file_diff.rs`, `tests/unit/app/difference_navigation.rs`, `tests/unit/app/refresh.rs` |
+| Folder Diff rendering | `src/app/folder_diff.rs`; aggregation in `src/core/tree.rs` | `tests/unit/app/folder_diff.rs`, `tests/folder_tree.rs` |
+| Shared visuals/theme/geometry | `src/app/visuals/{theme,panels,status,footer,icons}.rs`, `src/app/file_style.rs` | `tests/unit/app/theme.rs`, `workspace_chrome.rs`, `zoom_input.rs`, `tests/unit/app/file_style/`, `tests/unit/app/find_icons/` |
+| Drops, error/status, leave protection | `src/app/{drop_targets,workspace_status,leave_dialog}.rs` | `tests/unit/app/{drag_drop,accessibility,workspace_chrome}.rs`, `tests/unit/native_drop/` |
+| Editor document identity/pair lifecycle | `src/app/interactive_view/document.rs`; state in `src/app/interactive_view.rs` | `tests/unit/app/interactive_view/{document_lifecycle,workspace_state}.rs` |
+| History/replacement transactions | `src/app/interactive_view/history.rs`, `src/core/interactive.rs` | `tests/unit/app/interactive_view/history.rs`, `tests/unit/core/interactive/`, `tests/interactive.rs` |
+| Editor input/render/controls | `src/app/interactive_view/{editor,readonly,line_rendering,editing_actions,toolbar}.rs` | `tests/unit/app/interactive_view/{pane_painting,transfers,toolbar_footer,navigation}.rs` |
+| Merge display projections/diff | `src/app/interactive_view/{projection,diff}.rs` | `tests/unit/app/interactive_view/{editor_projection,projection_support}.rs` |
+| Folder Merge navigation | `src/app/folder_browser/navigation.rs`, `src/core/lazy_directory.rs` | `tests/unit/app/folder_browser/navigation.rs`, `tests/unit/core/work_files/` |
+| Working-copy folder statuses | `src/app/folder_browser/overlay.rs` | `tests/unit/app/folder_browser/{overlay,cache}.rs` |
+| Find/Replace query/modal/results | `src/app/folder_browser/{search_state,search_modal,replacement}.rs`, `src/app/{search_session,search_result_rows}.rs`, `src/core/search_replace.rs` | `tests/unit/app/folder_browser/{search,search_lifecycle,modal}.rs`, `tests/unit/app/search_session/`, `tests/unit/app/search_result_rows/`, `tests/unit/core/search_replace/` |
+| Explicit saves and external-change checks | `src/core/work_files.rs`, `src/core/save.rs`, `src/app/interactive_view/editing_actions.rs`, `src/app/folder_browser/save.rs` | `tests/interactive.rs`, `tests/unit/app/folder_browser/save.rs`, `tests/unit/core/work_files/` |
+| Text comparison algorithms | `src/core/file_view/{input,alignment,text}.rs`, `src/core/compare.rs` | `tests/file_view_options.rs`, `tests/unit/core/file_view/`, `tests/core.rs` |
+| Chunks/text transactions | `src/core/{chunk_detection,text_lines,interactive}.rs` | `tests/unit/core/interactive/`, `tests/interactive.rs` |
+| Recent pairs and diagnostics | `src/recent.rs`, `src/app/session/history.rs`, `src/diagnostics.rs` | `tests/unit/recent/`, `tests/unit/app/recent_history.rs`, `tests/unit/diagnostics/` |
+| Release/compatibility | `.github/workflows/`, `scripts/`, vendor patches | baseline CI and packaged GUI checks; [platform guide](docs/architecture/platform.md) |
 
-## Commands
+Production paths are rooted at `src/`. Unit tests and their test-only support live
+under `tests/unit/`; integration test targets are individual `tests/*.rs` files.
+Brace notation lists paths; it is not a literal pathname. Unit suites retain their
+logical Rust module names, so existing Cargo filters still work; their physical
+file paths do not appear in those filters. Search by test function name when a
+suite's physical path has moved.
 
-Run from repository root:
+### Parallel work
 
-```powershell
+Independent UI painting, pure core algorithms and documentation can be delegated
+separately. Within the editor, document identity/history and save-baseline changes
+need one coordinator. Within folder browsing, replacement and save changes must
+agree on retained snapshots. Assign shared state/root declarations to one owner;
+coordinate cross-capability method visibility/import changes before validation.
+Core algorithms must remain usable without egui. Keep test fixtures in the test
+index/support file, with assertions grouped in capability suites.
+
+## Critical invariants
+
+- Compared content is data. Runtime uses OS filesystem paths, including mapped
+  drives/UNC/mounts; no network client, telemetry, updater or background service.
+- Diff never writes. Merge mutates working copies until explicit save. Preserve
+  source encoding/endings and exact original-byte external-change checks; native
+  write destinations and canonical document identities have different purposes.
+- Replacement batches validate every participant before publication. Partial,
+  cancelled, failed or stale searches cannot authorize replacement. Batch history
+  is atomic; newer participating edits must be undone first.
+- Keep canonical documents/history in the editor owner. Display projections and
+  pending decorations cannot authorize fresh navigation or transfers. Rebase
+  source byte edits and cursors without making hidden text editable by accident.
+- Session polling/publication order is deliberate. Replaced jobs are cancelled or
+  disconnected so old results cannot publish into newer sources. Keep slow IO off
+  UI painting. Search streams both sides; scope changes reuse snapshots.
+- Folder Diff is recursive/aligned; Folder Merge browsing is independent and
+  shallow. Never follow directory symlinks. Timestamps are not content equality.
+- Preserve 32 MiB text limits, bounded diff/highlight work and cancellation checks.
+  Identical folder roots are valid. Diff preferences and Merge preferences differ.
+- Keep vendored egui's Cargo path patch and scrollbar/caret changes, and winit's
+  native drop-position patch/checksums. Details and refresh constraints are in the
+  [platform guide](docs/architecture/platform.md) and [drop patch notes](docs/vendor-winit-drop-position.md).
+- Linux packaging changes require both glibc baselines and private-display tests.
+  Original Rocky crypto libraries/HMAC sidecars (including GMP fipscheck) remain
+  byte-identical. Runtime host policy stays unchanged; FIPS hooks are test-only.
+
+## Stack and commands
+
+Rust 1.95, eframe/egui 0.36.2 (`glow`), similar, regex and rfd. Supported release
+targets: Windows 10/11 x86-64 and Linux x86-64 (glibc 2.35/2.28). macOS local tests
+are development evidence, not validation of Windows/Linux artifacts.
+`.cargo/config.toml` directs Cargo to checked-in `vendor/` and forces offline.
+
+From repository root, start with the relevant target/filter:
+
+```sh
+cargo test --locked --offline --lib core::file_view
+cargo test --locked --offline --bin versus app::interactive_view::tests
+cargo test --locked --offline --bin versus app::folder_browser::tests
+cargo test --locked --offline --bin versus app::operating_mode_tests
+cargo test --locked --offline --test file_view_options
+```
+
+Unit suite files live under `tests/unit/`, but are registered into their owning
+`lib` or `versus` binary module. The commands above intentionally keep the same
+module filters; only integration tests use the `--test <target>` form. See
+[`tests/README.md`](tests/README.md) for the physical layout and test-only support
+conventions.
+
+Choose the command matching the changed capability; the list is not a mandatory
+sequence. Full validation for a cross-capability refactor:
+
+```sh
 cargo fmt --check
 cargo test --locked --offline
 cargo build --release --locked --offline
 git diff --check
 ```
 
-Refresh dependencies only on a connected development machine:
-
-```powershell
-./scripts/vendor-dependencies.ps1
-./scripts/export-dependency-licenses.ps1 -OutputPath dist/DEPENDENCY-LICENSES.md
-```
-
-The release workflow is the configured production packaging path. Do not claim
-local release artifacts were validated unless the relevant platform build and launch
-were actually performed.
+CI runs Windows plus both Linux baseline builds, packaged CLI, glibc checks and
+Xvfb/nxagent GUI smoke checks. Release workflow produces distribution artifacts.
+Only claim platform/package validation actually performed. Dependency refresh
+commands and connected build prerequisites are in [README](README.md#build-from-source)
+and the [platform guide](docs/architecture/platform.md).
 
 ## Agent template
 
 The shared guide, `.codex/` roles/configuration, and `.agents/skills/` were checked
 against [Codex-App](https://github.com/smartalex32/Codex-App) commit
-`8474f5d4c3061caf988fe5ebceb77ffae9d7bca1` on 2026-10-15 and match that revision.
+`8474f5d4c3061caf988fe5ebceb77ffae9d7bca1` on 2026-10-15 as the template baseline. Project-specific navigation has since been added to
+`AGENTS.md` and this reference.
 Keep this project reference specific to Versus when refreshing the template.
 
 The template includes 27 Matt Pocock skills imported from

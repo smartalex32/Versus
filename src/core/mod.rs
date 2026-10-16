@@ -1,12 +1,15 @@
+mod chunk_detection;
 mod compare;
 mod directory;
 mod error;
 mod file_view;
 pub mod interactive;
+mod lazy_directory;
 mod merge;
 mod progress;
 mod save;
 pub mod search_replace;
+mod text_lines;
 mod tree;
 pub mod work_files;
 

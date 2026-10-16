@@ -4,6 +4,9 @@
 
 - Read `AGENTS_PROJECT_REFERENCE.md` before substantial work when it exists, then
   only relevant documentation. Follow applicable nested guidance.
+- Use its capability routing table to locate implementation and tests. Read
+  `docs/ARCHITECTURE.md` for cross-capability flows and `GLOSSARY.md` for domain
+  terminology; the SRS defines externally visible behavior.
 - Complete the user's authorized task. Planning-only requests produce a plan
   without implementation. Avoid unrelated refactors and speculative features.
 - Infer routine decisions from the repository. Ask only for missing information
@@ -30,6 +33,9 @@ In that case, use the least expensive capable configured role.
   acceptance criteria, validation expectations, and concise return format.
 - Keep file ownership separate and avoid duplicate investigation. Subagents do not
   delegate further; the primary agent owns coordination and integration.
+- Assign capability files and their matching test suites using the project
+  reference. Coordinate changes to shared state types and module declarations
+  through one owner; sibling implementation files can otherwise be owned separately.
 - Select specialists using descriptions in `.codex/agents/`. Reserve `architect`
   for difficult decisions or unresolved problems.
 - Use `tester` for execution and basic triage, `debugger` for nontrivial diagnosis,
