@@ -42,7 +42,7 @@ pub(super) fn inline_action(
 /// Larger, side-colored transfer arrows use the same palette slots as File
 /// Diff's left-only and right-only status icons.  This stays separate from the
 /// smaller expand/collapse controls kept inside the file content.
-pub(super) fn transfer_action(
+pub(in crate::app) fn transfer_action(
     ui: &egui::Ui,
     rect: Rect,
     id: egui::Id,

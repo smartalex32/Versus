@@ -3,6 +3,8 @@
 //! The parser deliberately performs no filesystem access. Callers can classify
 //! the supplied paths asynchronously after the native window has started.
 
+mod git;
+
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
@@ -12,6 +14,8 @@ use crate::selection::ComparisonMode;
 pub(crate) const HELP: &str = "\
 Usage: versus [--diff | --folder] [--wait] <left-path> <right-path>\n\
        versus --merge <base-path> <ours-path> <theirs-path> --output <path> [--overwrite]\n\
+       versus --git-diff [--diff | --folder] [--label <text>] [--wait] -- <left-path> <right-path>\n\
+       versus --git-merge (--base <path> | --no-base) --local <path> --remote <path> --output <path> [--label <text>] [--wait]\n\
        versus\n\
        versus --help\n\
        versus --version\n\
@@ -26,7 +30,11 @@ accepted for compatibility and has no additional effect.\n\
 \n\
 --merge performs a conventional three-way text merge without opening the desktop\n\
 window. It writes conflict markers and exits with status 1 when manual resolution\n\
-is required. The output path must not already exist unless --overwrite is given.\n";
+is required. The output path must not already exist unless --overwrite is given.\n\
+\n\
+--git-diff opens a focused, read-only Git comparison with fixed sources.\n\
+--git-merge opens a focused, blocking Git merge window. Save and Resolve returns\n\
+success only after the Result is written; cancelling returns failure to Git.\n";
 
 /// The two paths provided by an external diff-tool caller.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -45,6 +53,24 @@ pub(crate) struct MergeRequest {
     pub overwrite: bool,
 }
 
+/// Inputs supplied by Git when it launches a focused diff view.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct GitDiffRequest {
+    pub paths: [PathBuf; 2],
+    pub mode: Option<ComparisonMode>,
+    pub label: Option<String>,
+}
+
+/// Inputs supplied by Git when it launches a focused merge view.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct GitMergeRequest {
+    pub base: Option<PathBuf>,
+    pub local: PathBuf,
+    pub remote: PathBuf,
+    pub output: PathBuf,
+    pub label: Option<String>,
+}
+
 /// A command requested through Versus's command-line interface.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Command {
@@ -52,6 +78,10 @@ pub(crate) enum Command {
     Open(Option<LaunchRequest>),
     /// Run a traditional three-way merge and exit without starting the GUI.
     Merge(MergeRequest),
+    /// Open a focused, read-only comparison supplied by Git.
+    GitDiff(GitDiffRequest),
+    /// Open a focused, interactive three-way merge supplied by Git.
+    GitMerge(GitMergeRequest),
     /// Print [`HELP`].
     Help,
     /// Print the application version.
@@ -67,6 +97,10 @@ pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command,
 
     if args.is_empty() {
         return Ok(Command::Open(None));
+    }
+
+    if let Some(command) = git::parse(&args)? {
+        return Ok(command);
     }
 
     if args
