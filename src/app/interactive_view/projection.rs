@@ -549,7 +549,7 @@ pub(super) fn original_byte_to_normalized_chars(original: &str, byte_offset: usi
     chars
 }
 
-pub(super) fn editor_byte_edit(
+pub(in crate::app) fn editor_byte_edit(
     original: &str,
     edited: &str,
     selection: Option<Range<usize>>,

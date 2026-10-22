@@ -4,6 +4,8 @@ use crate::app::visuals::theme::{Palette, apply_theme, restore_zoom};
 use crate::recent::RecentComparison;
 use crate::selection::{self, ComparisonMode, SelectionMode, SourceKind};
 mod file_diff;
+mod git;
+pub(crate) use git::{GitApp, GitLaunch};
 mod source_controls;
 mod workspace;
 use file_diff::paint_file_line;

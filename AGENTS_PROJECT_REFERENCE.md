@@ -3,10 +3,12 @@
 ## Start with the capability
 
 Versus is an offline native file/folder comparison and two-working-copy editing
-application. Desktop Diff is read-only; Merge is editable, with optional Run Diff.
-The base/ours/theirs `--merge` command is a separate noninteractive workflow.
+application. Normal desktop Diff is read-only; Merge is editable, with optional
+Run Diff. Focused Git tools use separate launch state. The base/ours/theirs
+`--merge` command is a separate noninteractive workflow.
 
 - [Architecture guide](docs/ARCHITECTURE.md): human introduction, ownership, flows.
+- [Git tool guide](docs/architecture/git-tools.md): Git difftool/mergetool setup, process protocol, focused views, and code/test routing.
 - [Glossary](GLOSSARY.md): domain names; distinguish comparison/workspace modes.
 - [SRS](docs/SRS.md): current behavior and acceptance requirements.
 - [Platform constraints](docs/architecture/platform.md): vendor patches, native
@@ -25,6 +27,7 @@ operations stay inside their owner. Avoid forwarding modules and global helpers.
 | Task | Start / owned capability | Focused tests |
 | --- | --- | --- |
 | Process/CLI | `src/main.rs`, `src/cli.rs`, `src/core/merge.rs` | `tests/cli.rs`, `tests/unit/cli/`, `tests/unit/core/merge/` |
+| Git Diff/Merge external tools | `src/cli.rs`, `src/git_launch.rs`, `src/app/git.rs`; merge algorithm in `src/core/git_merge.rs` | `tests/unit/cli/`, `tests/unit/app/git/`, `tests/unit/core/git_merge/`; [Git tool guide](docs/architecture/git-tools.md) |
 | Window/frame composition | `src/app.rs`, `src/app/workspace.rs` | `tests/unit/app/`, `tests/unit/app/operating_modes.rs` |
 | Source paths/header/Browse | `src/selection.rs`, `src/app/source_controls.rs`, `src/app/session/source.rs` | `tests/unit/selection/`, `tests/unit/app/`, `tests/unit/app/session_sources_interactions.rs` |
 | Comparison workers/publication | `src/app/session/comparison.rs`; state/order in `src/app/session.rs` | `tests/unit/app/session_sources_lifecycle.rs`, `tests/unit/app/session_sources_interactions.rs`, `tests/unit/app/refresh.rs` |
@@ -105,6 +108,11 @@ cargo test --locked --offline --bin versus app::interactive_view::tests
 cargo test --locked --offline --bin versus app::folder_browser::tests
 cargo test --locked --offline --bin versus app::operating_mode_tests
 cargo test --locked --offline --test file_view_options
+cargo test --locked --offline --bin versus app::git
+cargo test --locked --offline --lib core::git_merge::tests
+cargo test --locked --offline --bin versus cli::tests
+cargo test --locked --offline --test git_merge
+cargo test --locked --offline --test git_protocol
 ```
 
 Unit suite files live under `tests/unit/`, but are registered into their owning

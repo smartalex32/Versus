@@ -3,6 +3,7 @@
 mod app;
 mod cli;
 mod diagnostics;
+mod git_launch;
 mod logo;
 #[cfg(windows)]
 mod native_drop;
@@ -13,6 +14,12 @@ fn main() -> std::process::ExitCode {
     let launch = match cli::parse(std::env::args_os().skip(1)) {
         Ok(cli::Command::Open(launch)) => launch,
         Ok(cli::Command::Merge(request)) => return run_merge(request),
+        Ok(cli::Command::GitDiff(request)) => {
+            return git_launch::run(app::GitLaunch::Diff(request));
+        }
+        Ok(cli::Command::GitMerge(request)) => {
+            return git_launch::run(app::GitLaunch::Merge(request));
+        }
         Ok(cli::Command::Help) => {
             attach_parent_console();
             print!("{}", cli::HELP);

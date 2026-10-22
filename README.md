@@ -331,6 +331,10 @@ in the window. Save IDE buffers before launching: Versus initially reads disk
 content. These commands open Diff; switching to Merge permits explicit saves to
 the selected paths.
 
+Git also has focused entry points that open a dedicated Git Diff or Git Merge
+window. These use their fixed Git snapshots and do not change the normal workspace
+opened by the commands above.
+
 Use the installed executable on your PATH, or replace `versus` with its quoted
 full path (`Versus.exe` on Windows or `Versus.AppImage` on Linux). In PowerShell,
 invoke a quoted executable path with `&`:
@@ -347,13 +351,19 @@ the current repository:
 ```sh
 git config --global diff.tool versus
 git config --global diff.guitool versus
-git config --global difftool.versus.cmd 'versus --diff -- "$LOCAL" "$REMOTE"'
+git config --global difftool.versus.cmd 'versus --git-diff --label "$MERGED" -- "$LOCAL" "$REMOTE"'
+git config --global merge.tool versus
+git config --global mergetool.versus.cmd 'if git cat-file -e ":1:$MERGED" 2>/dev/null; then versus --git-merge --base "$BASE" --local "$LOCAL" --remote "$REMOTE" --output "$MERGED" --label "$MERGED"; else versus --git-merge --no-base --local "$LOCAL" --remote "$REMOTE" --output "$MERGED" --label "$MERGED"; fi'
+git config --global mergetool.versus.trustExitCode true
+git config --global mergetool.versus.hideResolved false
 ```
 
-For an executable outside PATH, set the command with its full path instead:
+For an executable outside PATH, use its quoted full path in both tool commands
+(the example uses Git Bash on Windows):
 
 ```sh
-git config --global difftool.versus.cmd '"C:/Program Files/Versus/Versus.exe" --diff -- "$LOCAL" "$REMOTE"'
+git config --global difftool.versus.cmd '"C:/Program Files/Versus/Versus.exe" --git-diff --label "$MERGED" -- "$LOCAL" "$REMOTE"'
+git config --global mergetool.versus.cmd 'if git cat-file -e ":1:$MERGED" 2>/dev/null; then "C:/Program Files/Versus/Versus.exe" --git-merge --base "$BASE" --local "$LOCAL" --remote "$REMOTE" --output "$MERGED" --label "$MERGED"; else "C:/Program Files/Versus/Versus.exe" --git-merge --no-base --local "$LOCAL" --remote "$REMOTE" --output "$MERGED" --label "$MERGED"; fi'
 ```
 
 Then compare working-tree changes, staged changes, or two revisions:
@@ -369,12 +379,38 @@ comparison, temporarily select folder mode and ask Git to copy working-tree
 files instead of creating symlinks:
 
 ```sh
-git -c difftool.versus.cmd='versus --folder -- "$LOCAL" "$REMOTE"' difftool --tool=versus --dir-diff --no-symlinks
+git -c difftool.versus.cmd='versus --git-diff --folder --label "$MERGED" -- "$LOCAL" "$REMOTE"' difftool --tool=versus --dir-diff --no-symlinks
 ```
 
 The command receives Git's pre-image on the left and post-image on the right.
-See the [Git difftool reference](https://git-scm.com/docs/git-difftool) for revision
-and path options. These commands open the read-only Diff view.
+`$MERGED` is the logical path being compared; `$LOCAL` and `$REMOTE` are Git's
+temporary snapshots. Git Diff selects file or folder comparison automatically;
+`--folder` can be supplied for directory mode. Use `--dir-diff --no-symlinks`
+for a folder comparison. The focused view is read-only and closes before Git
+advances to the next file. See the [Git difftool reference](https://git-scm.com/docs/git-difftool)
+for revision and path options.
+
+For interactive conflicts, run `git mergetool --tool=versus`. Git starts one
+window per conflicted file and supplies Base, Local, Remote, and the partially
+merged result. The three panes are Incoming (Git Remote) on the left, editable
+Result in the middle, and Current (Git Local) on the right. The original Base is
+available as a read-only reference. Source arrows replace the selected Result
+region; manual edits can be marked resolved. Restore Base resets the whole Result
+in one undoable action. **Save and Resolve** becomes available after all known
+conflicts are resolved, and reports success to Git only after the protected save
+succeeds. Git owns file sequencing and staging.
+
+`mergetool.versus.hideResolved=false` keeps full source snapshots available so
+already resolved changes can still be reviewed. If Git does not provide a common
+ancestor, the configured command checks the index for stage 1 and passes
+`--no-base`; otherwise it passes the supplied Base path. Git may supply an empty
+placeholder file when stage 1 is absent, and a supplied empty Base is different
+from an absent Base. On close, choose to keep
+editing or cancel. Cancellation returns failure to Git, which restores its saved
+pre-tool result. Failed saves leave the window open with edits intact. These
+Git-specific windows are separate from the normal GUI Diff/Merge workflow.
+See the [Git tool architecture guide](docs/architecture/git-tools.md) for the
+protocol, path setup, and code ownership.
 
 For a conventional three-way merge, run `--merge` with the common base, ours,
 theirs, and an output path. The command writes a merged text file with conflict
