@@ -30,7 +30,6 @@ fn clicking_either_folder_pane_updates_both_rendered_trees() {
 #[test]
 fn one_sided_rows_render_an_aligned_placeholder() {
     let ctx = egui::Context::default();
-    apply_theme(&ctx);
     let mut app = loaded_app();
     app.session.tree = Some(FolderTree::from_diff(&DirectoryDiff {
         cancelled: false,
@@ -46,14 +45,31 @@ fn one_sided_rows_render_an_aligned_placeholder() {
             state: DirectoryEntryState::LeftOnly,
         }],
     }));
-    let output = render(&mut app, &ctx, vec![]);
-    let names = text_positions(&output, "left-only.step");
-    let placeholders = text_positions(&output, "—");
-    assert_eq!(names.len(), 1);
-    assert_eq!(placeholders.len(), 1);
-    assert_eq!(names[0].y, placeholders[0].y);
-    assert!(placeholders[0].x > 600.0);
-    output.drop_without_applying_deltas();
+    for theme in [
+        Theme::Dark,
+        Theme::Dracula,
+        Theme::Nord,
+        Theme::SolarizedLight,
+    ] {
+        set_theme(&ctx, theme);
+        let output = render(&mut app, &ctx, vec![]);
+        let names = text_positions(&output, "left-only.step");
+        let placeholders = text_positions(&output, "—");
+        assert_eq!(names.len(), 1);
+        assert_eq!(placeholders.len(), 1);
+        assert_eq!(names[0].y, placeholders[0].y);
+        assert!(placeholders[0].x > 600.0);
+        let left_only = Palette::for_context(&ctx).left_only;
+        assert!(output.shapes.iter().any(|shape| {
+            matches!(&shape.shape, egui::Shape::Text(text)
+                if text.galley.text() == "left-only.step" && text.fallback_color == left_only)
+        }));
+        assert!(output.shapes.iter().any(|shape| {
+            matches!(&shape.shape, egui::Shape::Rect(rect)
+                if rect.rect.width() == 3.0 && rect.fill == left_only)
+        }));
+        output.drop_without_applying_deltas();
+    }
 }
 
 #[test]

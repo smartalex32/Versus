@@ -109,7 +109,7 @@ fn run(launch: Option<cli::LaunchRequest>, logging_error: Option<String>) -> efr
     let options = eframe::NativeOptions {
         viewport,
         event_loop_builder: drop_capable_event_loop(),
-        // Retain app zoom without introducing window-position persistence.
+        // Retain app preferences without saving the window position.
         persist_window: false,
         ..Default::default()
     };

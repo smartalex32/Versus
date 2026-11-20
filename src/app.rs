@@ -1,6 +1,8 @@
 //! Native app entry point: window lifecycle and capability composition.
 
-use crate::app::visuals::theme::{Palette, apply_theme, restore_zoom};
+use crate::app::visuals::theme::{
+    THEME_STORAGE_KEY, Theme, apply_theme, restore_theme, restore_zoom,
+};
 use crate::recent::RecentComparison;
 use crate::selection::{self, ComparisonMode, SelectionMode, SourceKind};
 mod file_diff;
@@ -11,6 +13,7 @@ mod drop_targets;
 mod folder_diff;
 mod leave_dialog;
 mod recent_view;
+mod settings;
 mod workspace_status;
 use drop_targets::paint_empty_drop_target;
 mod visuals;
@@ -58,6 +61,7 @@ pub struct VersusApp {
     logged_errors: Vec<String>,
     logo_texture: Option<(bool, egui::TextureHandle)>,
     preferences_context: Option<egui::Context>,
+    settings_open: bool,
     pane_rects: [Rect; 2],
     source_header_rects: [Rect; 2],
     native_drag_position: Option<Pos2>,
@@ -70,6 +74,7 @@ impl Default for VersusApp {
             logged_errors: Vec::new(),
             logo_texture: None,
             preferences_context: None,
+            settings_open: false,
             pane_rects: [Rect::NOTHING; 2],
             source_header_rects: [Rect::NOTHING; 2],
             native_drag_position: None,
@@ -87,6 +92,7 @@ impl VersusApp {
     ) -> Self {
         apply_theme(&cc.egui_ctx);
         if let Some(storage) = cc.storage {
+            restore_theme(&cc.egui_ctx, storage);
             restore_zoom(&cc.egui_ctx, storage);
         }
         let mut app = Self::default();
@@ -104,17 +110,19 @@ impl eframe::App for VersusApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         if let Some(ctx) = &self.preferences_context {
             storage.set_string("versus.zoom", ctx.zoom_factor().to_string());
+            storage.set_string(
+                THEME_STORAGE_KEY,
+                Theme::for_context(ctx).storage_id().into(),
+            );
         }
     }
 
     fn persist_egui_memory(&self) -> bool {
-        // Only the UI scale is retained; compared paths/content remain session-local.
+        // Persist UI preferences explicitly, keeping comparison state session-local.
         false
     }
     fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
-        Palette::new(visuals.dark_mode)
-            .background
-            .to_normalized_gamma_f32()
+        visuals.panel_fill.to_normalized_gamma_f32()
     }
     fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         if let Some(error) = crate::diagnostics::take_error() {

@@ -205,10 +205,15 @@ distinct state changes.
 
 ### 4.7 Presentation and diagnostics
 
-- **UI-01:** The app shall offer light/dark themes, visible status legends,
-  keyboard navigation and native accessibility descriptions for visible tree/file
-  rows. File panes shall support keyboard scrolling; toolbar actions shall activate
-  on release with press feedback and tooltips.
+- **UI-01:** The header shall open a Settings modal with a single Theme setting.
+  Dark, Light, Dracula, Nord and Solarized Light shall apply immediately to the
+  interface, file and folder comparison highlights, and status legends. Done or
+  Escape shall close the modal and keep the selection. The theme shall persist
+  across launches, with Dark the fallback for a missing or unknown preference.
+  The app shall offer visible status legends, keyboard navigation and native
+  accessibility descriptions for visible tree/file rows. File panes shall support
+  keyboard scrolling. Toolbar actions shall activate on release with press
+  feedback and tooltips.
 - **UI-02:** Zoom shall support buttons, reset, Ctrl/Command keyboard shortcuts
   and modified wheel input within 20–500%. Zoom shall persist between launches;
   edited contents and undo histories shall remain session-local.
@@ -267,7 +272,7 @@ distinct state changes.
 | FND-01–06 | `core/search_replace.rs`, `app/search_session.rs`, `app/folder_browser.rs`, `app/folder_browser/search_state.rs`, `app/search_result_rows.rs` | Search/session unit tests; modal, streaming, replacement and batch-history tests |
 | SAV-01–04 | `core/work_files.rs`, `core/save.rs`, `app/interactive_view/editing_actions.rs`, `app/folder_browser/save.rs` | Core/interactive save tests; UI preview, retained-save and failure tests |
 | CLI-01–03 | `cli.rs`, `main.rs`, `core/merge.rs` | Parser tests; `tests/cli.rs`; core merge insertion/overlap/conflict regressions |
-| UI-01–03, LOG-01 | `app/visuals/`, `app/workspace_status.rs`; `diagnostics.rs` | Headless egui geometry/interaction tests; diagnostic queue/rotation tests; native accessibility checks |
+| UI-01–03, LOG-01 | `app/settings.rs`, `app/visuals/`, `app/workspace_status.rs`; `diagnostics.rs` | Headless egui geometry/interaction and theme persistence tests; diagnostic queue/rotation tests; native accessibility checks |
 | NFR-01–04 | Core IO and worker owners | Cancellation, error, size-limit and no-follow tests; source review; mounted-share/manual responsiveness checks |
 | NFR-05–07 | `.cargo/config.toml`, Cargo manifest, vendor patches, scripts and workflows | Offline format/test/release build; Windows CI; Linux baseline packaging, glibc/FIPS checks and Xvfb/nxagent GUI smoke tests |
 

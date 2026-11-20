@@ -59,7 +59,7 @@ fn themed_buttons_use_pointer_cursor_without_overriding_disabled_or_text_fields(
 }
 
 #[test]
-fn theme_toggle_updates_both_views_without_losing_state() {
+fn settings_previews_each_theme_in_both_views_without_losing_state() {
     for file_mode in [false, true] {
         let ctx = egui::Context::default();
         apply_theme(&ctx);
@@ -70,20 +70,29 @@ fn theme_toggle_updates_both_views_without_losing_state() {
             app.session.file_view = Some(loaded_file_view());
         }
         let generation = app.session.scroll_generation;
-        for (action, expected_dark) in [
-            ("Switch to light mode", false),
-            ("Switch to dark mode", true),
+        let output = render(&mut app, &ctx, vec![]);
+        let settings = ctx.read_response(egui::Id::new("Settings")).unwrap().rect;
+        assert!(settings.right() <= 1190.0 && settings.left() > 1100.0 && settings.bottom() < 45.0);
+        assert!(text_positions(&output, "Settings").is_empty());
+        output.drop_without_applying_deltas();
+        click(&mut app, &ctx, settings.center());
+
+        let mut backgrounds = std::collections::HashSet::new();
+        let mut highlights = std::collections::HashSet::new();
+        for (theme, expected_dark) in [
+            (Theme::Dracula, true),
+            (Theme::Nord, true),
+            (Theme::SolarizedLight, false),
+            (Theme::Light, false),
+            (Theme::Dark, true),
         ] {
             let output = render(&mut app, &ctx, vec![]);
-            let toggle = ctx.read_response(egui::Id::new(action)).unwrap().rect;
-            assert!(toggle.right() <= 1190.0 && toggle.left() > 1100.0 && toggle.bottom() < 45.0);
-            assert!(
-                text_positions(&output, action).is_empty(),
-                "Theme action must use only an icon"
-            );
+            let option = text_centers(&output, theme.label())[0];
             output.drop_without_applying_deltas();
-            click(&mut app, &ctx, toggle.center());
+            click(&mut app, &ctx, option);
             let output = render(&mut app, &ctx, vec![]);
+            assert!(app.settings_open);
+            assert_eq!(Theme::for_context(&ctx), theme);
             assert_eq!(ctx.theme() == egui::Theme::Dark, expected_dark);
             assert_eq!(app.logo_texture.as_ref().unwrap().0, expected_dark);
             assert_eq!(app.session.file_view.is_some(), file_mode);
@@ -94,17 +103,114 @@ fn theme_toggle_updates_both_views_without_losing_state() {
             );
             assert_eq!(app.session.scroll_generation, generation);
             let neutral = if file_mode { "unchanged" } else { "model.step" };
-            let palette = Palette::new(expected_dark);
-            for shape in &output.shapes {
-                if let egui::Shape::Text(text) = &shape.shape {
-                    if text.galley.text() == neutral {
-                        assert_eq!(text.fallback_color, palette.muted);
-                    }
-                }
+            let palette = Palette::for_context(&ctx);
+            assert!(backgrounds.insert(palette.background));
+            assert!(highlights.insert(palette.changed));
+            assert!(output.shapes.iter().any(|shape| {
+                matches!(&shape.shape, egui::Shape::Text(text)
+                    if text.galley.text() == neutral && text.fallback_color == palette.muted)
+            }));
+            assert_eq!(
+                eframe::App::clear_color(&app, &ctx.global_style().visuals),
+                palette.background.to_normalized_gamma_f32(),
+            );
+            if file_mode {
+                assert!(output.shapes.iter().any(|shape| {
+                    matches!(&shape.shape, egui::Shape::Text(text)
+                        if text.galley.text() == "old value"
+                            && text.galley.job.sections[0].format.color == palette.changed)
+                }));
             }
             output.drop_without_applying_deltas();
         }
+
+        let output = render(&mut app, &ctx, vec![]);
+        let nord = text_centers(&output, "Nord")[0];
+        let done = text_centers(&output, "Done")[0];
+        output.drop_without_applying_deltas();
+        click(&mut app, &ctx, nord);
+        if file_mode {
+            click(&mut app, &ctx, done);
+        } else {
+            render(
+                &mut app,
+                &ctx,
+                vec![egui::Event::Key {
+                    key: egui::Key::Escape,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+            )
+            .drop_without_applying_deltas();
+        }
+        assert!(!app.settings_open);
+        assert_eq!(Theme::for_context(&ctx), Theme::Nord);
     }
+}
+
+#[test]
+fn theme_preference_survives_relaunch_and_unknown_values_use_dark() {
+    let mut storage = ZoomStorage::default();
+    let mut launch = |stored: Option<&str>| {
+        if let Some(stored) = stored {
+            storage.set_string(THEME_STORAGE_KEY, stored.into());
+        } else {
+            storage.remove_string(THEME_STORAGE_KEY);
+        }
+        let ctx = egui::Context::default();
+        let mut creation = eframe::CreationContext::_new_kittest(ctx.clone());
+        creation.storage = Some(&storage);
+        (VersusApp::new(&creation, None), ctx)
+    };
+
+    for (stored, expected) in [
+        (None, Theme::Dark),
+        (Some("unknown"), Theme::Dark),
+        (Some("solarized-light"), Theme::SolarizedLight),
+    ] {
+        let (mut app, ctx) = launch(stored);
+        assert_eq!(Theme::for_context(&ctx), expected);
+        let mut saved = ZoomStorage::default();
+        eframe::App::save(&mut app, &mut saved);
+        let restarted = launch(saved.get_string(THEME_STORAGE_KEY).as_deref());
+        assert_eq!(Theme::for_context(&restarted.1), expected);
+    }
+}
+
+#[test]
+fn settings_can_be_opened_and_changed_with_the_keyboard() {
+    let ctx = egui::Context::default();
+    apply_theme(&ctx);
+    let mut app = VersusApp::default();
+    render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+    let settings_button = egui::Id::new("Settings");
+    ctx.memory_mut(|memory| memory.request_focus(settings_button));
+    let press = |app: &mut VersusApp, key| {
+        render(
+            app,
+            &ctx,
+            vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        )
+        .drop_without_applying_deltas();
+    };
+
+    press(&mut app, egui::Key::Enter);
+    assert!(app.settings_open);
+    render(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+    press(&mut app, egui::Key::Tab);
+    press(&mut app, egui::Key::Space);
+    assert_eq!(Theme::for_context(&ctx), Theme::Light);
+    press(&mut app, egui::Key::Escape);
+    assert!(!app.settings_open);
+    assert!(ctx.memory(|memory| memory.has_focus(settings_button)));
 }
 
 #[test]

@@ -232,7 +232,7 @@ fn wheel_zoom_is_not_applied_twice_during_a_layout_retry() {
 }
 
 #[test]
-fn zoom_is_restored_and_only_scale_is_saved() {
+fn zoom_is_restored_and_only_ui_preferences_are_saved() {
     let ctx = egui::Context::default();
     let mut storage = ZoomStorage::default();
     storage.set_string("versus.zoom", "1.4".into());
@@ -242,7 +242,7 @@ fn zoom_is_restored_and_only_scale_is_saved() {
     assert_eq!(ctx.zoom_factor(), 1.4);
     storage.0.clear();
     eframe::App::save(&mut app, &mut storage);
-    assert_eq!(storage.0.len(), 1);
+    assert_eq!(storage.0.len(), 2);
     assert_eq!(storage.get_string("versus.zoom").as_deref(), Some("1.4"));
     assert!(!eframe::App::persist_egui_memory(&app));
     for value in ["NaN", "inf", "-1", "0", "6", "broken"] {

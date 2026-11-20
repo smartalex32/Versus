@@ -428,15 +428,8 @@ fn comparison_mode_buttons_stay_centered_with_icons_in_both_themes() {
                 assert!(folder.right() < file.left());
                 assert!(file.right() < screen.right());
                 assert!(logo.right() < folder.left());
-                let theme_button = ctx
-                    .read_response(egui::Id::new(if theme == egui::Theme::Dark {
-                        "Switch to light mode"
-                    } else {
-                        "Switch to dark mode"
-                    }))
-                    .unwrap()
-                    .rect;
-                assert!(file.right() < theme_button.left());
+                let settings_button = ctx.read_response(egui::Id::new("Settings")).unwrap().rect;
+                assert!(file.right() < settings_button.left());
                 for (label, rect) in [("Folder Diff", folder), ("File Diff", file)] {
                     assert!(screen.contains_rect(rect));
                     let text = output

@@ -122,7 +122,13 @@ impl VersusApp {
             });
         self.session.sync_folder_merge_diff();
         self.session.sync_working_folder_diff(ui.ctx());
-        self.drag_and_drop(ui);
+        if self.settings_open {
+            self.native_drag_position = None;
+            self.drop_hover_side = None;
+            self.settings_dialog(ui.ctx());
+        } else {
+            self.drag_and_drop(ui);
+        }
         self.merge_exit_dialog(ui.ctx());
     }
 
