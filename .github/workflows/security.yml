@@ -36,6 +36,12 @@ jobs:
       - uses: github/codeql-action/analyze@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4
         with:
           category: /language:${{ matrix.language }}
+          output: ${{ runner.temp }}/codeql-results
+      - name: Fail on high or critical CodeQL findings
+        run: |
+          for report in "$RUNNER_TEMP"/codeql-results/*.sarif; do
+            jq -e -f scripts/check-codeql-severity.jq "$report"
+          done
 
   supply-chain:
     name: Cargo dependencies, SBOM and secrets
