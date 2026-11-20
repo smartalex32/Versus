@@ -4,7 +4,7 @@ use super::session::{ComparisonJob, FileJob, LoadedFile, SourceJob};
 use super::*;
 use crate::app::session::FileView;
 use crate::app::visuals::status::StatusIcon;
-use crate::app::visuals::theme::ROW_HEIGHT;
+use crate::app::visuals::theme::{Palette, ROW_HEIGHT};
 use crate::recent::RecentComparisons;
 use eframe::Storage;
 use versus::ComparisonProgress;

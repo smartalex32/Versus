@@ -5,7 +5,7 @@ use crate::app::visuals::icons::{ToolbarIcon, icon_button};
 use crate::app::visuals::panels::{
     comparison_mode_button, left_elided_path, paint_side_label, split_rect,
 };
-use crate::app::visuals::theme::{Palette, comparison_font, control_extent, set_theme};
+use crate::app::visuals::theme::{Palette, comparison_font, control_extent};
 
 impl VersusApp {
     pub(super) fn header(&mut self, ui: &mut egui::Ui) {
@@ -83,32 +83,10 @@ impl VersusApp {
                 ))
                 .layout(egui::Layout::right_to_left(egui::Align::Center)),
         );
-        let dark = ui.visuals().dark_mode;
-        if icon_button(
-            &mut controls_ui,
-            if dark {
-                ToolbarIcon::Sun
-            } else {
-                ToolbarIcon::Moon
-            },
-            true,
-            if dark {
-                "Switch to light mode"
-            } else {
-                "Switch to dark mode"
-            },
-        )
-        .clicked()
-        {
-            set_theme(
-                ui.ctx(),
-                if dark {
-                    egui::Theme::Light
-                } else {
-                    egui::Theme::Dark
-                },
-            );
-            ui.ctx().request_repaint();
+        let settings = icon_button(&mut controls_ui, ToolbarIcon::Settings, true, "Settings");
+        if settings.clicked() {
+            settings.request_focus();
+            self.settings_open = true;
         }
         if self.session.interactive.is_some()
             && (self.session.merge_mode || self.session.merge_file_open)

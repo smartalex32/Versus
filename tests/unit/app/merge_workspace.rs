@@ -265,7 +265,7 @@ fn merge_folder_expansion_and_scrolling_are_independent() {
 }
 
 #[test]
-fn merge_run_diff_checkbox_is_before_theme_in_the_header() {
+fn merge_run_diff_checkbox_is_before_settings_in_the_header() {
     for theme in [egui::Theme::Dark, egui::Theme::Light] {
         for zoom in [1.0, 2.0] {
             let ctx = egui::Context::default();
@@ -277,20 +277,13 @@ fn merge_run_diff_checkbox_is_before_theme_in_the_header() {
             let output = render(&mut app, &ctx, vec![]);
             let run = text_positions(&output, "Run Diff");
             assert_eq!(run.len(), 1);
-            let theme_button = ctx
-                .read_response(egui::Id::new(if theme == egui::Theme::Dark {
-                    "Switch to light mode"
-                } else {
-                    "Switch to dark mode"
-                }))
-                .unwrap()
-                .rect;
+            let settings_button = ctx.read_response(egui::Id::new("Settings")).unwrap().rect;
             let mode = ctx.read_response(egui::Id::new("File Diff")).unwrap().rect;
             assert!(
                 run[0].x > mode.right(),
                 "Run Diff overlaps the centered file button"
             );
-            assert!(run[0].x < theme_button.left());
+            assert!(run[0].x < settings_button.left());
             assert!(run[0].y >= mode.top() && run[0].y < mode.bottom());
             output.drop_without_applying_deltas();
             click(&mut app, &ctx, run[0] + egui::vec2(3.0, 3.0));

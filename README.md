@@ -40,7 +40,7 @@ without changing Diff preferences. Show only differences hides unchanged lines
 without removing them from the working copies. Turn the filter off to edit a
 selection that spans hidden lines.
 
-Run Diff sits in the header beside the theme button; when enabled, the refresh
+Run Diff sits in the header beside Settings. When enabled, the refresh
 icon appears immediately to its right. Merge keeps New comparison (+) on the left
 of the button line, followed by a magnifying-glass **Find and Replace** icon in
 file and folder workspaces. Zoom remains on the right. With Run Diff enabled, the
@@ -288,9 +288,11 @@ Back remains available for files opened from a folder comparison. Line endings a
 normalized when **Ignore line endings** is selected. Diff mode remains read-only;
 only explicit Merge saves write working copies.
 
-The sun/moon icon at the upper right switches between light and dark themes in
-either view. The logo and window icon preserve the blue half and use a white half
-in dark mode or the original dark half in light mode.
+Open **Settings** with the gear in the upper-right corner and choose **Dark**,
+**Light**, **Dracula**, **Nord**, or **Solarized Light**. The interface and
+comparison highlights update as soon as you select a theme. Close Settings with
+**Done** or **Esc**. Versus remembers your choice across launches and defaults
+to Dark.
 
 The toolbar places **Zoom** and its percentage immediately before adjacent
 magnifying-glass **−** and **+** buttons, just left of **Show only differences**.

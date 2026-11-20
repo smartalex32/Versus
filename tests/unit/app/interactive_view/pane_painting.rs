@@ -1,7 +1,7 @@
 //! Editable pane layout, scroll behavior, and transfer-track painting.
 
 use super::*;
-use crate::app::visuals::theme::{Palette, set_theme};
+use crate::app::visuals::theme::{Palette, Theme, set_theme};
 
 #[test]
 fn merge_editor_keeps_raw_tabs_syntax_and_a_clear_right_transfer_gutter() {
@@ -238,7 +238,7 @@ fn transfer_tracks_are_outside_content_and_follow_independent_source_scrolls() {
     let right: String = (0..35)
         .map(|i| format!("fn block_{i}() {{\n    right_{i}();\n}}\n"))
         .collect();
-    for theme in [egui::Theme::Dark, egui::Theme::Light] {
+    for theme in Theme::ALL {
         for zoom in [1.0, 2.0] {
             for run_diff in [false, true] {
                 let ctx = egui::Context::default();

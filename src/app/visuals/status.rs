@@ -126,7 +126,7 @@ pub(in crate::app) fn state_bar_color(
     ctx: &egui::Context,
 ) -> Color32 {
     let color = state_color(state, palette);
-    if ctx.theme() != egui::Theme::Light {
+    if Theme::for_context(ctx) != Theme::Light {
         return color;
     }
     // Thin bars need saturated shades against the light background.

@@ -350,7 +350,7 @@ impl InteractiveView {
         }
     }
     pub(super) fn shortcuts(&mut self, ui: &mut egui::Ui) {
-        if !self.editing {
+        if !self.editing || !ui.memory(|memory| memory.allows_interaction(ui.layer_id())) {
             return;
         }
         // egui permits extra Shift for less-specific shortcuts, so consume

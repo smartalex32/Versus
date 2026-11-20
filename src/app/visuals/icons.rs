@@ -25,8 +25,7 @@ pub(in crate::app) enum ToolbarIcon {
     Collapse,
     Browse,
     Cancel,
-    Sun,
-    Moon,
+    Settings,
     Differences,
     Whitespace,
     LineEndings,
@@ -341,29 +340,19 @@ pub(in crate::app) fn icon_button_content(
                 Some(&DirectoryEntryKind::Directory),
                 color,
             ),
-            ToolbarIcon::Sun => {
-                ui.painter().circle_filled(center, 4.0, color);
-                for index in 0..8 {
-                    let angle = index as f32 * std::f32::consts::TAU / 8.0;
-                    let direction = egui::vec2(angle.cos(), angle.sin());
-                    ui.painter().line_segment(
-                        [center + direction * 7.2, center + direction * 10.2],
-                        Stroke::new(1.2, color),
-                    );
-                }
-            }
-            ToolbarIcon::Moon => {
-                let arc: Vec<_> = (0..=24)
-                    .map(|step| {
-                        let angle = (60.0 + step as f32 * 240.0 / 24.0).to_radians();
-                        point(angle.cos() * 7.0, angle.sin() * 7.0)
+            ToolbarIcon::Settings => {
+                let outline = (0..8)
+                    .flat_map(|tooth| {
+                        [(-0.38, 6.0), (-0.24, 8.0), (0.24, 8.0), (0.38, 6.0)].map(
+                            |(offset, radius)| {
+                                let angle = (tooth as f32 + offset) * std::f32::consts::TAU / 8.0;
+                                point(angle.cos() * radius, angle.sin() * radius)
+                            },
+                        )
                     })
-                    .chain((0..=16).map(|step| {
-                        let angle = (-90.0 - step as f32 * 180.0 / 16.0).to_radians();
-                        point(3.5 + angle.cos() * 5.0, angle.sin() * 6.0)
-                    }))
                     .collect();
-                ui.painter().add(egui::Shape::closed_line(arc, stroke));
+                ui.painter().add(egui::Shape::closed_line(outline, stroke));
+                ui.painter().circle_stroke(center, 2.6, stroke);
             }
             ToolbarIcon::Cancel => {
                 ui.painter()

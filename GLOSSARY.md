@@ -12,6 +12,9 @@ _Avoid_: workspace mode when referring to source type
 The choice of read-only Diff or editable Merge for the current sources.
 _Avoid_: comparison mode when referring to editability
 
+**Theme**:
+The app-wide color palette for the Versus interface and comparison highlights.
+
 **Session**:
 The current sources, comparison results, retained edits, and navigation state.
 Starting a new comparison replaces the session.
