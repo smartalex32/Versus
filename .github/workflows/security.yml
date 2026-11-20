@@ -1,0 +1,73 @@
+name: Security
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '23 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  codeql:
+    name: CodeQL (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [rust, actions]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: github/codeql-action/init@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          config: |
+            paths-ignore:
+              - vendor
+      - uses: github/codeql-action/analyze@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4
+        with:
+          category: /language:${{ matrix.language }}
+
+  supply-chain:
+    name: Cargo dependencies, SBOM and secrets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install Trivy
+        working-directory: ${{ runner.temp }}
+        run: |
+          curl --fail --silent --show-error --location --retry 3 -o trivy.tar.gz \
+            https://github.com/aquasecurity/trivy/releases/download/v0.76.2/trivy_0.76.2_Linux-64bit.tar.gz
+          echo 'bc0fc726e017b8927a62b2d3531d7a84ee01769daf5c99ed866dced54089fdbf  trivy.tar.gz' | sha256sum --check
+          mkdir trivy-bin
+          tar -xzf trivy.tar.gz -C trivy-bin trivy
+          echo "$RUNNER_TEMP/trivy-bin" >> "$GITHUB_PATH"
+      - name: Generate application dependency SBOM
+        run: |
+          # Vendored crates contain their own sample and development lockfiles.
+          mkdir "$RUNNER_TEMP/cargo-input"
+          cp Cargo.toml Cargo.lock "$RUNNER_TEMP/cargo-input/"
+          trivy fs --format cyclonedx --output "$RUNNER_TEMP/versus.cdx.json" "$RUNNER_TEMP/cargo-input"
+          jq -e '.bomFormat == "CycloneDX" and any(.components[]; (.purl // "") | startswith("pkg:cargo/"))' "$RUNNER_TEMP/versus.cdx.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: versus-cargo-sbom
+          path: ${{ runner.temp }}/versus.cdx.json
+          if-no-files-found: error
+      - name: Scan locked crates for high and critical vulnerabilities
+        id: vulnerabilities
+        run: trivy fs --scanners vuln --severity HIGH,CRITICAL --exit-code 1 "$RUNNER_TEMP/cargo-input"
+      - name: Scan the checkout for secrets
+        if: ${{ !cancelled() && steps.vulnerabilities.outcome != 'skipped' }}
+        run: trivy fs --scanners secret --exit-code 1 .
