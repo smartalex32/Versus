@@ -53,3 +53,32 @@ Optional comparison assistance in Merge, independent of editing and transfers.
 The separate base/ours/theirs merge that produces an output file and conflict
 markers without opening the desktop workspace.
 _Avoid_: three-way desktop Merge
+
+**Git Diff**:
+A focused, read-only comparison of sources supplied by Git, including a file list
+when comparing directories.
+
+**Git Merge**:
+Interactive resolution of one conflicted file supplied by Git. Git controls the
+sequence when several files need resolution.
+_Avoid_: repository merge session
+
+**Merge result**:
+The single editable output being assembled in Git Merge, initially containing
+Git's partial merge and any previously saved resolution work.
+_Avoid_: Base, either independent working copy in ordinary desktop Merge
+
+**Base**:
+The common ancestor used to understand the changes on both sides of a Git merge,
+when such an ancestor is available.
+_Avoid_: editable result
+
+**Merge region**:
+Corresponding portions of the source versions and merge result treated together
+when reviewing a change or choosing its final content.
+_Avoid_: structural chunk
+
+**Unresolved conflict**:
+A merge region whose final content still requires a source choice or explicit
+confirmation after manual editing.
+_Avoid_: any difference between sources

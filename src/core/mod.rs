@@ -3,6 +3,7 @@ mod compare;
 mod directory;
 mod error;
 mod file_view;
+pub mod git_merge;
 pub mod interactive;
 mod lazy_directory;
 mod merge;

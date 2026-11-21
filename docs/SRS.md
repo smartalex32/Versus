@@ -1,13 +1,13 @@
 # Versus Software Requirements Specification
 
-Version 1.0 · 2026-10-16
+Version 1.1 · 2026-10-21
 
 ## 1. Purpose and baseline
 
 This SRS defines the current supported behavior of Versus for implementation,
-maintenance, and regression review. It is derived from the merged application,
-its tests, release workflows, and README at `3ea3e0fa`, with the unused desktop
-three-way interfaces removed by the accompanying audit. It does not turn ideas
+maintenance, and regression review. Version 1.0 recorded the audited application
+baseline from `3ea3e0fa`; version 1.1 adds the focused Git difftool and mergetool
+workflows. It does not turn ideas
 in the [original PRD](PRD.md) into release commitments. Where that historical
 roadmap conflicts with this document, this document describes the current scope.
 
@@ -19,9 +19,10 @@ automated acceptance test or that every supported platform was tested locally.
 
 Versus is a native, offline desktop workspace for engineers comparing local files
 and directories, editing two text working copies, and explicitly saving changes.
-It also provides a separate noninteractive three-way merge command for terminal,
-Git, and IDE callers. A user needs filesystem access to the chosen sources and
-write access to a save destination; no Versus account is required.
+It also provides focused Git Diff and per-file interactive Git Merge windows,
+alongside a separate noninteractive three-way merge command. A user needs
+filesystem access to the chosen sources and write access to a save destination;
+no Versus account is required.
 
 Supported release targets are Windows 10/11 x86-64 and Linux x86-64. Linux
 distributions provide separate glibc 2.35 and 2.28 builds. macOS can be used for
@@ -42,6 +43,9 @@ mounting, and availability of those paths belong to the operating system.
 | Chunk | Heuristically recognized structural block or blank-line paragraph. |
 | Search transaction | Validated byte edits applied to working copies as one undoable batch. |
 | CLI merge | Base/ours/theirs calculation that writes one output without opening the GUI. |
+| Git Diff | Read-only fixed-source comparison launched with Git's difftool protocol. |
+| Git Merge | Per-file Git mergetool workflow with read-only snapshots and one editable Result. |
+| Merge Result | Git's partial merge file as loaded at launch, retained as the save baseline. |
 
 The initial workspace is Folder Diff. Selecting File/Folder starts a fresh
 session; switching Diff/Merge retains the current sources and editable session.
@@ -202,6 +206,27 @@ distinct state changes.
   shall be bounded UTF-8 text; BOM and line endings shall be normalized for merge.
   The output shall be refused if it exists unless overwrite is explicit. Exit
   codes shall be 0 for clean output, 1 for written conflicts, and 2 for errors.
+- **CLI-04:** `versus --git-diff [--diff | --folder] [--label TEXT] -- LEFT RIGHT`
+  shall open a focused read-only Git comparison. Without a mode flag it shall infer
+  file or folder mode. Git Diff shall preserve source order (pre-image left,
+  post-image right), support missing file sides supplied by Git as empty inputs,
+  and provide search, comparison options, difference navigation, and a file list
+  for directory comparisons. `--wait` shall be accepted for tool compatibility.
+- **CLI-05:** `versus --git-merge (--base BASE | --no-base) --local LOCAL
+  --remote REMOTE --output MERGED [--label TEXT]` shall open a focused editor for
+  one Git merge invocation. Incoming (Remote) shall be left, editable Result shall
+  be centered, and Current (Local) shall be right. Result shall initially preserve
+  Git's existing partially merged contents. Original Base shall be a read-only
+  reference when supplied, with Restore Base as one undoable Result reset. Source
+  arrows shall replace the mapped Result region; both sources may be kept only by
+  an explicit ordered choice. Manual conflict resolution shall be explicit.
+  Save and Resolve shall require all known conflicts to be resolved and a successful
+  protected save; only then shall the process return success. Cancellation shall
+  return failure. Git shall own invocation sequencing and staging.
+- **CLI-06:** Git-specific launches shall use separate app state and focused views.
+  They shall not change ordinary GUI launches, existing GUI Diff/Merge transitions,
+  two-pane insertion-at-caret behavior, or the existing noninteractive `--merge`
+  command.
 
 ### 4.7 Presentation and diagnostics
 
@@ -267,6 +292,8 @@ distinct state changes.
 | FND-01–06 | `core/search_replace.rs`, `app/search_session.rs`, `app/folder_browser.rs`, `app/folder_browser/search_state.rs`, `app/search_result_rows.rs` | Search/session unit tests; modal, streaming, replacement and batch-history tests |
 | SAV-01–04 | `core/work_files.rs`, `core/save.rs`, `app/interactive_view/editing_actions.rs`, `app/folder_browser/save.rs` | Core/interactive save tests; UI preview, retained-save and failure tests |
 | CLI-01–03 | `cli.rs`, `main.rs`, `core/merge.rs` | Parser tests; `tests/cli.rs`; core merge insertion/overlap/conflict regressions |
+| CLI-04 | `cli.rs`, `main.rs`, `app/git.rs`, `app/git/diff.rs` | CLI parser suite; focused Git Diff tests under `tests/unit/app/git/`; ordinary GUI regression suites |
+| CLI-05–06 | `cli.rs`, `git_launch.rs`, `app/git/merge.rs`, `app/git/merge/view.rs`, `core/git_merge.rs` | CLI parser suite; Git merge model and view suites under `tests/unit/core/git_merge/` and `tests/unit/app/git/`; `tests/git_merge.rs`, `tests/git_protocol.rs`; ordinary GUI regression suites |
 | UI-01–03, LOG-01 | `app/visuals/`, `app/workspace_status.rs`; `diagnostics.rs` | Headless egui geometry/interaction tests; diagnostic queue/rotation tests; native accessibility checks |
 | NFR-01–04 | Core IO and worker owners | Cancellation, error, size-limit and no-follow tests; source review; mounted-share/manual responsiveness checks |
 | NFR-05–07 | `.cargo/config.toml`, Cargo manifest, vendor patches, scripts and workflows | Offline format/test/release build; Windows CI; Linux baseline packaging, glibc/FIPS checks and Xvfb/nxagent GUI smoke tests |
@@ -280,10 +307,12 @@ substitute for those checks. Specific evidence for this audit belongs in
 
 ## 7. Scope exclusions
 
-The current desktop has no Base pane, three-way conflict-resolution editor,
-automatic conflict merge, manual chunk management, manually ignored line ranges,
-or separate replacement preview/Apply workflow. It has no general Save As workflow,
-session-content persistence, folder synchronization, remote protocol client,
-binary/hex editor, image/office/PDF comparison, plugin execution, or Git repository
-management. The CLI three-way merge and external Git/IDE difftool invocation
-remain supported. Proposed additions require their own requirements and review.
+The normal desktop workflow has no Base pane or three-way conflict-resolution
+editor; those are limited to the explicit per-file Git Merge launch. Git Merge
+does not provide repository management, multi-file orchestration, or staging.
+Versus also has no automatic conflict merge, manual chunk management, manually
+ignored line ranges, separate replacement preview/Apply workflow, general Save
+As workflow, session-content persistence, folder synchronization, remote protocol
+client, binary/hex editor, image/office/PDF comparison, or plugin execution. The
+existing noninteractive `--merge` command remains separate. Proposed additions
+require their own requirements and review.

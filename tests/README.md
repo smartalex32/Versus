@@ -12,6 +12,8 @@ filters continue to work.
 | Path | Purpose |
 | --- | --- |
 | `unit/cli/` | CLI parsing and command behavior registered under `cli` |
+| `unit/app/git/` | Focused Git Diff/Merge app launch, rendering, protected saving, and controls |
+| `unit/core/git_merge/` | UI-independent Git merge region mapping, conflict ledger, and undo/redo |
 | `unit/core/` | UI-independent comparison, editing, search, filesystem, and save rules |
 | `unit/app/` | App workflows, session behavior, visuals, and operating-mode transitions |
 | `unit/app/interactive_view/` | Editor state, rendering, projections, navigation, and editing behavior |
@@ -42,6 +44,11 @@ cargo test --locked --offline --lib core::file_view
 cargo test --locked --offline --bin versus app::interactive_view::tests
 cargo test --locked --offline --bin versus app::folder_browser::tests
 cargo test --locked --offline --bin versus app::operating_mode_tests
+cargo test --locked --offline --bin versus app::git
+cargo test --locked --offline --lib core::git_merge::tests
+cargo test --locked --offline --bin versus cli::tests
+cargo test --locked --offline --test git_merge
+cargo test --locked --offline --test git_protocol
 ```
 
 Integration tests remain Cargo targets selected by filename:
